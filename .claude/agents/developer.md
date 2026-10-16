@@ -13,7 +13,7 @@ One of:
 
 - a branch plus a tester report or pr-reviewer findings to address;
 - a failing CI run on a branch;
-- a bug issue number (then cut `fix/<n>-<slug>` from `develop`).
+- a bug issue number (then cut `fix/<n>-<slug>` from `develop`; you are then the builder, see below).
 
 Read `CLAUDE.md`, the issue the branch belongs to (`gh issue view <n>`), and `CONTEXT.md` terms relevant to the change.
 
@@ -29,6 +29,12 @@ Read `CLAUDE.md`, the issue the branch belongs to (`gh issue view <n>`), and `CO
 
 ## Hand back
 
-End your run with this hand-back; the tech lead posts it as a comment on the issue.
+End your run with this hand-back; the tech lead posts it as a comment on the PR if one exists, otherwise on the issue.
 For each finding you were given: fixed (with the test that proves it), or not fixed (with why).
 Then the branch and final commit, and the result of the full check suite.
+
+## When building a bug issue
+
+You are then the builder.
+Besides the above, deliver a criterion-by-criterion map (or the reproduction test that fails before the fix and passes after) in your hand-back.
+Update the milestone's marker in `docs/plan/v1.md` in the same branch by the same rule as `senior-developer`: `[~]` if this is the first PR of the milestone, `[x]` if it closes the milestone's last sub-issue.

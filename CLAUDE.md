@@ -24,6 +24,9 @@ Pick the lowest-numbered open sub-issue of the earliest open milestone unless th
 **Test-driven, always.**
 Write the failing test first, make it pass, then refactor.
 An issue is closed only by a merged PR whose CI is green and whose tests cover the issue's acceptance criteria; never close an issue by hand while tests are missing or failing.
+A spike's deliverable is a committed report under `docs/spikes/` plus a decision or ADR, which the tester judges by reading.
+Any supporting code, such as a benchmark harness, still gets tests.
+Throwaway exploration code lives under `docs/spikes/<issue>-<slug>/` in the PR so it is not lost when the branch is deleted, and never in the packages.
 
 **Branches** (git-flow):
 
@@ -33,7 +36,8 @@ An issue is closed only by a merged PR whose CI is green and whose tests cover t
 - `release/vX.Y.Z`: cut from `develop` when a version is complete, only fixes land on it, merged into `main` (tagged) and back into `develop`.
 - `hotfix/vX.Y.Z`: cut from `main` for urgent fixes, merged into `main` and `develop`.
 
-**Commits** follow Conventional Commits: `type(scope): imperative subject` with types `feat`, `fix`, `test`, `refactor`, `docs`, `chore`, `ci`, `build`, `perf`; scope is the package (`memory`, `perception`, `web`...), or `agents`, `ci`, `repo` or `docs` for repo-wide work.
+**Commits** follow Conventional Commits: `type(scope): imperative subject` with types `feat`, `fix`, `test`, `refactor`, `docs`, `chore`, `ci`, `build`, `perf`; scope is the package (`memory`, `perception`, `web`...) or `agents`, `ci`, `repo`, `docs`.
+The scope may be omitted only for a change that is genuinely repo-wide with no better scope.
 Reference the issue in the body (`Refs #12`); the PR, not the commit, closes it (`Closes #12` in the PR description).
 
 **No agent attribution anywhere.**
@@ -46,27 +50,28 @@ The PR title must be a Conventional Commit `type(scope): subject`, because it be
 The squash commit body is a short summary plus `Closes #<n>`, without the template checklist.
 Required CI checks must pass before merging; nobody pushes directly to `main` or `develop`.
 Until CI exists (issue #8), "CI is green" is replaced by "the tester ran the full local suite and it passed".
+When no checks exist for the change, the tester's verdict on the final commit stands in for CI.
 
 ## The team
 
 The main session is the **tech lead**: it picks the issue, hands it through the team below, relays each agent's report to the next, opens and merges the PR, and keeps the user informed.
 Subagents cannot start other subagents, so all hand-offs go through the tech lead.
 
-| Agent | Model | Role |
-|---|---|---|
-| `senior-developer` | opus | Builds a feature or spike issue test-first on its branch. |
-| `developer` | sonnet | Fixes tester failures, reviewer findings, CI breakages and bug issues, test-first, without widening scope. |
-| `tester` | sonnet | Verifies a branch independently before any PR: full checks, real coverage of each acceptance criterion, end-to-end use. Never edits code. |
-| `pr-reviewer` | opus | Reviews the open PR against the issue, glossary and ADRs, judges product impact, gives a merge verdict. Never edits code. |
+| Agent | Model | Tools | Role |
+|---|---|---|---|
+| `senior-developer` | opus | all (inherited) | Builds a feature or spike issue test-first on its branch. |
+| `developer` | sonnet | all (inherited) | Fixes tester failures, reviewer findings, CI breakages and bug issues, test-first, without widening scope. |
+| `tester` | sonnet | Bash, Read, Grep, Glob | Verifies a branch independently before any PR: full checks, real coverage of each acceptance criterion, end-to-end use. Never edits code. |
+| `pr-reviewer` | opus | Bash, Read, Grep, Glob | Reviews the open PR against the issue, glossary and ADRs, judges product impact, gives a merge verdict. Never edits code. |
 
-`tester` and `pr-reviewer` are read-only by instruction, not by tool restriction: they need Bash for `uv` and `gh`.
+`tester` and `pr-reviewer` have no Edit or Write tools but keep Bash (needed for `uv` and `gh`), so being read-only is ultimately by instruction.
 They must never commit, push, merge or edit files.
 
 Lifecycle of one issue:
 
 1. **Tech lead** runs the session-start routine, picks the next issue, and assigns it: `senior-developer` for `task` and `spike` issues, `developer` for `bug` issues.
 2. **Builder** delivers a pushed branch and a criterion-by-criterion test map, and ends its run with that hand-back.
-   The tech lead posts each builder hand-back as a comment on the issue.
+   The tech lead posts each builder hand-back as a comment on the PR if one exists, otherwise on the issue.
    The builder also updates the milestone's status marker in `docs/plan/v1.md` as part of the same PR: `[~]` in the first PR of a milestone, `[x]` in the PR that closes its last sub-issue.
 3. **`tester`** verifies the branch.
    If not ready, the report goes to `developer`, then back to `tester`, until it is ready.
@@ -76,13 +81,14 @@ Lifecycle of one issue:
 6. **Tech lead** squash-merges (`gh pr merge --squash --delete-branch`) once CI is green and the verdict is "ready to merge", and confirms the issue closed.
    If GitHub did not auto-close the issue, close it with a comment linking the merged PR.
    The tech lead updates the GitHub wiki (a separate repo) directly when a milestone completes or setup changes.
+   After the user approves a milestone's demo, the tech lead closes the milestone issue with a comment summarising what shipped.
 
 Rules for the loop:
 
 - After the same finding bounces between `developer` and `tester` or `pr-reviewer` three times, or after five round trips in total for one issue, the tech lead stops and brings it to the user.
 - A "do not merge" verdict, or a finding that needs a design change, goes to the user.
 - Escalate to the user, rather than deciding alone, anything that would change an ADR, the glossary's meaning of an existing term, or an issue's acceptance criteria.
-- Post each tester and reviewer verdict as a comment on the PR (or on the issue before the PR exists) so the history is visible on GitHub, without agent attribution.
+- Post each builder hand-back, tester verdict and reviewer verdict as a comment on the PR if one exists, otherwise on the issue, so the history is visible on GitHub, without agent attribution.
 - One issue at a time by default.
   Independent issues may run in parallel only with `isolation: "worktree"` for each builder.
 

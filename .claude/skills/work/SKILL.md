@@ -28,8 +28,12 @@ Give the user a short status: what is merged, what is in flight and at which ste
 
 Take the first that applies:
 
-1. **An open PR exists:** continue its review loop (step 3, from the PR stage): failing CI or blocking reviewer findings go to `developer`; otherwise run `pr-reviewer` if there is no verdict on the latest commit; merge if CI is green and the verdict is "ready to merge".
-2. **A pushed issue branch has no PR:** if a builder hand-back for its latest commit exists as a comment on the issue, continue from the tester stage; otherwise send it back to `senior-developer` to finish.
+1. **An open PR exists:** read the comments on both the PR and its issue, and decide by the latest activity on the PR head:
+   - a builder or `developer` hand-back newer than the last verdict, with code changed: run `tester`, then `pr-reviewer`;
+   - a `tester` verdict "ready for PR" for the latest commit but no review verdict: run `pr-reviewer`;
+   - the latest review verdict has blocking findings and no newer hand-back: send them to `developer`;
+   - the review verdict on the latest commit is "ready to merge" and CI is green (or the pre-CI rule below is met): merge.
+2. **A pushed issue branch has no PR:** if a builder hand-back for its latest commit exists as a comment on the issue (or the PR), continue from the tester stage; otherwise send it back to its builder to finish, chosen by the issue's label (`senior-developer` for `task` and `spike`, `developer` for `bug`).
 3. **Nothing in flight:** pick the lowest-numbered open sub-issue of the earliest open milestone (or `$ARGUMENTS`), and start it.
 
 ## 3. Drive one issue through the team
@@ -43,11 +47,12 @@ Follow the lifecycle in `CLAUDE.md` exactly:
 5. When CI is green, squash-merge with `gh pr merge --squash --delete-branch` and confirm the issue closed.
    If GitHub did not auto-close it, close it with a comment linking the merged PR.
    Until CI exists (issue #8), "CI is green" means the tester ran the full local suite and it passed.
+   When no checks exist for the change, the tester's verdict on the final commit stands in for CI.
    The PR title is a Conventional Commit `type(scope): subject`; the squash body is a short summary plus `Closes #<n>`, without the template checklist.
 6. The `docs/plan/v1.md` status marker is part of the issue's own PR: the builder marks the milestone `[~]` in its first PR and `[x]` in the PR that closes its last sub-issue.
    The tech lead updates the GitHub wiki (a separate repo) directly when a milestone completes or setup changes.
 
-Post each builder hand-back, tester verdict and reviewer verdict as a comment on the PR (or on the issue before the PR exists).
+Post each builder hand-back, tester verdict and reviewer verdict as a comment on the PR if one exists, otherwise on the issue.
 Give each agent everything it needs in its prompt: the issue number, the branch, and the full report it must act on.
 
 ## 4. Continue or stop
@@ -56,7 +61,7 @@ After a merge, return to step 2 for the next issue.
 
 Stop and report to the user when any of these happens:
 
-- the current milestone's last sub-issue is merged: show how to run the milestone's demo and wait for the user's go-ahead before the next milestone;
+- the current milestone's last sub-issue is merged: show how to run the milestone's demo and wait for the user's go-ahead before the next milestone; once the user approves the demo, close the milestone issue with a comment summarising what shipped;
 - a finding has bounced three times, or the issue has had five round trips in total;
 - the reviewer's verdict is "do not merge", or a finding needs a design change;
 - something would change an ADR, the meaning of a glossary term, or an issue's acceptance criteria;

@@ -15,6 +15,7 @@ You are given one GitHub issue and you deliver it, test-first, on its branch, re
 3. Read the ADRs the issue touches and the code it will sit next to.
    If the issue names prior art in `../../Cognecto/vision-stack/` or `../../Cognecto/phyOS/`, read it before designing.
 4. If an acceptance criterion is ambiguous, contradicts an ADR, or cannot be tested, stop and report that instead of guessing.
+   A spike criterion about producing a decision is not "cannot be tested": it is judged by reading the report.
 
 ## Building
 
@@ -32,11 +33,14 @@ You are given one GitHub issue and you deliver it, test-first, on its branch, re
   No agent attribution of any kind.
 - Push the branch.
   Do not open the PR; the tester verifies first.
+- For a spike, the deliverable is a committed report under `docs/spikes/` plus a decision or ADR, judged by the tester by reading.
+  Supporting code, such as a benchmark harness, still gets tests.
+  Throwaway exploration code lives under `docs/spikes/<issue>-<slug>/` in the PR so it is not lost when the branch is deleted, and never in the packages.
 - Update the milestone's marker in `docs/plan/v1.md` in the same branch: `[~]` if this is the first PR of the milestone, `[x]` if it closes the milestone's last sub-issue.
 
 ## Hand back
 
-End your run with this hand-back; the tech lead posts it as a comment on the issue.
+End your run with this hand-back; the tech lead posts it as a comment on the PR if one exists, otherwise on the issue.
 Report to the tech lead:
 
 1. Branch name and the final commit.
