@@ -28,8 +28,25 @@ Everything lives in one PostgreSQL database (TimescaleDB for time partitioning, 
 
 ## Setup
 
-Not available yet: the project is being scaffolded (milestone M0).
-This section will hold the complete steps to go from a fresh clone to a running stack with sample cameras.
+The project is being scaffolded (milestone M0): the stack runs, but there are no sample cameras yet.
+
+You need Docker with the Compose plugin (v2.24 or newer) and, to work on the code, [uv](https://docs.astral.sh/uv/).
+A GPU is needed only for Triton (the `gpu` profile), and then with NVIDIA's container toolkit.
+
+1. Configure the stack.
+   Copy `.env.example` to `.env` (git ignores it) and set the three passwords it leaves empty, for example each to the output of `openssl rand -hex 24`.
+   Every other variable has a working default, and `.env.example` explains each.
+2. Start it: `docker compose up -d --wait`.
+   This builds the VisionQuery image, starts Postgres (TimescaleDB and pgvector) and MediaMTX, applies the database migrations, and returns once every service is healthy.
+   Postgres listens on `127.0.0.1:15432` (user and database `visionquery`), MediaMTX on `127.0.0.1:8554` (RTSP) and `127.0.0.1:9997` (API, user `visionquery`).
+3. Add what you need with profiles:
+   - `--profile observability`: Prometheus on <http://127.0.0.1:9090> scraping every service, and Grafana on <http://127.0.0.1:3000> (user `admin`) reading it.
+   - `--profile gpu`: Triton on `127.0.0.1:8000` (HTTP) and `8001` (gRPC), on every GPU.
+     On a machine without one, run it on the CPU with `docker compose -f compose.yaml -f compose.no-gpu.yaml --profile gpu up -d --wait`.
+   - `--profile dev`: the fake camera publisher, once it lands (#6).
+4. Stop it with `docker compose down`; add `--volumes` to delete the database and metrics as well.
+
+Every port listens on loopback only unless `VISIONQUERY_BIND_ADDRESS` says otherwise, and each can be moved with its own variable when something on the machine already uses it.
 
 Every VisionQuery process is configured only through environment variables prefixed `VISIONQUERY_`, logs JSON lines to stdout, and serves Prometheus metrics on `/metrics` (port `9100` unless `VISIONQUERY_METRICS_PORT` says otherwise).
 The variables every process reads are listed in [`CLAUDE.md`](CLAUDE.md#architecture); a process that is missing one it needs exits with status 2 after logging which.
