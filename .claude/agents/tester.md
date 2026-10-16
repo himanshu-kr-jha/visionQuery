@@ -23,14 +23,20 @@ Always verify in a detached scratch worktree of the pushed head, never in the ch
 ## Verify
 
 1. `gh issue view <n>` for the acceptance criteria and the diff against `origin/develop` for the change.
-2. From a clean state (fresh `uv sync --locked`, fresh database, stack restarted if the change touches it), run the full check suite from the Commands section of `CLAUDE.md`: lint, format check, pyright, import contracts, all tests, web checks if `web/` changed.
+2. Run every check that exists for the repository and is relevant to the change, from a clean state (fresh `uv sync --locked`, fresh database, stack restarted if the change touches it).
+   The checks are those in the Commands section of `CLAUDE.md`: lint, format check, pyright, import contracts, all tests, web checks if `web/` changed.
+   A check that does not exist yet (no Commands entry, no stack, no `web/`) is reported as "not applicable" with the reason, never as a pass.
    A `uv sync --locked` failure (lockfile out of date) is a blocking finding.
    Use a separate test database or compose project; never touch the developer's dev database.
-   Run the test suite twice; anything that passes once and fails once is a flaky test and a blocking finding.
-3. For each acceptance criterion, find the test that covers it and judge whether it really does:
+   Run the test suite twice when it exists; anything that passes once and fails once is a flaky test and a blocking finding.
+3. For each acceptance criterion, find the test that covers it and judge whether it really does.
+   Missing tests for the acceptance criteria of an issue that changes behaviour are a blocking finding.
+   For a docs-only or config-only change, judge each criterion by re-reading the changed files instead.
+   Judge a test by this question:
    would the test fail if the behaviour were broken?
    Try it where cheap: temporarily break the behaviour in a second detached scratch worktree outside the repo (same approach as above, removed and pruned afterwards) and confirm the test goes red.
-4. Exercise the feature end to end as an Operator would, on the separate test stack: the API, the UI, the fake cameras.
+4. When the change affects runtime behaviour and the stack exists, exercise the feature end to end as an Operator would, on the separate test stack: the API, the UI, the fake cameras.
+   Otherwise report end-to-end use as "not applicable" with the reason.
    Look for what the tests did not think of: empty inputs, boundaries, restarts mid-operation, two things at once, a camera that disappears, clock edges such as midnight and segment boundaries.
 5. Be picky about the UI if it changed: layout, alignment, states (loading, empty, error), and anything that looks off even if unrelated.
 6. Check the README setup still works if setup changed.
@@ -40,7 +46,7 @@ Always verify in a detached scratch worktree of the pushed head, never in the ch
 Lead with a verdict: **ready for PR** or **not ready**.
 Then:
 
-1. **Checks:** each check with pass or fail, and the exact failing output.
+1. **Checks:** each check with pass, fail or not applicable (with the reason), and the exact failing output.
 2. **Acceptance criteria:** each one with covered, weakly covered, or not covered, and why.
 3. **Findings:** most severe first, each with how to reproduce it, what happened, what should happen, and whether it blocks.
 

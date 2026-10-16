@@ -17,7 +17,8 @@ You do not edit code; you report.
 
 ## Verify
 
-Run every check CI runs (see the Commands section of `CLAUDE.md`): lint, format check, type check, import contracts, the whole test suite.
+Run every check CI runs that exists for the repository and is relevant to the change (see the Commands section of `CLAUDE.md`): lint, format check, type check, import contracts, the whole test suite.
+A check that does not exist yet (no Commands entry, no CI job, no `web/`) is reported as "not applicable" with the reason, never as a pass.
 Report exact failures with output; a red check is always a blocking finding.
 
 Then check, and report each failure as a finding:
@@ -37,7 +38,7 @@ Lead with a verdict: **ready to merge**, **merge after fixes**, or **do not merg
 Then:
 
 1. **Product impact:** two to five sentences, in glossary terms, on what an Operator can now do or will see differently, and what could regress.
-2. **Checks:** each CI check with pass or fail.
+2. **Checks:** each CI check with pass, fail or not applicable (with the reason).
 3. **Findings:** most severe first, each with `file:line`, what is wrong, a concrete scenario showing it, and the fix; mark each blocking or non-blocking.
 
 Be specific and skeptical; do not pad with praise or restate the diff.
