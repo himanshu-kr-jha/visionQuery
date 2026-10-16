@@ -36,7 +36,8 @@ REASONER_THROUGH_TOOLS_ID = "reasoner-through-tools"
 
 
 def _lint_imports(cwd: Path, pythonpath: Path | None = None) -> subprocess.CompletedProcess[str]:
-    env = dict(os.environ)
+    # The caller's PYTHONPATH must never decide which tree is analysed.
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
     if pythonpath is not None:
         env["PYTHONPATH"] = str(pythonpath)
     return subprocess.run(
@@ -194,3 +195,48 @@ def test_the_contracts_that_forbid_a_path_see_through_the_memory_package(contrac
 def test_no_reaching_up_follows_indirect_imports() -> None:
     section = _config()[f"importlinter:contract:{NO_REACHING_UP_ID}"]
     assert not section.getboolean("allow_indirect_imports", fallback=False)
+
+
+def test_the_callers_pythonpath_does_not_change_what_is_analysed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tree = tmp_path / "src"
+    (tree / "visionquery" / "perception").mkdir(parents=True)
+    (tree / "visionquery" / "perception" / "violation.py").write_text("import visionquery.api\n")
+    monkeypatch.setenv("PYTHONPATH", str(tree))
+    result = _lint_imports(ROOT)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Contracts: 3 kept, 0 broken." in result.stdout
+
+
+def _modules(contract: str, key: str) -> set[str]:
+    section = _config()[f"importlinter:contract:{contract}"]
+    return {m.strip().removeprefix("visionquery.") for m in section[key].split()}
+
+
+def test_the_reasoner_is_forbidden_every_package_but_itself_and_tools() -> None:
+    forbidden = _modules(REASONER_THROUGH_TOOLS_ID, "forbidden_modules")
+    expected = set(PACKAGES) - {"reasoner", "tools"}
+    assert forbidden == expected, (
+        f"ADR 0009: the reasoner may reach only tools. Add new workspace packages to "
+        f"forbidden_modules of [{REASONER_THROUGH_TOOLS_ID}] in .importlinter "
+        f"(missing: {sorted(expected - forbidden)}, unknown: {sorted(forbidden - expected)})."
+    )
+
+
+def test_perception_and_recorder_contract_matches_claude_md() -> None:
+    # CLAUDE.md: perception and recorder never import reasoner or api. A new package is not
+    # added to either side by default; if it asks or serves questions (like reasoner and api),
+    # add it to forbidden_modules here and in .importlinter, and update CLAUDE.md.
+    sources = _modules(NO_REACHING_UP_ID, "source_modules")
+    forbidden = _modules(NO_REACHING_UP_ID, "forbidden_modules")
+    assert sources == {"perception", "recorder"}, (
+        "CLAUDE.md names only perception and recorder as sources of [no-reaching-up]; "
+        "changing that is a CLAUDE.md change."
+    )
+    assert forbidden == {"reasoner", "api"}, (
+        "CLAUDE.md names reasoner and api as forbidden for perception and recorder; "
+        "a new package that asks or serves questions must be added to forbidden_modules of "
+        f"[{NO_REACHING_UP_ID}] in .importlinter and to this test."
+    )
+    assert sources | forbidden <= set(PACKAGES)

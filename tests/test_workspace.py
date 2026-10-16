@@ -26,7 +26,10 @@ PACKAGES = _members()
 def test_workspace_members_are_the_named_packages() -> None:
     # CLAUDE.md names these seven; a new package is added here deliberately, with its ADR.
     named = {"memory", "tools", "perception", "linker", "recorder", "reasoner", "api"}
-    assert named <= PACKAGES
+    assert named == PACKAGES, (
+        f"missing: {sorted(named - PACKAGES)}, unnamed: {sorted(PACKAGES - named)}; a new "
+        "package must be added here, to CLAUDE.md and to the contracts in .importlinter"
+    )
 
 
 @pytest.mark.parametrize("package", sorted(PACKAGES))
@@ -49,7 +52,9 @@ def test_root_depends_on_every_package() -> None:
 def test_python_version_is_the_same_everywhere() -> None:
     pinned = (ROOT / ".python-version").read_text().strip()
     major_minor = pinned.split(".")
-    assert len(major_minor) == 2, "pin the minor only; uv picks the newest managed patch"
+    assert len(major_minor) == 2, (
+        "pin the minor only; the patch is whichever uv-managed 3.14 is installed"
+    )
     root = _pyproject(ROOT)
     assert root["project"]["requires-python"] == f"=={pinned}.*"
     assert root["tool"]["pyright"]["pythonVersion"] == pinned
@@ -59,8 +64,14 @@ def test_python_version_is_the_same_everywhere() -> None:
         assert project["requires-python"] == f"=={pinned}.*", package
 
 
-def test_the_interpreter_is_uv_managed_so_every_machine_gets_the_same_patch() -> None:
+def test_the_interpreter_is_uv_managed_never_the_systems() -> None:
     assert _pyproject(ROOT)["tool"]["uv"]["python-preference"] == "only-managed"
+
+
+def test_no_one_claims_the_patch_release_is_pinned() -> None:
+    # Only the minor is pinned, so a machine may hold a different 3.14 patch than another.
+    text = (ROOT / "pyproject.toml").read_text().lower()
+    assert "same patch" not in text
 
 
 def test_pyright_brings_its_own_node() -> None:

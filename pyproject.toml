@@ -14,7 +14,7 @@ dependencies = [
 ]
 
 [tool.uv]
-# Only uv-managed interpreters, so every machine and CI runs the same patch release.
+# Only uv-managed interpreters, never the system's; the minor is pinned, the patch is not.
 python-preference = "only-managed"
 
 [tool.uv.workspace]
