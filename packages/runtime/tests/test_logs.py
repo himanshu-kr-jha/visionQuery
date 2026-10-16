@@ -370,3 +370,102 @@ def test_keys_that_only_look_like_credentials_are_left_alone(output: io.StringIO
     assert line["max_tokens"] == 7
     assert line["tokenizer"] == "bpe"
     assert line["secretary"] == "bob"
+
+
+def _foreign_logger(name: str, fmt: str) -> tuple[io.StringIO, logging.Logger, logging.Handler]:
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(logging.Formatter(fmt))
+    library = logging.getLogger(name)
+    library.addHandler(handler)
+    library.propagate = False
+    return stream, library, handler
+
+
+def test_extra_fields_never_reach_a_foreign_formatter_with_a_credential(
+    output: io.StringIO,
+) -> None:
+    stream, library, handler = _foreign_logger("some.library", "%(message)s %(url)s %(password)s")
+    try:
+        library.info("opening", extra={"url": URL, "password": "hunter2"})
+    finally:
+        library.removeHandler(handler)
+        library.propagate = True
+    assert stream.getvalue() == f"opening {SCRUBBED} ***\n"
+
+
+def test_extra_fields_of_a_logger_created_before_configuring_are_scrubbed() -> None:
+    early = logging.getLogger("created.before")
+    stream, library, handler = _foreign_logger("created.before", "%(url)s")
+    configure_logging("recorder", "INFO", stream=io.StringIO())
+    try:
+        early.info("x", extra={"url": URL})
+    finally:
+        library.removeHandler(handler)
+        library.propagate = True
+    assert stream.getvalue() == f"{SCRUBBED}\n"
+
+
+def test_extra_fields_keep_their_type_when_there_is_nothing_to_scrub(
+    output: io.StringIO,
+) -> None:
+    stream, library, handler = _foreign_logger("some.library", "%(count)d %(ratio).1f")
+    try:
+        library.info("x", extra={"count": 3, "ratio": 0.5})
+    finally:
+        library.removeHandler(handler)
+        library.propagate = True
+    assert stream.getvalue() == "3 0.5\n"
+
+
+def test_configuring_twice_wraps_make_record_once() -> None:
+    standard = logging.Logger.makeRecord
+    configure_logging("a", "INFO", stream=io.StringIO())
+    wrapped = logging.Logger.makeRecord
+    configure_logging("a", "INFO", stream=io.StringIO())
+    assert wrapped is not standard
+    assert logging.Logger.makeRecord is wrapped
+    stream, library, handler = _foreign_logger("some.library", "%(url)s")
+    try:
+        library.info("x", extra={"url": URL})
+    finally:
+        library.removeHandler(handler)
+        library.propagate = True
+    assert stream.getvalue() == f"{SCRUBBED}\n"
+
+
+def test_a_credential_argument_is_scrubbed_and_the_arguments_keep_their_shape(
+    output: io.StringIO, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stream, library, handler = _foreign_access_log(_AccessFormatter())
+    try:
+        library.info('%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "GET", URL, "1.1", 200)
+    finally:
+        library.removeHandler(handler)
+        library.propagate = True
+    assert stream.getvalue() == f'127.0.0.1:5000 - "GET {SCRUBBED} HTTP/1.1" 200\n'
+    assert capsys.readouterr().err == ""
+
+
+def test_mapping_arguments_are_scrubbed_per_key(output: io.StringIO) -> None:
+    stream, library, handler = _foreign_logger("some.library", "%(message)s")
+    try:
+        library.info("%(url)s %(n)d", {"url": URL, "n": 2})
+    finally:
+        library.removeHandler(handler)
+        library.propagate = True
+    assert stream.getvalue() == f"{SCRUBBED} 2\n"
+
+
+def test_a_credential_split_between_message_and_argument_is_never_leaked(
+    output: io.StringIO,
+) -> None:
+    stream, library, handler = _foreign_logger("some.library", "%(message)s")
+    try:
+        library.info("login password=%s now", "hunter2")
+        library.info("rtsp://admin:%s@10.0.0.7/s", "hunter2")
+    finally:
+        library.removeHandler(handler)
+        library.propagate = True
+    assert "hunter2" not in stream.getvalue()
+    assert len(stream.getvalue().splitlines()) == 2
