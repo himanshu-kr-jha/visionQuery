@@ -26,7 +26,8 @@ name, and waiting for the advisory lock is logged every few seconds, however lon
 A connection that breaks mid-file leaves its outcome unknown; rerunning is safe.
 
 The command reads `VISIONQUERY_DATABASE__URL` and exits 0 when the schema is up to date, 1
-when a migration failed or the database could not be reached, 2 when its settings are
+when a migration failed or the database could not be connected to (a fixed message by
+category, never libpq's text), 2 when its settings are
 missing or invalid, and 3 when it refused.
 """
 
@@ -53,6 +54,7 @@ __all__ = [
     "LOCK_KEY",
     "LOCK_TIMEOUT",
     "MIGRATIONS",
+    "ConnectionFailedError",
     "MigrationFailedError",
     "MigrationRefusedError",
     "Problem",
@@ -112,6 +114,57 @@ class MigrationFailedError(Exception):
         super().__init__(f"{file} failed and {outcome}")
 
 
+class ConnectionFailedError(Exception):
+    """The database could not be connected to.
+
+    Its message is fixed text by category and never libpq's own, which quotes back the parts of
+    the URL it could not use, and so may hold the password. The host and port are left out for
+    the same reason: a URL can put a secret anywhere.
+    """
+
+    def __init__(self, category: str, cause: str) -> None:
+        self.category = category
+        #: The name of the class of the error that was raised, never its text.
+        self.cause = cause
+        super().__init__(f"could not connect to the database: {category} ({cause})")
+
+
+#: libpq's SQLSTATE for a server that answered and refused.
+_BY_SQLSTATE = {
+    "28P01": "authentication failed",
+    "28000": "authentication failed",
+    "3D000": "database does not exist",
+    "57P03": "server is not accepting connections",
+    "53300": "server has too many connections",
+}
+#: What a client-side failure says, read only to choose a category and never repeated.
+_BY_SYMPTOM = (
+    # A server that answered: a connection failure carries no SQLSTATE, only the FATAL text.
+    ("authentication failed", ("authentication failed", "pg_hba.conf", 'role "')),
+    ("database does not exist", ("does not exist",)),
+    ("server is not accepting connections", ("starting up", "shutting down", "recovery mode")),
+    ("server has too many connections", ("too many clients", "remaining connection slots")),
+    ("host name could not be resolved", ("resolve host", "translate host", "name resolution")),
+    ("timed out", ("timeout expired", "timed out")),
+    (
+        "connection refused or host unreachable",
+        ("refused", "unreachable", "no such file or directory", "no route to host"),
+    ),
+)
+
+
+def _categorize(error: Exception) -> str:
+    """A fixed description of why connecting failed, from the SQLSTATE or the symptom."""
+    sqlstate = getattr(error, "sqlstate", None)
+    if sqlstate in _BY_SQLSTATE:
+        return _BY_SQLSTATE[sqlstate]
+    text = str(error).lower()
+    for category, symptoms in _BY_SYMPTOM:
+        if any(symptom in text for symptom in symptoms):
+            return category
+    return "other connection failure"
+
+
 @dataclass(frozen=True)
 class _Migration:
     number: int
@@ -143,12 +196,8 @@ def migrate(
     waits `lock_timeout` seconds for a lock fails its file.
     """
     files, problems = _read(directory)
-    # A timeout in the URL wins; `None` leaves the keyword out.
-    timeout = None if "connect_timeout" in conninfo_to_dict(url) else connect_timeout
-    with (
-        psycopg.connect(url, autocommit=True, connect_timeout=timeout) as connection,
-        _locked(connection),
-    ):
+    connection = _connect(url, connect_timeout)
+    with connection, _locked(connection):
         # Read under the lock, so what is pending is what nobody else is applying.
         connection.execute(_RECORD)
         applied = _applied(connection)
@@ -163,6 +212,16 @@ def migrate(
             _apply(connection, migration, lock_timeout)
             connection.execute(_RESET)
         return tuple(migration.name for migration in pending)
+
+
+def _connect(url: str, connect_timeout: int) -> psycopg.Connection:
+    """Connect, or raise `ConnectionFailedError` without a word of libpq's text."""
+    try:
+        # A timeout in the URL wins; `None` leaves the keyword out.
+        timeout = None if "connect_timeout" in conninfo_to_dict(url) else connect_timeout
+        return psycopg.connect(url, autocommit=True, connect_timeout=timeout)
+    except Exception as error:
+        raise ConnectionFailedError(_categorize(error), type(error).__name__) from None
 
 
 _RECORD = b"""
@@ -372,6 +431,13 @@ def main() -> None:
         files = [problem.file for problem in error.problems]
         _log.critical("%s", error, extra={"error": type(error).__name__, "files": files})
         raise SystemExit(REFUSED) from None
+    except ConnectionFailedError as error:
+        _log.critical(
+            "%s",
+            error,
+            extra={"error": type(error).__name__, "category": error.category, "cause": error.cause},
+        )
+        raise SystemExit(FAILED) from None
     except MigrationFailedError as error:
         # The cause is the server's own message about the file's statements; it is scrubbed
         # like any log line, and it was raised by a connected session, never by parsing the URL.
@@ -383,8 +449,7 @@ def main() -> None:
         )
         raise SystemExit(FAILED) from None
     except psycopg.Error as error:
-        # Only a URL libpq can read gets here (see `DatabaseSettings`), so the server's or the
-        # socket's message cannot be libpq quoting the input back; the scrubber handles the rest.
+        # Connecting is `ConnectionFailedError`'s, so this is a connected session's own error.
         _log.critical(
             "could not migrate the database: %s", error, extra={"error": type(error).__name__}
         )
