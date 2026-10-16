@@ -276,3 +276,53 @@ def test_a_structured_field_that_cannot_be_printed_never_raises_into_the_caller(
     logging.getLogger("x").info("hello", extra={"thing": _Unprintable()})
     (line,) = _lines(output)
     assert line["message"] == "hello"
+
+
+class _AccessFormatter(logging.Formatter):
+    """Stands in for uvicorn's `AccessFormatter`, which unpacks `record.args` in `format`."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        client, method, path, http_version, status = record.args  # pyright: ignore[reportGeneralTypeIssues]
+        return f'{client} - "{method} {path} HTTP/{http_version}" {status}'
+
+
+def _foreign_access_log(
+    formatter: logging.Formatter,
+) -> tuple[io.StringIO, logging.Logger, logging.Handler]:
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(formatter)
+    library = logging.getLogger("uvicorn.access")
+    library.addHandler(handler)
+    library.propagate = False
+    return stream, library, handler
+
+
+def test_a_record_with_nothing_to_scrub_reaches_foreign_formatters_untouched(
+    output: io.StringIO, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stream, library, handler = _foreign_access_log(_AccessFormatter())
+    try:
+        library.info('%s - "%s %s HTTP/%s" %d', "127.0.0.1:5000", "GET", "/metrics", "1.1", 200)
+    finally:
+        library.removeHandler(handler)
+        library.propagate = True
+    assert stream.getvalue() == '127.0.0.1:5000 - "GET /metrics HTTP/1.1" 200\n'
+    assert capsys.readouterr().err == ""
+
+
+def test_the_runtime_keeps_the_arguments_of_a_record_it_did_not_change(
+    output: io.StringIO,
+) -> None:
+    record = logging.getLogger("x").makeRecord("x", logging.INFO, "f", 1, "%s %d", ("a", 1), None)
+    assert record.args == ("a", 1)
+    assert record.msg == "%s %d"
+
+
+def test_an_unprintable_argument_keeps_the_message_text(output: io.StringIO) -> None:
+    logging.getLogger("x").info("camera %s lost", _Unprintable())
+    logging.getLogger("x").info("camera %s lost via %s", _Unprintable(), URL)
+    first, second = _lines(output)
+    assert first["message"].startswith("camera %s lost")
+    assert second["message"].startswith("camera %s lost via %s")
+    _assert_clean(output)

@@ -110,25 +110,34 @@ def _text(value: object) -> str:
         return _UNPRINTABLE
 
 
-def _rendered(record: logging.LogRecord) -> str:
-    """The record's message, however badly its arguments fit; never raises."""
+def _rendered(record: logging.LogRecord) -> tuple[str, bool]:
+    """The record's message and whether it rendered; when it did not, the message text alone.
+
+    Never raises, and never loses the message text because of an argument that will not print.
+    """
     try:
-        return record.getMessage()
+        return record.getMessage(), True
     except Exception:  # arguments that do not fit must not cost the record
         pass
     try:
-        return f"{record.msg} {record.args!r}"
+        return f"{_text(record.msg)} {record.args!r}", False
     except Exception:
-        return _UNPRINTABLE
+        return f"{_text(record.msg)} {_UNPRINTABLE}", False
 
 
 def _scrubbed_record(*args: Any, **kwargs: Any) -> logging.LogRecord:
-    """A record whose message, exception and stack are already scrubbed and rendered.
+    """A record that holds no credential, left exactly as made when there was none to remove.
 
-    Logging must never raise into the caller, so every rendering step is guarded.
+    Formatters other libraries install may read `record.args` (uvicorn's access log does), so
+    the message and arguments are replaced by the scrubbed rendering only when the rendering
+    held something to scrub, or could not be made. Logging must never raise into the caller,
+    so every rendering step is guarded.
     """
     record = _make_record(*args, **kwargs)
-    record.msg, record.args = scrub(_rendered(record)), None
+    rendered, fits = _rendered(record)
+    scrubbed = scrub(rendered)
+    if scrubbed != rendered or not fits:
+        record.msg, record.args = scrubbed, None
     if record.exc_info:
         # Formatters use `exc_text` when it is set, rather than rendering the exception again.
         try:
