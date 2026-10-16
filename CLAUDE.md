@@ -159,6 +159,16 @@ A package's tests live in `packages/<package>/tests/`; tests about the workspace
 | `api` | FastAPI over `tools`. |
 | `runtime` | What every process starts with: env settings, JSON logs scrubbed of credentials, and a Prometheus `/metrics` endpoint (ADR 0012). |
 
+Every process starts with `visionquery.runtime.start("<service>", <Settings subclass>)` (ADR 0012): it reads the settings from `VISIONQUERY_*` environment variables (a missing or invalid one is logged by name and the process exits with status 2), sends every log record to stdout as one JSON line with `service` and `level`, scrubbed of URL credentials, and serves Prometheus metrics on `/metrics`.
+A service adds its own settings as fields of a `Settings` subclass (`footage_dir: Path` is read from `VISIONQUERY_FOOTAGE_DIR`), declares credentials as `SecretStr`, and declares metrics with `prometheus_client` where they are measured.
+Log through `logging.getLogger(__name__)` with structured fields in `extra=`; never print.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `VISIONQUERY_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. |
+| `VISIONQUERY_METRICS_HOST` | `0.0.0.0` | Interface `/metrics` listens on. |
+| `VISIONQUERY_METRICS_PORT` | `9100` | Port `/metrics` listens on; `0` picks a free one. |
+
 Import contracts (enforced with import-linter from `.importlinter`, each proven by `tests/test_import_contracts.py`):
 
 - `perception` and `recorder` never import `reasoner` or `api`.
