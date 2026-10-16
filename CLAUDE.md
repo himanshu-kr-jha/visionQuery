@@ -157,12 +157,14 @@ A package's tests live in `packages/<package>/tests/`; tests about the workspace
 | `recorder` | Copy-only Footage recording in epoch-aligned segments with an NTP-anchored clock. |
 | `reasoner` | Pluggable LLM interface (local by default) and the Answer builder. |
 | `api` | FastAPI over `tools`. |
+| `runtime` | What every process starts with: env settings, JSON logs scrubbed of credentials, and a Prometheus `/metrics` endpoint (ADR 0012). |
 
 Import contracts (enforced with import-linter from `.importlinter`, each proven by `tests/test_import_contracts.py`):
 
 - `perception` and `recorder` never import `reasoner` or `api`.
 - Only `memory` imports the database driver.
 - `reasoner` reaches the memory only through `tools`.
+- `runtime` imports none of the other packages (every package may import it), and no database driver.
 
 ## Rules that are easy to break by accident
 

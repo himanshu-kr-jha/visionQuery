@@ -35,6 +35,7 @@ forbidden_modules =
 name = Only memory imports a database driver
 type = forbidden
 source_modules =
+    visionquery.runtime
     visionquery.tools
     visionquery.perception
     visionquery.linker
@@ -54,7 +55,8 @@ allow_indirect_imports = True
 ; ADR 0009 - the Reasoner sees the memory only through the typed tools, so every fact
 ; it gets carries Evidence. The path reasoner -> tools -> memory (or -> linker) is the
 ; one this contract exists to force, so indirect imports are allowed; the reasoner
-; naming memory, linker, perception, recorder or api itself is not.
+; naming memory, linker, perception, recorder or api itself is not. The runtime is
+; not forbidden: every process, the reasoner included, starts with it.
 ;
 ; Known limits: a tools module re-exporting a memory symbol is not detected, and neither
 ; is a dynamic import (importlib.import_module). Review catches those.
@@ -71,3 +73,22 @@ forbidden_modules =
     visionquery.recorder
     visionquery.api
 allow_indirect_imports = True
+
+; The runtime is what every process starts with (settings, logs, metrics), so every
+; package may import it, and it may import none of them: a foundation that reached up
+; would make every package depend on every other. Its database-driver ban is in
+; [only-memory-holds-a-driver].
+
+[importlinter:contract:runtime-is-a-foundation]
+name = The runtime imports no other VisionQuery package
+type = forbidden
+source_modules =
+    visionquery.runtime
+forbidden_modules =
+    visionquery.memory
+    visionquery.tools
+    visionquery.perception
+    visionquery.linker
+    visionquery.recorder
+    visionquery.reasoner
+    visionquery.api

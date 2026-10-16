@@ -11,6 +11,7 @@ members = [
     "visionquery-perception",
     "visionquery-reasoner",
     "visionquery-recorder",
+    "visionquery-runtime",
     "visionquery-tools",
 ]
 
@@ -259,6 +260,7 @@ dependencies = [
     { name = "visionquery-perception" },
     { name = "visionquery-reasoner" },
     { name = "visionquery-recorder" },
+    { name = "visionquery-runtime" },
     { name = "visionquery-tools" },
 ]
 
@@ -278,6 +280,7 @@ requires-dist = [
     { name = "visionquery-perception", editable = "packages/perception" },
     { name = "visionquery-reasoner", editable = "packages/reasoner" },
     { name = "visionquery-recorder", editable = "packages/recorder" },
+    { name = "visionquery-runtime", editable = "packages/runtime" },
     { name = "visionquery-tools", editable = "packages/tools" },
 ]
 
@@ -318,6 +321,11 @@ source = { editable = "packages/reasoner" }
 name = "visionquery-recorder"
 version = "0.1.0"
 source = { editable = "packages/recorder" }
+
+[[package]]
+name = "visionquery-runtime"
+version = "0.1.0"
+source = { editable = "packages/runtime" }
 
 [[package]]
 name = "visionquery-tools"
