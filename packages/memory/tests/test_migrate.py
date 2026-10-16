@@ -10,7 +10,12 @@ from pathlib import Path
 
 import psycopg
 import pytest
-from visionquery.memory.migrate import MigrationFailedError, MigrationRefusedError, migrate
+from visionquery.memory.migrate import (
+    LOCK_KEY,
+    MigrationFailedError,
+    MigrationRefusedError,
+    migrate,
+)
 
 
 def _write(directory: Path, name: str, text: str) -> Path:
@@ -329,3 +334,58 @@ SELECT CASE WHEN true THEN 1 ELSE 2 END;
     )
 
     assert migrate(database, migrations) == ("0001_words.sql",)
+
+
+# --- one file's session settings do not reach the next ----------------------------------------
+
+
+def test_session_settings_of_one_file_do_not_leak_into_the_next(
+    database: str, migrations: Path
+) -> None:
+    _write(
+        migrations,
+        "0001_settings.sql",
+        "CREATE SCHEMA other;\nSET search_path TO other, public;\nSET statement_timeout = '1ms';\n",
+    )
+    _write(migrations, "0002_table.sql", "CREATE TABLE t2 (id int);")
+    _write(migrations, "0003_sleep.sql", "SELECT pg_sleep(0.1);")
+
+    assert migrate(database, migrations) == (
+        "0001_settings.sql",
+        "0002_table.sql",
+        "0003_sleep.sql",
+    )
+
+    assert _table_exists(database, "public.t2")
+    assert not _table_exists(database, "other.t2")
+    assert _recorded(database) == ["0001_settings.sql", "0002_table.sql", "0003_sleep.sql"]
+
+
+def test_the_advisory_lock_is_still_held_after_the_session_is_reset(
+    database: str, migrations: Path
+) -> None:
+    _write(migrations, "0001_settings.sql", "SET statement_timeout = '5s';")
+    _write(
+        migrations,
+        "0002_probe.sql",
+        # Another session cannot take the lock, so it was still held between the two files.
+        "CREATE TABLE probe AS SELECT pg_advisory_lock_held AS held FROM "
+        f"(SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted "
+        f"AND pid = pg_backend_pid() AND objid = {LOCK_KEY & 0xFFFFFFFF}) "
+        "AS pg_advisory_lock_held) AS s;",
+    )
+    migrate(database, migrations)
+    assert _query(database, "SELECT held FROM probe") == [(True,)]
+
+
+def test_the_runner_finds_its_record_whatever_the_search_path_says(
+    database: str, migrations: Path
+) -> None:
+    _write(migrations, "0001_other.sql", "CREATE SCHEMA other;\nSET search_path TO other;")
+    _write(
+        migrations,
+        "0002_shadow.sql",
+        "CREATE TABLE other.schema_migrations (decoy int);\nSELECT 1;",
+    )
+    assert migrate(database, migrations) == ("0001_other.sql", "0002_shadow.sql")
+    assert migrate(database, migrations) == ()

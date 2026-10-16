@@ -126,17 +126,23 @@ def migrate(url: str, directory: Path = MIGRATIONS) -> tuple[str, ...]:
             raise MigrationRefusedError(problems)
         for migration in pending:
             _apply(connection, migration)
+            connection.execute(_RESET)
         return tuple(migration.name for migration in pending)
 
 
 _RECORD = b"""
-CREATE TABLE IF NOT EXISTS schema_migrations (
+CREATE TABLE IF NOT EXISTS public.schema_migrations (
     number     integer     PRIMARY KEY CHECK (number > 0),
     name       text        NOT NULL UNIQUE,
     sha256     bytea       NOT NULL CHECK (octet_length(sha256) = 32),
     applied_at timestamptz NOT NULL DEFAULT now()
 )
 """
+
+
+#: What one file may have set on the session (`SET search_path`, `SET ROLE`...) must not reach
+#: the next, which a fresh run would not have seen. Not `DISCARD ALL`: it drops advisory locks.
+_RESET = b"RESET ALL; RESET ROLE; RESET SESSION AUTHORIZATION"
 
 
 @contextmanager
@@ -172,7 +178,7 @@ def _read(directory: Path) -> tuple[list[_Migration], list[Problem]]:
 
 def _applied(connection: psycopg.Connection) -> list[_Applied]:
     rows = connection.execute(
-        "SELECT number, name, sha256 FROM schema_migrations ORDER BY number"
+        "SELECT number, name, sha256 FROM public.schema_migrations ORDER BY number"
     ).fetchall()
     return [_Applied(number, name, bytes(sha256)) for number, name, sha256 in rows]
 
@@ -260,7 +266,7 @@ def _apply(connection: psycopg.Connection, migration: _Migration) -> None:
             # protocol, so the whole file runs as written, several statements and `%` included.
             connection.execute(migration.sql)
             connection.execute(
-                "INSERT INTO schema_migrations (number, name, sha256) VALUES (%s, %s, %s)",
+                "INSERT INTO public.schema_migrations (number, name, sha256) VALUES (%s, %s, %s)",
                 (migration.number, migration.name, migration.sha256),
             )
     except psycopg.Error as error:
