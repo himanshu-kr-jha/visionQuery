@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Self
 
 import pytest
-from pydantic import SecretStr, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from visionquery.runtime import Settings, SettingsError
 
 
@@ -138,3 +138,51 @@ def test_a_rule_across_variables_is_reported_without_naming_one(
         WindowSettings.load()
     assert raised.value.variables == ()
     assert "start_hour must come before end_hour" in str(raised.value)
+
+
+class Database(BaseModel):
+    url: SecretStr
+    pool_size: int = 5
+
+
+class ApiSettings(Settings):
+    database: Database
+
+
+def test_nested_settings_are_read_with_a_double_underscore(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VISIONQUERY_DATABASE__URL", "postgresql://u:hunter2@db/vq")
+    monkeypatch.setenv("VISIONQUERY_DATABASE__POOL_SIZE", "9")
+    settings = ApiSettings.load()
+    assert settings.database.url.get_secret_value() == "postgresql://u:hunter2@db/vq"
+    assert settings.database.pool_size == 9
+    assert "hunter2" not in repr(settings)
+
+
+def test_a_bad_nested_variable_is_named_as_it_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VISIONQUERY_DATABASE__URL", "postgresql://db/vq")
+    monkeypatch.setenv("VISIONQUERY_DATABASE__POOL_SIZE", "many")
+    with pytest.raises(SettingsError) as raised:
+        ApiSettings.load()
+    assert raised.value.variables == ("VISIONQUERY_DATABASE__POOL_SIZE",)
+    assert "VISIONQUERY_DATABASE__POOL_SIZE is invalid: " in str(raised.value)
+
+
+def test_a_missing_nested_variable_is_named_as_it_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VISIONQUERY_DATABASE__POOL_SIZE", "9")
+    with pytest.raises(SettingsError) as raised:
+        ApiSettings.load()
+    assert raised.value.variables == ("VISIONQUERY_DATABASE__URL",)
+    assert "VISIONQUERY_DATABASE__URL is missing" in str(raised.value)
+
+
+def test_a_field_with_an_alias_is_rejected_when_the_settings_are_declared() -> None:
+    # An alias is read from a variable without the prefix, which would make the error and
+    # the documentation name a variable that is not the one read.
+    with pytest.raises(TypeError, match=r"camera_url.*alias"):
+
+        class Aliased(Settings):
+            camera_url: str = Field(validation_alias="CAMERA_URL")
+
+        _ = Aliased

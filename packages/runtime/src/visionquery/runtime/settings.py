@@ -7,10 +7,13 @@ A service declares what it needs by extending `Settings` with its own fields:
 
     settings = RecorderSettings.load()  # reads VISIONQUERY_FOOTAGE_DIR
 
+A nested model is set with a double underscore (`VISIONQUERY_DATABASE__URL`). A field takes
+no alias, so each is read from exactly the variable named after it.
+
 Credentials are declared as `SecretStr`, so neither `repr` nor a log line shows them.
 """
 
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import BeforeValidator, Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -33,6 +36,8 @@ class Settings(BaseSettings):
         env_prefix=PREFIX,
         # An empty variable is a missing one, not an empty path or name.
         env_ignore_empty=True,
+        # A nested model is set as VISIONQUERY_DATABASE__URL.
+        env_nested_delimiter="__",
         extra="ignore",
         frozen=True,
     )
@@ -43,6 +48,18 @@ class Settings(BaseSettings):
     metrics_host: str = "0.0.0.0"
     #: 0 asks the operating system for a free port.
     metrics_port: Annotated[int, Field(ge=0, le=65535)] = 9100
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
+        super().__pydantic_init_subclass__(**kwargs)
+        for name, field in cls.model_fields.items():
+            if field.alias is not None or field.validation_alias is not None:
+                # An alias is read from a variable without the prefix, so errors and docs
+                # would name a variable other than the one a field is documented under.
+                raise TypeError(
+                    f"{cls.__name__}.{name} declares an alias; settings fields are read from "
+                    f"{PREFIX}{name.upper()} and take no alias"
+                )
 
     @classmethod
     def load(cls) -> Self:
@@ -65,7 +82,8 @@ class SettingsError(Exception):
                 # A rule across several variables belongs to none of them.
                 lines.append(f"  {detail['msg']}")
                 continue
-            variable = f"{PREFIX}{detail['loc'][0]}".upper()
+            name = "__".join(str(part) for part in detail["loc"])
+            variable = f"{PREFIX}{name}".upper()
             problem = "missing" if detail["type"] == "missing" else f"invalid: {detail['msg']}"
             lines.append(f"  {variable} is {problem}")
             variables.append(variable)

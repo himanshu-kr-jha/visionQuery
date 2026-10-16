@@ -161,6 +161,10 @@ A package's tests live in `packages/<package>/tests/`; tests about the workspace
 
 Every process starts with `visionquery.runtime.start("<service>", <Settings subclass>)` (ADR 0012): it reads the settings from `VISIONQUERY_*` environment variables (a missing or invalid one is logged by name and the process exits with status 2), sends every log record to stdout as one JSON line with `service` and `level`, scrubbed of URL credentials, and serves Prometheus metrics on `/metrics`.
 A service adds its own settings as fields of a `Settings` subclass (`footage_dir: Path` is read from `VISIONQUERY_FOOTAGE_DIR`), declares credentials as `SecretStr`, and declares metrics with `prometheus_client` where they are measured.
+A nested model is set with a double underscore (`VISIONQUERY_DATABASE__URL`), and a settings field takes no alias.
+Each service has its own env file, never one shared by all, so a service sees only the variables it declares.
+Secrets are declared as `SecretStr`.
+Camera credentials live in the camera registry, never in the environment.
 Log through `logging.getLogger(__name__)` with structured fields in `extra=`; never print.
 A service that embeds uvicorn must run it with `log_config=None`, because uvicorn otherwise installs its own non-JSON handlers and its access lines bypass the runtime's formatter.
 
