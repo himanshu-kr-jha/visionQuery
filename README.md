@@ -31,6 +31,9 @@ Everything lives in one PostgreSQL database (TimescaleDB for time partitioning, 
 Not available yet: the project is being scaffolded (milestone M0).
 This section will hold the complete steps to go from a fresh clone to a running stack with sample cameras.
 
+Every VisionQuery process is configured only through environment variables prefixed `VISIONQUERY_`, logs JSON lines to stdout, and serves Prometheus metrics on `/metrics` (port `9100` unless `VISIONQUERY_METRICS_PORT` says otherwise).
+The variables every process reads are listed in [`CLAUDE.md`](CLAUDE.md#architecture); a process that is missing one it needs exits with status 2 after logging which.
+
 ## Contributing
 
 Work is test-driven and tracked in GitHub issues.

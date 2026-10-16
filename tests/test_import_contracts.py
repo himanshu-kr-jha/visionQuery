@@ -30,9 +30,11 @@ PACKAGES = _workspace_packages()
 NO_REACHING_UP = "Perception and the recorder never import the reasoner or the api"
 ONLY_MEMORY_HOLDS_A_DRIVER = "Only memory imports a database driver"
 REASONER_THROUGH_TOOLS = "The reasoner reaches the memory only through tools"
+RUNTIME_IS_A_FOUNDATION = "The runtime imports no other VisionQuery package"
 NO_REACHING_UP_ID = "no-reaching-up"
 ONLY_MEMORY_HOLDS_A_DRIVER_ID = "only-memory-holds-a-driver"
 REASONER_THROUGH_TOOLS_ID = "reasoner-through-tools"
+RUNTIME_IS_A_FOUNDATION_ID = "runtime-is-a-foundation"
 
 
 def _lint_imports(cwd: Path, pythonpath: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -72,7 +74,7 @@ def _broken(result: subprocess.CompletedProcess[str]) -> set[str]:
 def test_the_workspace_keeps_every_contract() -> None:
     result = _lint_imports(ROOT)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Contracts: 3 kept, 0 broken." in result.stdout
+    assert "Contracts: 4 kept, 0 broken." in result.stdout
 
 
 def test_an_unchanged_copy_keeps_every_contract(tmp_path: Path) -> None:
@@ -93,6 +95,11 @@ def test_an_unchanged_copy_keeps_every_contract(tmp_path: Path) -> None:
         ("reasoner", "visionquery.recorder", REASONER_THROUGH_TOOLS),
         ("reasoner", "visionquery.api", REASONER_THROUGH_TOOLS),
         *[(p, "psycopg", ONLY_MEMORY_HOLDS_A_DRIVER) for p in PACKAGES if p != "memory"],
+        *[
+            ("runtime", f"visionquery.{p}", RUNTIME_IS_A_FOUNDATION)
+            for p in PACKAGES
+            if p != "runtime"
+        ],
         ("tools", "psycopg_pool", ONLY_MEMORY_HOLDS_A_DRIVER),
         ("tools", "psycopg2", ONLY_MEMORY_HOLDS_A_DRIVER),
         ("tools", "asyncpg", ONLY_MEMORY_HOLDS_A_DRIVER),
@@ -121,6 +128,14 @@ def test_the_reasoner_may_reach_the_memory_through_tools(tmp_path: Path) -> None
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_every_package_may_import_the_runtime(tmp_path: Path) -> None:
+    result = _lint_with(
+        tmp_path,
+        {f"visionquery.{p}.starts": "import visionquery.runtime\n" for p in PACKAGES},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_memory_may_import_the_database_driver(tmp_path: Path) -> None:
     result = _lint_with(tmp_path, {"visionquery.memory.connection": "import psycopg\n"})
     assert result.returncode == 0, result.stdout + result.stderr
@@ -140,7 +155,7 @@ def test_a_package_that_imports_memory_does_not_count_as_importing_the_driver(
         },
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Contracts: 3 kept, 0 broken." in result.stdout
+    assert "Contracts: 4 kept, 0 broken." in result.stdout
 
 
 def test_the_reasoner_may_reach_the_linker_through_tools(tmp_path: Path) -> None:
@@ -206,7 +221,7 @@ def test_the_callers_pythonpath_does_not_change_what_is_analysed(
     monkeypatch.setenv("PYTHONPATH", str(tree))
     result = _lint_imports(ROOT)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Contracts: 3 kept, 0 broken." in result.stdout
+    assert "Contracts: 4 kept, 0 broken." in result.stdout
 
 
 def _modules(contract: str, key: str) -> set[str]:
@@ -216,12 +231,28 @@ def _modules(contract: str, key: str) -> set[str]:
 
 def test_the_reasoner_is_forbidden_every_package_but_itself_and_tools() -> None:
     forbidden = _modules(REASONER_THROUGH_TOOLS_ID, "forbidden_modules")
-    expected = set(PACKAGES) - {"reasoner", "tools"}
+    expected = set(PACKAGES) - {"reasoner", "tools", "runtime"}
     assert forbidden == expected, (
-        f"ADR 0009: the reasoner may reach only tools. Add new workspace packages to "
+        f"ADR 0009: the reasoner may reach only tools (and the runtime every process starts "
+        f"with). Add new workspace packages to "
         f"forbidden_modules of [{REASONER_THROUGH_TOOLS_ID}] in .importlinter "
         f"(missing: {sorted(expected - forbidden)}, unknown: {sorted(forbidden - expected)})."
     )
+
+
+def test_the_runtime_is_forbidden_every_other_package() -> None:
+    sources = _modules(RUNTIME_IS_A_FOUNDATION_ID, "source_modules")
+    forbidden = _modules(RUNTIME_IS_A_FOUNDATION_ID, "forbidden_modules")
+    expected = set(PACKAGES) - {"runtime"}
+    assert sources == {"runtime"}
+    assert forbidden == expected, (
+        f"Every package may import the runtime, so it may import none of them. Add new "
+        f"workspace packages to forbidden_modules of [{RUNTIME_IS_A_FOUNDATION_ID}] in "
+        f".importlinter (missing: {sorted(expected - forbidden)}, "
+        f"unknown: {sorted(forbidden - expected)})."
+    )
+    section = _config()[f"importlinter:contract:{RUNTIME_IS_A_FOUNDATION_ID}"]
+    assert not section.getboolean("allow_indirect_imports", fallback=False)
 
 
 def test_perception_and_recorder_contract_matches_claude_md() -> None:

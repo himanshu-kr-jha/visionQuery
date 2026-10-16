@@ -157,12 +157,29 @@ A package's tests live in `packages/<package>/tests/`; tests about the workspace
 | `recorder` | Copy-only Footage recording in epoch-aligned segments with an NTP-anchored clock. |
 | `reasoner` | Pluggable LLM interface (local by default) and the Answer builder. |
 | `api` | FastAPI over `tools`. |
+| `runtime` | What every process starts with: env settings, JSON logs scrubbed of credentials, and a Prometheus `/metrics` endpoint (ADR 0012). |
+
+Every process starts with `visionquery.runtime.start("<service>", <Settings subclass>)` (ADR 0012): it reads the settings from `VISIONQUERY_*` environment variables (a missing or invalid one is logged by name and the process exits with status 2), sends every log record to stdout as one JSON line with `service` and `level`, scrubbed of URL credentials, and serves Prometheus metrics on `/metrics`; it returns a `Process` holding the settings and the metrics port, with a `close()`.
+A service adds its own settings as fields of a `Settings` subclass (`footage_dir: Path` is read from `VISIONQUERY_FOOTAGE_DIR`), declares credentials as `SecretStr`, and declares metrics with `prometheus_client` where they are measured.
+A nested model is set with a double underscore (`VISIONQUERY_DATABASE__URL`), and a settings field takes no alias.
+Each service has its own env file, never one shared by all, so a service sees only the variables it declares.
+Secrets are declared as `SecretStr`.
+Camera credentials live in the camera registry, never in the environment.
+Log through `logging.getLogger(__name__)` with structured fields in `extra=`; never print.
+A service that embeds uvicorn must run it with `log_config=None`, because uvicorn otherwise installs its own non-JSON handlers and its access lines bypass the runtime's formatter.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `VISIONQUERY_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. |
+| `VISIONQUERY_METRICS_HOST` | `0.0.0.0` | Interface `/metrics` listens on. |
+| `VISIONQUERY_METRICS_PORT` | `9100` | Port `/metrics` listens on; `0` picks a free one. |
 
 Import contracts (enforced with import-linter from `.importlinter`, each proven by `tests/test_import_contracts.py`):
 
 - `perception` and `recorder` never import `reasoner` or `api`.
 - Only `memory` imports the database driver.
 - `reasoner` reaches the memory only through `tools`.
+- `runtime` imports none of the other packages (every package may import it), and no database driver.
 
 ## Rules that are easy to break by accident
 
