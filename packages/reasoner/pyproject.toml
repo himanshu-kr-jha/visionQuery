@@ -2,7 +2,7 @@
 name = "visionquery-reasoner"
 version = "0.1.0"
 description = "The pluggable Reasoner interface (local by default) and the Answer builder."
-requires-python = "==3.12.*"
+requires-python = "==3.14.*"
 dependencies = []
 
 [build-system]

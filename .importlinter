@@ -1,19 +1,14 @@
-; The package boundaries from CLAUDE.md, as import contracts checked in CI.
+; The package boundaries from CLAUDE.md, as import contracts.
 ;
 ;   uv run lint-imports        exits non-zero on a violation
 ;
-; tests/test_import_contracts.py proves each contract reports the import it forbids,
-; so a contract relaxed or renamed here fails a test as well as stopping protecting.
+; Enforced by `make check` and by the test suite now, and by CI once #8 lands.
+; tests/test_import_contracts.py proves each contract reports the import it forbids and
+; keeps the legal paths legal, and that `allow_indirect_imports` is on only where a
+; contract must tolerate paths through another package (and off where it must not).
 
 [importlinter]
-root_packages =
-    visionquery.memory
-    visionquery.tools
-    visionquery.perception
-    visionquery.linker
-    visionquery.recorder
-    visionquery.reasoner
-    visionquery.api
+root_package = visionquery
 include_external_packages = True
 
 ; Perception and recording run on every frame of every camera. Nothing they do may
@@ -30,8 +25,11 @@ forbidden_modules =
     visionquery.reasoner
     visionquery.api
 
-; ADR 0006 - one Postgres, and memory is the only code that talks to it. Every
-; Postgres driver is listed, so picking a different one does not open a side door.
+; ADR 0006 - one Postgres, and memory is the only code that talks to it. The common
+; Postgres drivers and adapters are listed (a driver not listed here needs adding), so
+; picking a different one does not open a side door. Indirect imports are allowed:
+; tools -> memory -> psycopg is how every other package is meant to reach the database,
+; and only a package naming a driver itself is the violation.
 
 [importlinter:contract:only-memory-holds-a-driver]
 name = Only memory imports a database driver
@@ -48,10 +46,18 @@ forbidden_modules =
     psycopg_pool
     psycopg2
     asyncpg
+    pg8000
+    sqlalchemy
+    pgvector
+allow_indirect_imports = True
 
 ; ADR 0009 - the Reasoner sees the memory only through the typed tools, so every fact
-; it gets carries Evidence. The path reasoner -> tools -> memory is the one this
-; contract exists to force, so indirect imports are allowed; naming memory is not.
+; it gets carries Evidence. The path reasoner -> tools -> memory (or -> linker) is the
+; one this contract exists to force, so indirect imports are allowed; the reasoner
+; naming memory, linker, perception, recorder or api itself is not.
+;
+; Known limits: a tools module re-exporting a memory symbol is not detected, and neither
+; is a dynamic import (importlib.import_module). Review catches those.
 
 [importlinter:contract:reasoner-through-tools]
 name = The reasoner reaches the memory only through tools
@@ -60,4 +66,8 @@ source_modules =
     visionquery.reasoner
 forbidden_modules =
     visionquery.memory
+    visionquery.linker
+    visionquery.perception
+    visionquery.recorder
+    visionquery.api
 allow_indirect_imports = True

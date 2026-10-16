@@ -107,7 +107,7 @@ The design lives in three places, and they are the source of truth:
 
 ## Commands
 
-Python 3.12 is pinned in `.python-version`; uv installs it if it is missing.
+Python 3.14 is pinned in `.python-version` (the newest minor for which every planned dependency, including PyNvVideoCodec and onnxruntime-gpu, publishes Linux x86_64 wheels) and uv always uses its own managed interpreter (`python-preference = "only-managed"`), installing it if it is missing.
 Run everything from the repository root.
 
 | What | Command |

@@ -2,7 +2,7 @@
 name = "visionquery-tools"
 version = "0.1.0"
 description = "The typed operations shared by the api and the Reasoner (ADR 0009)."
-requires-python = "==3.12.*"
+requires-python = "==3.14.*"
 dependencies = []
 
 [build-system]

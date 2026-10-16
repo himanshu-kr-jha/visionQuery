@@ -2,7 +2,7 @@
 name = "visionquery"
 version = "0.1.0"
 description = "Remembers every person every camera sees and answers questions about the past with Evidence."
-requires-python = "==3.12.*"
+requires-python = "==3.14.*"
 dependencies = [
     "visionquery-memory",
     "visionquery-tools",
@@ -12,6 +12,10 @@ dependencies = [
     "visionquery-reasoner",
     "visionquery-api",
 ]
+
+[tool.uv]
+# Only uv-managed interpreters, so every machine and CI runs the same patch release.
+python-preference = "only-managed"
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -28,7 +32,7 @@ visionquery-api = { workspace = true }
 [dependency-groups]
 dev = [
     "import-linter>=2.15",
-    "pyright>=1.1.414",
+    "pyright[nodejs]>=1.1.414",
     "pytest>=9.1.1",
     "ruff>=0.17.1",
 ]
@@ -41,7 +45,7 @@ xfail_strict = true
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = [
@@ -61,7 +65,7 @@ select = [
 
 [tool.pyright]
 typeCheckingMode = "strict"
-pythonVersion = "3.12"
+pythonVersion = "3.14"
 include = ["packages", "tests"]
 venvPath = "."
 venv = ".venv"

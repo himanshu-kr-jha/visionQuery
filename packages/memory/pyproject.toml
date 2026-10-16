@@ -2,7 +2,7 @@
 name = "visionquery-memory"
 version = "0.1.0"
 description = "Domain model and the only code that touches Postgres, including embedding search (ADR 0006)."
-requires-python = "==3.12.*"
+requires-python = "==3.14.*"
 dependencies = []
 
 [build-system]
