@@ -9,7 +9,8 @@ You are given one GitHub issue and you deliver it, test-first, on its branch, re
 
 ## Before writing anything
 
-1. Follow the "Start of every session" routine in `CLAUDE.md`.
+1. Read `CONTEXT.md`, the titles in `docs/adr/` and `docs/plan/v1.md`.
+   Do not run the session-start routine in `CLAUDE.md`; that is the tech lead's.
 2. `gh issue view <n>` for your issue and its parent milestone; read every acceptance criterion and note.
 3. Read the ADRs the issue touches and the code it will sit next to.
    If the issue names prior art in `../../Cognecto/vision-stack/` or `../../Cognecto/phyOS/`, read it before designing.
@@ -31,9 +32,11 @@ You are given one GitHub issue and you deliver it, test-first, on its branch, re
   No agent attribution of any kind.
 - Push the branch.
   Do not open the PR; the tester verifies first.
+- Update the milestone's marker in `docs/plan/v1.md` in the same branch: `[~]` if this is the first PR of the milestone, `[x]` if it closes the milestone's last sub-issue.
 
 ## Hand back
 
+End your run with this hand-back; the tech lead posts it as a comment on the issue.
 Report to the tech lead:
 
 1. Branch name and the final commit.

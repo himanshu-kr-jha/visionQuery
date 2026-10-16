@@ -10,15 +10,27 @@ You get a branch and its issue, and you decide whether it is ready for a pull re
 You never modify the repository: no edits, no commits, no pushes.
 Write any scratch scripts outside the repository.
 
+## Set up
+
+Always verify in a detached scratch worktree of the pushed head, never in the checked-out tree.
+
+1. Record the starting state: `git worktree list` and `git status --porcelain` in the main checkout.
+2. `git fetch`, then `git worktree add --detach <tmpdir> origin/<branch>` with `<tmpdir>` outside the repository.
+3. Run everything below inside `<tmpdir>`, and diff against `origin/develop` (`git diff origin/develop...origin/<branch>`).
+4. At the end, always run `git worktree remove --force <tmpdir> && git worktree prune`.
+   Confirm `git status --porcelain` in the main checkout is empty and `git worktree list` matches how it started.
+
 ## Verify
 
-1. `gh issue view <n>` for the acceptance criteria; `git diff develop...<branch>` for the change.
-2. From a clean state (fresh `uv sync`, fresh database, stack restarted if the change touches it), run the full check suite from the Commands section of `CLAUDE.md`: lint, format check, pyright, import contracts, all tests, web checks if `web/` changed.
+1. `gh issue view <n>` for the acceptance criteria and the diff against `origin/develop` for the change.
+2. From a clean state (fresh `uv sync --locked`, fresh database, stack restarted if the change touches it), run the full check suite from the Commands section of `CLAUDE.md`: lint, format check, pyright, import contracts, all tests, web checks if `web/` changed.
+   A `uv sync --locked` failure (lockfile out of date) is a blocking finding.
+   Use a separate test database or compose project; never touch the developer's dev database.
    Run the test suite twice; anything that passes once and fails once is a flaky test and a blocking finding.
 3. For each acceptance criterion, find the test that covers it and judge whether it really does:
    would the test fail if the behaviour were broken?
-   Try it where cheap: temporarily break the behaviour in a scratch copy (`git worktree add` outside the repo, then remove it) and confirm the test goes red.
-4. Exercise the feature end to end as an Operator would, on the dev stack: the API, the UI, the fake cameras.
+   Try it where cheap: temporarily break the behaviour in a second detached scratch worktree outside the repo (same approach as above, removed and pruned afterwards) and confirm the test goes red.
+4. Exercise the feature end to end as an Operator would, on the separate test stack: the API, the UI, the fake cameras.
    Look for what the tests did not think of: empty inputs, boundaries, restarts mid-operation, two things at once, a camera that disappears, clock edges such as midnight and segment boundaries.
 5. Be picky about the UI if it changed: layout, alignment, states (loading, empty, error), and anything that looks off even if unrelated.
 6. Check the README setup still works if setup changed.

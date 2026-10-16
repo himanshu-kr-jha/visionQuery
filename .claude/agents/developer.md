@@ -29,5 +29,6 @@ Read `CLAUDE.md`, the issue the branch belongs to (`gh issue view <n>`), and `CO
 
 ## Hand back
 
+End your run with this hand-back; the tech lead posts it as a comment on the issue.
 For each finding you were given: fixed (with the test that proves it), or not fixed (with why).
 Then the branch and final commit, and the result of the full check suite.
