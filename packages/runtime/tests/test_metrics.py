@@ -84,3 +84,24 @@ def test_closing_frees_the_port() -> None:
     server.close()
     with pytest.raises(ConnectionRefusedError), socket.create_connection(("127.0.0.1", port), 1):
         pass
+
+
+def _ipv6_loopback_available() -> bool:
+    if not socket.has_ipv6:
+        return False
+    try:
+        with socket.socket(socket.AF_INET6) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
+
+
+@pytest.mark.skipif(not _ipv6_loopback_available(), reason="this host has no IPv6 loopback")
+@pytest.mark.parametrize("host", ["::1", "::"])
+def test_metrics_are_served_on_an_ipv6_address(host: str) -> None:
+    with serve_metrics(host, 0) as server:
+        url = f"http://[::1]:{server.port}/metrics"
+        with urllib.request.urlopen(url, timeout=5) as response:
+            assert response.status == 200
+            assert "python_info" in response.read().decode()

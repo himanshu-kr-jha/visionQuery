@@ -4,6 +4,7 @@ Metrics are declared where they are measured, with `prometheus_client` and its d
 registry (`Counter("segments_sealed", ...)`); this module only serves them.
 """
 
+import socket
 import threading
 from collections.abc import Iterable
 from types import TracebackType
@@ -39,7 +40,7 @@ class MetricsServer:
             return exposition(environ, start_response)
 
         self._server = make_server(
-            host, port, app, server_class=ThreadingWSGIServer, handler_class=_QuietHandler
+            host, port, app, server_class=_server_class(host, port), handler_class=_QuietHandler
         )
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="metrics", daemon=True
@@ -67,6 +68,16 @@ class MetricsServer:
         traceback: TracebackType | None,
     ) -> None:
         self.close()
+
+
+def _server_class(host: str, port: int) -> type[ThreadingWSGIServer]:
+    """The server class listening on the address family `host` belongs to (IPv4 or IPv6)."""
+    family = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE)[0][0]
+
+    class Server(ThreadingWSGIServer):
+        address_family = family
+
+    return Server
 
 
 class _QuietHandler(WSGIRequestHandler):
