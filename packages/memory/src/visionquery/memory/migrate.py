@@ -19,6 +19,12 @@ with a statement that begins, commits or rolls back a transaction (it would esca
 The whole run holds a Postgres advisory lock, so two runners started at once against one
 database serialise: the second waits, then finds nothing left to apply.
 
+**A run does not hang or stall others.**
+Connecting gives up after `CONNECT_TIMEOUT` seconds unless the URL sets its own, each file's
+transaction runs with a `lock_timeout` (`LOCK_TIMEOUT`) so a blocked statement fails its file by
+name, and waiting for the advisory lock is logged every few seconds, however long it takes.
+A connection that breaks mid-file leaves its outcome unknown; rerunning is safe.
+
 The command reads `VISIONQUERY_DATABASE__URL` and exits 0 when the schema is up to date, 1
 when a migration failed or the database could not be reached, 2 when its settings are
 missing or invalid, and 3 when it refused.
@@ -27,6 +33,7 @@ missing or invalid, and 3 when it refused.
 import hashlib
 import logging
 import re
+import time
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -34,13 +41,17 @@ from pathlib import Path
 from typing import Annotated
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
+from psycopg.pq import TransactionStatus
 from pydantic import Field
 from visionquery.memory._sql import transaction_control
 from visionquery.memory.settings import DatabaseSettings
 from visionquery.runtime import Settings, start
 
 __all__ = [
+    "CONNECT_TIMEOUT",
     "LOCK_KEY",
+    "LOCK_TIMEOUT",
     "MIGRATIONS",
     "MigrationFailedError",
     "MigrationRefusedError",
@@ -58,9 +69,20 @@ MIGRATIONS = Path(__file__).parent / "migrations"
 #: databases on one server never wait for each other. The bytes spell `vqschema`.
 LOCK_KEY = int.from_bytes(b"vqschema")
 
-_NAME = re.compile(r"(\d{4})_[a-z0-9]+(?:_[a-z0-9]+)*\.sql")
+_NAME = re.compile(r"(?!0000)(\d{4})_[a-z0-9]+(?:_[a-z0-9]+)*\.sql")
 
 FAILED, REFUSED = 1, 3
+
+#: How long to wait for a connection, unless the URL says otherwise, in seconds.
+CONNECT_TIMEOUT = 10
+#: How long one statement of a migration may wait for a lock before the file fails, in seconds,
+#: so a blocked DDL fails by name instead of queueing behind a long transaction and stalling
+#: every writer that queues behind it.
+LOCK_TIMEOUT = 30.0
+
+#: While another run holds the advisory lock: how often to ask for it, and how often to say so.
+_POLL = 0.25
+_REPORT_EVERY = 10.0
 
 
 @dataclass(frozen=True)
@@ -82,11 +104,12 @@ class MigrationRefusedError(Exception):
 
 
 class MigrationFailedError(Exception):
-    """A migration's statements failed; it was rolled back, and the ones before it stay."""
+    """A migration failed; unless the message says otherwise it was rolled back and the ones
+    before it stay."""
 
-    def __init__(self, file: str) -> None:
+    def __init__(self, file: str, outcome: str = "was rolled back") -> None:
         self.file = file
-        super().__init__(f"{file} failed and was rolled back")
+        super().__init__(f"{file} failed and {outcome}")
 
 
 @dataclass(frozen=True)
@@ -104,15 +127,28 @@ class _Applied:
     sha256: bytes
 
 
-def migrate(url: str, directory: Path = MIGRATIONS) -> tuple[str, ...]:
+def migrate(
+    url: str,
+    directory: Path = MIGRATIONS,
+    *,
+    connect_timeout: int = CONNECT_TIMEOUT,
+    lock_timeout: float = LOCK_TIMEOUT,
+) -> tuple[str, ...]:
     """Apply every pending migration in `directory` to the database at `url`.
 
     Returns the names applied, in order, which is empty when the schema was up to date.
     Raises `MigrationRefusedError` when the files and the record disagree, and
-    `MigrationFailedError` when a migration's statements fail.
+    `MigrationFailedError` when a migration's statements fail. Connecting gives up after
+    `connect_timeout` seconds unless the URL sets its own, and a statement of a migration that
+    waits `lock_timeout` seconds for a lock fails its file.
     """
     files, problems = _read(directory)
-    with psycopg.connect(url, autocommit=True) as connection, _locked(connection):
+    # A timeout in the URL wins; `None` leaves the keyword out.
+    timeout = None if "connect_timeout" in conninfo_to_dict(url) else connect_timeout
+    with (
+        psycopg.connect(url, autocommit=True, connect_timeout=timeout) as connection,
+        _locked(connection),
+    ):
         # Read under the lock, so what is pending is what nobody else is applying.
         connection.execute(_RECORD)
         applied = _applied(connection)
@@ -124,7 +160,7 @@ def migrate(url: str, directory: Path = MIGRATIONS) -> tuple[str, ...]:
         if problems := _transaction_control(pending):
             raise MigrationRefusedError(problems)
         for migration in pending:
-            _apply(connection, migration)
+            _apply(connection, migration, lock_timeout)
             connection.execute(_RESET)
         return tuple(migration.name for migration in pending)
 
@@ -146,10 +182,24 @@ _RESET = b"RESET ALL; RESET ROLE; RESET SESSION AUTHORIZATION"
 
 @contextmanager
 def _locked(connection: psycopg.Connection) -> Generator[None]:
-    row = connection.execute("SELECT pg_try_advisory_lock(%s)", (LOCK_KEY,)).fetchone()
-    if not (row and row[0]):
-        _log.info("waiting for another migration run to finish")
-        connection.execute("SELECT pg_advisory_lock(%s)", (LOCK_KEY,))
+    waiting_since = time.monotonic()
+    reported = waiting_since
+    while True:
+        row = connection.execute("SELECT pg_try_advisory_lock(%s)", (LOCK_KEY,)).fetchone()
+        if row and row[0]:
+            break
+        now = time.monotonic()
+        if reported == waiting_since:
+            _log.info("waiting for another migration run to finish")
+            reported = now
+        elif now - reported >= _REPORT_EVERY:
+            _log.info(
+                "still waiting for another migration run to finish (%d s)",
+                now - waiting_since,
+                extra={"waited_seconds": round(now - waiting_since)},
+            )
+            reported = now
+        time.sleep(_POLL)
     try:
         yield
     finally:
@@ -258,17 +308,32 @@ def _transaction_control(pending: Sequence[_Migration]) -> list[Problem]:
     return problems
 
 
-def _apply(connection: psycopg.Connection, migration: _Migration) -> None:
+def _apply(connection: psycopg.Connection, migration: _Migration, lock_timeout: float) -> None:
     try:
         with connection.transaction():
+            connection.execute(f"SET LOCAL lock_timeout = {round(lock_timeout * 1000)}".encode())
             # The file's bytes and no parameters: psycopg sends them with the simple query
             # protocol, so the whole file runs as written, several statements and `%` included.
             connection.execute(migration.sql)
+            if connection.info.transaction_status != TransactionStatus.INTRANS:
+                # The pre-flight check missed a statement that ended our transaction, so what
+                # the file did may already be committed. Say so rather than record it.
+                raise MigrationFailedError(
+                    migration.name,
+                    "ended the transaction it runs in, so part of it may be committed without "
+                    "a record; look at the database before running again",
+                )
             connection.execute(
                 "INSERT INTO public.schema_migrations (number, name, sha256) VALUES (%s, %s, %s)",
                 (migration.number, migration.name, migration.sha256),
             )
     except psycopg.Error as error:
+        if connection.broken:
+            raise MigrationFailedError(
+                migration.name,
+                "the connection broke, so it is not known whether it was applied; "
+                "rerunning is safe, because a run reads the record first",
+            ) from error
         raise MigrationFailedError(migration.name) from error
     _log.info(
         "applied %s",
@@ -287,13 +352,22 @@ class MigrateSettings(Settings):
     #: A run lasts seconds and nothing scrapes it, so it takes any free port rather than one
     #: a long-running service beside it may hold.
     metrics_port: Annotated[int, Field(ge=0, le=65535)] = 0
+    #: Seconds a statement of a migration may wait for a lock before its file fails.
+    lock_timeout: Annotated[float, Field(gt=0)] = LOCK_TIMEOUT
+    #: Seconds to wait for a connection, unless the URL sets `connect_timeout`.
+    connect_timeout: Annotated[int, Field(ge=1)] = CONNECT_TIMEOUT
 
 
 def main() -> None:
     """The `visionquery-migrate` command."""
     process = start("migrate", MigrateSettings)
     try:
-        applied = migrate(process.settings.database.url.get_secret_value())
+        settings = process.settings
+        applied = migrate(
+            settings.database.url.get_secret_value(),
+            connect_timeout=settings.connect_timeout,
+            lock_timeout=settings.lock_timeout,
+        )
     except MigrationRefusedError as error:
         files = [problem.file for problem in error.problems]
         _log.critical("%s", error, extra={"error": type(error).__name__, "files": files})

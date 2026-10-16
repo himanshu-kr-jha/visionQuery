@@ -5,15 +5,21 @@ directory of migrations written for the test.
 """
 
 import hashlib
-from collections.abc import Iterator
+import logging
+import socket
+import threading
+import time
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import psycopg
 import pytest
+from visionquery.memory import migrate as runner
 from visionquery.memory.migrate import (
     LOCK_KEY,
     MigrationFailedError,
     MigrationRefusedError,
+    Problem,
     migrate,
 )
 
@@ -242,7 +248,14 @@ def test_refuses_two_files_with_one_number(database: str, migrations: Path) -> N
 
 @refused_run
 @pytest.mark.parametrize(
-    "name", ["4_pending.sql", "00004_pending.sql", "0004-pending.sql", "0004_Pending.sql"]
+    "name",
+    [
+        "4_pending.sql",
+        "00004_pending.sql",
+        "0004-pending.sql",
+        "0004_Pending.sql",
+        "0000_pending.sql",
+    ],
 )
 def test_refuses_a_file_not_named_like_a_migration(
     database: str, migrations: Path, name: str
@@ -251,6 +264,17 @@ def test_refuses_a_file_not_named_like_a_migration(
     refusal = _refusal(database, migrations)
     assert [problem.file for problem in refusal.problems] == [name]
     assert f"{name} is not named like NNNN_lowercase_words.sql" in str(refusal)
+
+
+def test_a_migration_that_cannot_be_numbered_before_0001_is_refused_by_name(
+    database: str, migrations: Path
+) -> None:
+    _write(migrations, "0000_zero.sql", "CREATE TABLE zero (id int);")
+    with pytest.raises(MigrationRefusedError) as refused:
+        migrate(database, migrations)
+    assert [str(p) for p in refused.value.problems] == [
+        str(Problem("0000_zero.sql", "0000_zero.sql is not named like NNNN_lowercase_words.sql"))
+    ]
 
 
 def test_files_that_are_not_sql_are_not_migrations(database: str, migrations: Path) -> None:
@@ -389,3 +413,110 @@ def test_the_runner_finds_its_record_whatever_the_search_path_says(
     )
     assert migrate(database, migrations) == ("0001_other.sql", "0002_shadow.sql")
     assert migrate(database, migrations) == ()
+
+
+# --- a run does not hang or stall others --------------------------------------------------------
+
+
+def _listening_socket_that_never_answers() -> socket.socket:
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(8)  # the kernel completes the handshake; nothing ever reads or replies
+    return server
+
+
+def test_connecting_gives_up_after_the_default_timeout(migrations: Path) -> None:
+    with _listening_socket_that_never_answers() as server:
+        url = f"postgresql://u:p@127.0.0.1:{server.getsockname()[1]}/db"
+        started = time.monotonic()
+        with pytest.raises(psycopg.OperationalError):
+            migrate(url, migrations, connect_timeout=1)
+    assert time.monotonic() - started < 8
+
+
+def test_a_connect_timeout_in_the_url_wins_over_the_default(migrations: Path) -> None:
+    with _listening_socket_that_never_answers() as server:
+        url = f"postgresql://u:p@127.0.0.1:{server.getsockname()[1]}/db?connect_timeout=1"
+        started = time.monotonic()
+        with pytest.raises(psycopg.OperationalError):
+            migrate(url, migrations, connect_timeout=60)
+    assert time.monotonic() - started < 8
+
+
+def test_a_blocked_statement_fails_naming_its_file_instead_of_stalling(
+    database: str, migrations: Path
+) -> None:
+    with psycopg.connect(database, autocommit=True) as setup:
+        setup.execute("CREATE TABLE busy (id int)")
+    _write(migrations, "0001_alter.sql", "ALTER TABLE busy ADD COLUMN extra int;")
+
+    with psycopg.connect(database) as holder:
+        holder.execute("LOCK TABLE busy IN ACCESS EXCLUSIVE MODE")  # until this closes
+        started = time.monotonic()
+        with pytest.raises(MigrationFailedError, match=r"0001_alter\.sql") as failed:
+            migrate(database, migrations, lock_timeout=0.5)
+    assert time.monotonic() - started < 10
+    assert isinstance(failed.value.__cause__, psycopg.errors.LockNotAvailable)
+    assert _recorded(database) == []
+
+
+def test_waiting_for_the_advisory_lock_is_logged_until_it_is_free(
+    database: str,
+    migrations: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runner, "_REPORT_EVERY", 0.3)
+    monkeypatch.setattr(runner, "_POLL", 0.05)
+    _write(migrations, "0001_people.sql", "CREATE TABLE people (id int);")
+    caplog.set_level(logging.INFO, logger=runner.__name__)
+    done: list[tuple[str, ...]] = []
+
+    with psycopg.connect(database, autocommit=True) as other:
+        other.execute("SELECT pg_advisory_lock(%s)", (LOCK_KEY,))
+        thread = threading.Thread(target=lambda: done.append(migrate(database, migrations)))
+        thread.start()
+        time.sleep(1.2)
+        assert thread.is_alive()
+        other.execute("SELECT pg_advisory_unlock(%s)", (LOCK_KEY,))
+    thread.join(timeout=10)
+
+    assert done == [("0001_people.sql",)]
+    waits = [r.getMessage() for r in caplog.records if "still waiting" in r.getMessage()]
+    assert len(waits) >= 2
+
+
+# --- what a run cannot be sure of ---------------------------------------------------------------
+
+
+def test_a_file_that_ends_its_own_transaction_is_failed_by_name(
+    database: str, migrations: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The lexer refuses this up front; this is the second line of defence if it ever misses one.
+
+    def no_problems(pending: Sequence[object]) -> list[Problem]:
+        return []
+
+    monkeypatch.setattr(runner, "_transaction_control", no_problems)
+    _write(migrations, "0001_escape.sql", "CREATE TABLE escaped (id int);\nCOMMIT;")
+
+    with pytest.raises(MigrationFailedError, match=r"0001_escape\.sql") as failed:
+        migrate(database, migrations)
+
+    assert failed.value.file == "0001_escape.sql"
+    assert "ended the transaction" in str(failed.value)
+    assert _recorded(database) == []
+
+
+def test_a_broken_connection_says_the_outcome_is_unknown_and_that_rerunning_is_safe(
+    database: str, migrations: Path
+) -> None:
+    _write(migrations, "0001_killed.sql", "SELECT pg_terminate_backend(pg_backend_pid());")
+
+    with pytest.raises(MigrationFailedError, match=r"0001_killed\.sql") as failed:
+        migrate(database, migrations)
+
+    message = str(failed.value)
+    assert "rolled back" not in message
+    assert "not known" in message
+    assert "rerunning is safe" in message
