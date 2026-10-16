@@ -1,0 +1,63 @@
+; The package boundaries from CLAUDE.md, as import contracts checked in CI.
+;
+;   uv run lint-imports        exits non-zero on a violation
+;
+; tests/test_import_contracts.py proves each contract reports the import it forbids,
+; so a contract relaxed or renamed here fails a test as well as stopping protecting.
+
+[importlinter]
+root_packages =
+    visionquery.memory
+    visionquery.tools
+    visionquery.perception
+    visionquery.linker
+    visionquery.recorder
+    visionquery.reasoner
+    visionquery.api
+include_external_packages = True
+
+; Perception and recording run on every frame of every camera. Nothing they do may
+; depend on asking questions or serving them, so a slow or broken Reasoner or api can
+; never stall what is being remembered.
+
+[importlinter:contract:no-reaching-up]
+name = Perception and the recorder never import the reasoner or the api
+type = forbidden
+source_modules =
+    visionquery.perception
+    visionquery.recorder
+forbidden_modules =
+    visionquery.reasoner
+    visionquery.api
+
+; ADR 0006 - one Postgres, and memory is the only code that talks to it. Every
+; Postgres driver is listed, so picking a different one does not open a side door.
+
+[importlinter:contract:only-memory-holds-a-driver]
+name = Only memory imports a database driver
+type = forbidden
+source_modules =
+    visionquery.tools
+    visionquery.perception
+    visionquery.linker
+    visionquery.recorder
+    visionquery.reasoner
+    visionquery.api
+forbidden_modules =
+    psycopg
+    psycopg_pool
+    psycopg2
+    asyncpg
+
+; ADR 0009 - the Reasoner sees the memory only through the typed tools, so every fact
+; it gets carries Evidence. The path reasoner -> tools -> memory is the one this
+; contract exists to force, so indirect imports are allowed; naming memory is not.
+
+[importlinter:contract:reasoner-through-tools]
+name = The reasoner reaches the memory only through tools
+type = forbidden
+source_modules =
+    visionquery.reasoner
+forbidden_modules =
+    visionquery.memory
+allow_indirect_imports = True
