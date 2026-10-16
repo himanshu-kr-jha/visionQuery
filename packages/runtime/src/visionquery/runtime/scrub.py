@@ -6,6 +6,24 @@ to log. A camera password in a log line ends up wherever the logs do.
 
 Scrubbing runs on every log record, including ones an attacker or a broken library makes
 huge, so every step here is linear in the length of the text.
+
+Known limits, accepted because this is defence in depth and not a guarantee (the camera
+registry rejects camera URLs it cannot scrub, ADR 0012):
+
+- A plain-text password containing whitespace, or one of `,;&)]}` outside a URL, leaks after
+  that character, because an unquoted value ends there.
+- `Authorization` values are masked up to the first whitespace after the scheme, so Digest
+  headers (`Digest username="a", response="b"`) and any value of several tokens leak after
+  the first.
+- `Cookie` and `Set-Cookie` headers are not recognised.
+- Escaped-slash URLs (`rtsp:\\/\\/user:pw@host`, as in JSON) are not recognised, because only
+  `scheme://` introduces userinfo.
+- A scheme-less `user:pw@host` is not recognised, for the same reason.
+- Percent-encoded text is not decoded before scrubbing.
+- Full-width or other look-alike `@` characters are not recognised.
+- URLs whose path or query holds an `@` lose their host in logs, because the userinfo is
+  taken to end at the last `@` before whitespace, so that unencoded passwords holding `@`,
+  `/` or `?` are never kept.
 """
 
 import re

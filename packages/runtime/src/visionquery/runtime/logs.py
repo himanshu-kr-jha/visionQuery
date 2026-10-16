@@ -2,9 +2,12 @@
 
 Everything goes through the standard library's logging, so third-party libraries are
 covered too. Scrubbing happens in two places, so no single forgotten call can leak a camera
-password: every record is scrubbed as it is made (its message, exception and stack), which
-protects handlers a library installs for itself, and the JSON formatter scrubs every field
-it writes, which covers structured fields.
+password: a record factory scrubs every record as it is made (leaving it untouched when there
+is nothing to remove), which protects handlers a library installs for itself, and the JSON
+formatter scrubs every field it writes and masks credential-named structured fields.
+
+Output that does not go through logging is not covered: subprocess stderr, stderr written by
+C libraries, and `print`. Subprocess stderr must be piped and logged line by line (ADR 0012).
 """
 
 import json
