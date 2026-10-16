@@ -18,7 +18,7 @@ from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any, TextIO, cast
 
-from visionquery.runtime.scrub import scrub
+from visionquery.runtime.scrub import REDACTED, is_credential_key, scrub
 from visionquery.runtime.settings import LogLevel
 
 __all__ = ["configure_logging"]
@@ -85,7 +85,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def _scrubbed(value: object) -> object:
-    """`value` as JSON-ready data, every string in it (keys included) scrubbed."""
+    """`value` as JSON-ready data: every string scrubbed, credential-named keys' values masked."""
     match value:
         case str():
             return scrub(value)
@@ -95,7 +95,10 @@ def _scrubbed(value: object) -> object:
             return value if math.isfinite(value) else str(value)
         case Mapping():
             items = cast(Mapping[object, object], value).items()
-            return {scrub(str(key)): _scrubbed(item) for key, item in items}
+            return {
+                scrub(str(key)): REDACTED if is_credential_key(str(key)) else _scrubbed(item)
+                for key, item in items
+            }
         case list() | tuple() | set() | frozenset():
             return [_scrubbed(item) for item in cast(list[object], value)]
         case _:

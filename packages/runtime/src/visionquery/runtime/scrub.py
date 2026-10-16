@@ -10,7 +10,7 @@ huge, so every step here is linear in the length of the text.
 
 import re
 
-__all__ = ["scrub"]
+__all__ = ["REDACTED", "is_credential_key", "scrub"]
 
 _SCHEME_CHARS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+.-")
 _LETTERS = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
@@ -23,16 +23,24 @@ _QUERY_CREDENTIAL = re.compile(
     re.IGNORECASE,
 )
 
+#: The words that make a name a credential, as the whole name or its end (`password`,
+#: `camera_password`, `cameraPassword`, `accessToken`), but never inside it (`token_count`,
+#: `tokenizer`, `secretary`). Text and structured fields share this one list.
+_CREDENTIAL_WORDS = "password|passwd|pwd|secret|token|passphrase|private[_-]?key|api[_-]?key"
+
 #: `keyword: value` and `keyword=value` in plain text or JSON-ish text, quotes kept.
-#: Every part is a bounded class, so the pattern is linear; the value stops at whitespace,
-#: so a password containing whitespace or one of `,;&)]}` leaks after it (ADR 0012).
+#: A quoted value runs to its closing quote (backslash escapes included, but not past the end
+#: of the line); an unquoted one stops at whitespace or one of `,;&)]}`, so a password
+#: holding those leaks after them. Every part is a bounded class, so the pattern is linear.
 #: A value already masked (by the query pattern above) is left alone.
 _KEYWORD_CREDENTIAL = re.compile(
-    r"(?<![a-z0-9])((?:password|passwd|pwd|secret|client_secret|token|access_token"
-    r"|refresh_token|api[_-]?key)[\"']?[ \t]*[:=][ \t]*)"
-    r"(?!\*\*\*)(?:\"[^\"\s]*\"?|'[^'\s]*'?|[^\s,;&\"')\]}]+)",
+    rf"((?:{_CREDENTIAL_WORDS})[\"']?[ \t]*[:=][ \t]*)"
+    r"(?!\*\*\*)(?:\"(?:[^\"\\\r\n]|\\.)*\"?|'(?:[^'\\\r\n]|\\.)*'?|[^\s,;&\"')\]}]+)",
     re.IGNORECASE,
 )
+
+#: A name that ends in a credential word, or is `authorization`.
+_CREDENTIAL_KEY = re.compile(rf"(?:{_CREDENTIAL_WORDS}|authorization)$", re.IGNORECASE)
 
 #: `Authorization: Basic <credentials>`, keeping the header and its scheme.
 _AUTHORIZATION = re.compile(
@@ -41,14 +49,19 @@ _AUTHORIZATION = re.compile(
     re.IGNORECASE,
 )
 
-_REDACTED = "***"
+REDACTED = "***"
+
+
+def is_credential_key(key: str) -> bool:
+    """Whether a value stored under `key` is a credential, whatever it looks like."""
+    return _CREDENTIAL_KEY.search(key) is not None
 
 
 def _mask_keyword_credential(found: re.Match[str]) -> str:
     key, value = found.group(1), found.group(0)[len(found.group(1)) :]
     quote = value[0] if value[0] in "\"'" else ""
     closing = quote if quote and len(value) > 1 and value[-1] == quote else ""
-    return f"{key}{quote}{_REDACTED}{closing}"
+    return f"{key}{quote}{REDACTED}{closing}"
 
 
 def _remove_userinfo(text: str) -> str:
@@ -81,7 +94,7 @@ def _remove_userinfo(text: str) -> str:
             search = sep + 3
             continue
         parts.append(text[copied : sep + 3])
-        parts.append(_REDACTED)
+        parts.append(REDACTED)
         copied = last_at
         search = last_at + 1
         run_end = -1
@@ -92,6 +105,6 @@ def _remove_userinfo(text: str) -> str:
 def scrub(text: str) -> str:
     """`text` with the credentials of every URL in it, and plain-text ones, replaced by `***`."""
     text = _remove_userinfo(text)
-    text = _QUERY_CREDENTIAL.sub(rf"\1{_REDACTED}", text)
-    text = _AUTHORIZATION.sub(rf"\1{_REDACTED}", text)
+    text = _QUERY_CREDENTIAL.sub(rf"\1{REDACTED}", text)
+    text = _AUTHORIZATION.sub(rf"\1{REDACTED}", text)
     return _KEYWORD_CREDENTIAL.sub(_mask_keyword_credential, text)

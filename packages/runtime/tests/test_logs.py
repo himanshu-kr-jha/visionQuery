@@ -326,3 +326,57 @@ def test_an_unprintable_argument_keeps_the_message_text(output: io.StringIO) -> 
     assert first["message"].startswith("camera %s lost")
     assert second["message"].startswith("camera %s lost via %s")
     _assert_clean(output)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "password",
+        "camera_password",
+        "cameraPassword",
+        "CameraPassword",
+        "PASSWORD",
+        "accessToken",
+        "access_token",
+        "api_key",
+        "apiKey",
+        "x-api-key",
+        "private_key",
+        "passphrase",
+        "client_secret",
+        "Authorization",
+    ],
+)
+def test_a_value_under_a_credential_named_key_is_masked(output: io.StringIO, key: str) -> None:
+    logging.getLogger("x").info("added", extra={key: "hunter2"})
+    (line,) = _lines(output)
+    assert line[key] == "***"
+    _assert_clean(output)
+
+
+def test_credential_named_keys_are_masked_at_any_depth(output: io.StringIO) -> None:
+    logging.getLogger("x").info(
+        "added",
+        extra={
+            "camera": {"name": "gate-2", "auth": {"password": "hunter2"}},
+            "cameras": [{"id": 1, "cameraPassword": "hunter2"}, ({"token": "hunter2"},)],
+            "settings": {"secret": {"a": "hunter2", "b": ["hunter2"]}},
+        },
+    )
+    (line,) = _lines(output)
+    assert line["camera"] == {"name": "gate-2", "auth": {"password": "***"}}
+    assert line["cameras"] == [{"id": 1, "cameraPassword": "***"}, [{"token": "***"}]]
+    assert line["settings"] == {"secret": "***"}
+    _assert_clean(output)
+
+
+def test_keys_that_only_look_like_credentials_are_left_alone(output: io.StringIO) -> None:
+    logging.getLogger("x").info(
+        "counted",
+        extra={"token_count": 5, "max_tokens": 7, "tokenizer": "bpe", "secretary": "bob"},
+    )
+    (line,) = _lines(output)
+    assert line["token_count"] == 5
+    assert line["max_tokens"] == 7
+    assert line["tokenizer"] == "bpe"
+    assert line["secretary"] == "bob"

@@ -119,11 +119,48 @@ def test_plain_text_credentials_are_masked(text: str, expected: str) -> None:
 
 
 @pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("cameraPassword=hunter2", "cameraPassword=***"),
+        ("camera_password=hunter2", "camera_password=***"),
+        ("accessToken=hunter2", "accessToken=***"),
+        ("csrftoken: hunter2", "csrftoken: ***"),
+        ("private_key=hunter2", "private_key=***"),
+        ("privateKey=hunter2", "privateKey=***"),
+        ("passphrase=hunter2", "passphrase=***"),
+        ("apiKey=hunter2", "apiKey=***"),
+        ('{"cameraPassword": "hunter2"}', '{"cameraPassword": "***"}'),
+    ],
+)
+def test_credential_words_are_masked_as_the_end_of_a_longer_name(text: str, expected: str) -> None:
+    assert scrub(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('password="hunter2 two"', 'password="***"'),
+        ("password='hunter2 two'", "password='***'"),
+        ('{"password": "hunter2 two, and more"}', '{"password": "***"}'),
+        ("{'password': 'hunter2 two'}", "{'password': '***'}"),
+        ('password="hunter2 two" user=bob', 'password="***" user=bob'),
+        ('{"password": "hun\\"ter2 two"}', '{"password": "***"}'),
+        ('password="unterminated hunter2', 'password="***'),
+    ],
+)
+def test_a_quoted_value_runs_to_its_closing_quote(text: str, expected: str) -> None:
+    assert scrub(text) == expected
+
+
+@pytest.mark.parametrize(
     "text",
     [
         "token count=5",
         "password reset requested for user 7",
         "max_tokens=5",
+        "token_count=5",
+        "tokenizer=bpe",
+        "passthrough=1",
         "the token was refreshed",
         "secretary=bob",
         "passwords: none",
