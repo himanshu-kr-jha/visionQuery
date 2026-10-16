@@ -15,8 +15,9 @@ def transaction_control(sql: str) -> str | None:
 
     Strings, quoted identifiers, comments and dollar-quoted bodies are skipped, so a function
     that contains `BEGIN ... END;` or a string that says `COMMIT;` is not one. `ROLLBACK TO
-    SAVEPOINT` stays inside the transaction and is allowed, and so is the `END;` that closes a
-    `BEGIN ATOMIC` body. Returns the offending statement's keyword, upper-cased, else None.
+    SAVEPOINT` stays inside the transaction and is allowed, and so is the `END;` that closes the
+    `BEGIN ATOMIC` body of a `CREATE [OR REPLACE] FUNCTION|PROCEDURE`.
+    Returns the offending statement's keyword, upper-cased, else None.
     """
     words: list[str] = []  # the words of the statement being read
     atomic = 0  # open `BEGIN ATOMIC` bodies, whose inner statements are ordinary ones
@@ -27,7 +28,9 @@ def transaction_control(sql: str) -> str | None:
         found = _verdict(words, atomic)
         if words[:1] == ["END"] and atomic:
             atomic -= 1
-        elif any(a == "BEGIN" and b == "ATOMIC" for a, b in itertools.pairwise(words)):
+        elif _creates_routine(words) and any(
+            a == "BEGIN" and b == "ATOMIC" for a, b in itertools.pairwise(words)
+        ):
             atomic += 1
         words.clear()
         return found
@@ -67,6 +70,15 @@ def transaction_control(sql: str) -> str | None:
         else:
             i += 1
     return finish()
+
+
+def _creates_routine(words: list[str]) -> bool:
+    """Whether the statement is `CREATE [OR REPLACE] FUNCTION|PROCEDURE`, the only home of
+    a `BEGIN ATOMIC` body."""
+    if words[:1] != ["CREATE"]:
+        return False
+    rest = words[3:] if words[1:3] == ["OR", "REPLACE"] else words[1:]
+    return rest[:1] in (["FUNCTION"], ["PROCEDURE"])
 
 
 def _in_word(sql: str, i: int) -> bool:
