@@ -15,7 +15,7 @@ Credentials are declared as `SecretStr`, so neither `repr` nor a log line shows 
 
 from typing import Annotated, Any, Literal, Self
 
-from pydantic import BeforeValidator, Field, ValidationError
+from pydantic import BaseModel, BeforeValidator, Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 __all__ = ["LogLevel", "Settings", "SettingsError"]
@@ -68,13 +68,13 @@ class Settings(BaseSettings):
             return cls()
         except ValidationError as error:
             # `from None`: pydantic's own error repeats the rejected value, which may be a secret.
-            raise SettingsError(cls.__name__, error) from None
+            raise SettingsError(cls, error) from None
 
 
 class SettingsError(Exception):
     """Environment variables a process needs are missing or invalid."""
 
-    def __init__(self, settings: str, error: ValidationError) -> None:
+    def __init__(self, settings: type[BaseModel], error: ValidationError) -> None:
         lines: list[str] = []
         variables: list[str] = []
         for detail in error.errors(include_input=False, include_url=False):
@@ -82,12 +82,47 @@ class SettingsError(Exception):
                 # A rule across several variables belongs to none of them.
                 lines.append(f"  {detail['msg']}")
                 continue
-            name = "__".join(str(part) for part in detail["loc"])
-            variable = f"{PREFIX}{name}".upper()
-            problem = "missing" if detail["type"] == "missing" else f"invalid: {detail['msg']}"
-            lines.append(f"  {variable} is {problem}")
+            if detail["type"] == "missing":
+                for loc in _required_leaves(settings, detail["loc"]):
+                    variable = _variable(loc)
+                    lines.append(f"  {variable} is missing")
+                    variables.append(variable)
+                continue
+            variable = _variable(detail["loc"])
+            lines.append(f"  {variable} is invalid: {detail['msg']}")
             variables.append(variable)
         #: The variables to fix, each named once, in the order the fields are declared.
         self.variables = tuple(dict.fromkeys(variables))
         joined = "\n".join(lines)
-        super().__init__(f"{settings} could not be read from the environment:\n{joined}")
+        super().__init__(f"{settings.__name__} could not be read from the environment:\n{joined}")
+
+
+def _variable(loc: tuple[int | str, ...]) -> str:
+    return f"{PREFIX}{'__'.join(str(part) for part in loc)}".upper()
+
+
+def _required_leaves(
+    model: type[BaseModel], loc: tuple[int | str, ...]
+) -> list[tuple[int | str, ...]]:
+    """The variables to set for the missing field at `loc`.
+
+    A nested group with none of its variables set is reported by pydantic as the group
+    itself (`database`), but there is no `VISIONQUERY_DATABASE` to set: what is missing is
+    each required variable inside it (`VISIONQUERY_DATABASE__URL`).
+    """
+    annotation: object = model
+    for part in loc:
+        if not (isinstance(annotation, type) and issubclass(annotation, BaseModel)):
+            return [loc]
+        field = annotation.model_fields.get(str(part))
+        if field is None:
+            return [loc]
+        annotation = field.annotation
+    if not (isinstance(annotation, type) and issubclass(annotation, BaseModel)):
+        return [loc]
+    return [
+        leaf
+        for name, field in annotation.model_fields.items()
+        if field.is_required()
+        for leaf in _required_leaves(model, (*loc, name))
+    ]

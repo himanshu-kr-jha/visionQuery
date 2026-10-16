@@ -34,6 +34,11 @@ This section will hold the complete steps to go from a fresh clone to a running 
 Every VisionQuery process is configured only through environment variables prefixed `VISIONQUERY_`, logs JSON lines to stdout, and serves Prometheus metrics on `/metrics` (port `9100` unless `VISIONQUERY_METRICS_PORT` says otherwise).
 The variables every process reads are listed in [`CLAUDE.md`](CLAUDE.md#architecture); a process that is missing one it needs exits with status 2 after logging which.
 
+The database schema is applied with `visionquery-migrate`, which reads `VISIONQUERY_DATABASE__URL` (a `postgresql://` URL to a Postgres with TimescaleDB and pgvector) and is safe to run on every start: it applies only what is new, and refuses, naming the file, when the migrations and the database disagree.
+
+The memory's tests run against a real Postgres: they need Docker (each session starts and removes its own container) or `VISIONQUERY_TEST_DATABASE_URL` pointing at a superuser's `postgresql://` URL on a server with TimescaleDB and pgvector.
+Without either they are skipped, saying why.
+
 ## Contributing
 
 Work is test-driven and tracked in GitHub issues.

@@ -177,6 +177,41 @@ def test_a_missing_nested_variable_is_named_as_it_is_set(monkeypatch: pytest.Mon
     assert "VISIONQUERY_DATABASE__URL is missing" in str(raised.value)
 
 
+class Credentials(BaseModel):
+    user: str
+    password: SecretStr
+
+
+class Upstream(BaseModel):
+    credentials: Credentials
+    host: str
+    port: int = 5432
+
+
+class ProxySettings(Settings):
+    upstream: Upstream
+
+
+def test_an_unset_nested_group_names_each_variable_it_needs() -> None:
+    # Nothing under VISIONQUERY_DATABASE__ is set, so pydantic reports `database` itself as
+    # missing; there is no VISIONQUERY_DATABASE to set, so the error names what is.
+    with pytest.raises(SettingsError) as raised:
+        ApiSettings.load()
+    assert raised.value.variables == ("VISIONQUERY_DATABASE__URL",)
+    assert "VISIONQUERY_DATABASE__URL is missing" in str(raised.value)
+    assert "VISIONQUERY_DATABASE is" not in str(raised.value)
+
+
+def test_an_unset_group_of_groups_names_every_required_variable_in_it() -> None:
+    with pytest.raises(SettingsError) as raised:
+        ProxySettings.load()
+    assert raised.value.variables == (
+        "VISIONQUERY_UPSTREAM__CREDENTIALS__USER",
+        "VISIONQUERY_UPSTREAM__CREDENTIALS__PASSWORD",
+        "VISIONQUERY_UPSTREAM__HOST",
+    )
+
+
 def test_a_field_with_an_alias_is_rejected_when_the_settings_are_declared() -> None:
     # An alias is read from a variable without the prefix, which would make the error and
     # the documentation name a variable that is not the one read.

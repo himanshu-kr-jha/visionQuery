@@ -122,10 +122,21 @@ Run everything from the repository root.
 | One package's tests | `uv run pytest packages/memory` |
 | A single test | `uv run pytest tests/test_import_contracts.py::test_the_workspace_keeps_every_contract` |
 | Every check CI runs | `make check` |
+| Apply the database migrations | `VISIONQUERY_DATABASE__URL=postgresql://... uv run visionquery-migrate` |
 
 `make lint` runs both ruff commands.
 After changing a dependency, run `uv lock` and commit `uv.lock` with the change.
-Migrations and running the stack arrive with later M0 issues.
+Running the stack arrives with a later M0 issue.
+
+The memory's tests run against a real Postgres with TimescaleDB and pgvector.
+By default the test session starts a disposable `timescale/timescaledb:2.30.1-pg18` container of its own (on an ephemeral loopback port, removed at the end), so Docker must be running; to use an existing server instead, set `VISIONQUERY_TEST_DATABASE_URL` to a superuser's `postgresql://` URL.
+Without either, those tests are skipped with the reason.
+
+**Migrations** (ADR 0011) are numbered SQL files in `packages/memory/src/visionquery/memory/migrations/`, shipped inside the `visionquery-memory` wheel.
+A schema change is a new file numbered one after the last (`NNNN_lowercase_words.sql`); an applied file is never edited, renamed, renumbered or removed.
+`visionquery-migrate` applies each pending file in its own transaction under an advisory lock and records its SHA-256 in `schema_migrations`.
+It exits 0 when the schema is up to date, 1 when a migration failed (it is rolled back; the ones before it stay) or the database could not be reached, 2 when `VISIONQUERY_DATABASE__URL` is missing or invalid, and 3 when it refused because the files and the database's record disagree, naming each file at fault.
+The role it connects as must be able to create the `timescaledb` and `vector` extensions.
 
 ## Architecture
 
@@ -173,6 +184,9 @@ A service that embeds uvicorn must run it with `log_config=None`, because uvicor
 | `VISIONQUERY_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. |
 | `VISIONQUERY_METRICS_HOST` | `0.0.0.0` | Interface `/metrics` listens on. |
 | `VISIONQUERY_METRICS_PORT` | `9100` | Port `/metrics` listens on; `0` picks a free one. |
+
+A process that uses the memory also declares `database: DatabaseSettings` (from `visionquery.memory.settings`), read from `VISIONQUERY_DATABASE__URL`, a `postgresql://` URL held as a `SecretStr`.
+`visionquery-migrate` reads it, and takes a free metrics port by default because a run lasts seconds.
 
 Import contracts (enforced with import-linter from `.importlinter`, each proven by `tests/test_import_contracts.py`):
 
