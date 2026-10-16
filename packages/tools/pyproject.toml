@@ -1,0 +1,13 @@
+[project]
+name = "visionquery-tools"
+version = "0.1.0"
+description = "The typed operations shared by the api and the Reasoner (ADR 0009)."
+requires-python = "==3.14.*"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "visionquery.tools"

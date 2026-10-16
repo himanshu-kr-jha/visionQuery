@@ -94,7 +94,7 @@ Rules for the loop:
 
 ## Project state
 
-VisionQuery is in design: there is no code yet.
+VisionQuery is being scaffolded (milestone M0): the uv workspace and its seven package skeletons exist, with no behaviour in them yet.
 The design lives in three places, and they are the source of truth:
 
 - `CONTEXT.md` is the glossary.
@@ -107,8 +107,25 @@ The design lives in three places, and they are the source of truth:
 
 ## Commands
 
-None yet: scaffolding the workspace is milestone 0 of `docs/plan/v1.md`.
-When it lands, replace this section with the real commands for build, lint, type check, import contracts, all tests, a single test, migrations and running the stack.
+Python 3.14 is pinned in `.python-version` (the newest minor for which every planned dependency, including PyNvVideoCodec and onnxruntime-gpu, publishes Linux x86_64 wheels) and uv always uses its own managed interpreter (`python-preference = "only-managed"`), installing it if it is missing.
+Run everything from the repository root.
+
+| What | Command |
+|---|---|
+| Install everything from the lockfile | `uv sync --locked` (`make sync`) |
+| Lint | `uv run ruff check` |
+| Format check | `uv run ruff format --check` |
+| Format and autofix | `make format` |
+| Type check (pyright strict) | `uv run pyright` (`make typecheck`) |
+| Import contracts | `uv run lint-imports` (`make contracts`) |
+| All tests | `uv run pytest` (`make test`) |
+| One package's tests | `uv run pytest packages/memory` |
+| A single test | `uv run pytest tests/test_import_contracts.py::test_the_workspace_keeps_every_contract` |
+| Every check CI runs | `make check` |
+
+`make lint` runs both ruff commands.
+After changing a dependency, run `uv lock` and commit `uv.lock` with the change.
+Migrations and running the stack arrive with later M0 issues.
 
 ## Architecture
 
@@ -126,7 +143,10 @@ cameras ──> MediaMTX ──┬──> recorder ──> Footage segments (dis
                        └──> reasoner (pluggable LLM) ──> Answers
 ```
 
-Planned Python packages in one `uv` workspace, with `web/` beside them:
+Python packages in one `uv` workspace under `packages/`, with `web/` beside them.
+Each is a src-layout distribution named `visionquery-<package>` whose module is `visionquery.<package>` (for example `packages/memory/src/visionquery/memory/`), so no module collides with a PyPI package such as `tools` or `api`.
+`visionquery` is a namespace package shared by all of them: no package may add `visionquery/__init__.py`.
+A package's tests live in `packages/<package>/tests/`; tests about the workspace as a whole live in `tests/`.
 
 | Package | Owns |
 |---|---|
@@ -138,7 +158,7 @@ Planned Python packages in one `uv` workspace, with `web/` beside them:
 | `reasoner` | Pluggable LLM interface (local by default) and the Answer builder. |
 | `api` | FastAPI over `tools`. |
 
-Import contracts (enforced with import-linter):
+Import contracts (enforced with import-linter from `.importlinter`, each proven by `tests/test_import_contracts.py`):
 
 - `perception` and `recorder` never import `reasoner` or `api`.
 - Only `memory` imports the database driver.

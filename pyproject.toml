@@ -1,0 +1,71 @@
+[project]
+name = "visionquery"
+version = "0.1.0"
+description = "Remembers every person every camera sees and answers questions about the past with Evidence."
+requires-python = "==3.14.*"
+dependencies = [
+    "visionquery-memory",
+    "visionquery-tools",
+    "visionquery-perception",
+    "visionquery-linker",
+    "visionquery-recorder",
+    "visionquery-reasoner",
+    "visionquery-api",
+]
+
+[tool.uv]
+# Only uv-managed interpreters, never the system's; the minor is pinned, the patch is not.
+python-preference = "only-managed"
+
+[tool.uv.workspace]
+members = ["packages/*"]
+
+[tool.uv.sources]
+visionquery-memory = { workspace = true }
+visionquery-tools = { workspace = true }
+visionquery-perception = { workspace = true }
+visionquery-linker = { workspace = true }
+visionquery-recorder = { workspace = true }
+visionquery-reasoner = { workspace = true }
+visionquery-api = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "import-linter>=2.15",
+    "pyright[nodejs]>=1.1.414",
+    "pytest>=9.1.1",
+    "ruff>=0.17.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "packages"]
+# Every package has a `tests/` directory, so test modules are imported by path, not by name.
+addopts = ["--import-mode=importlib", "--strict-markers", "--strict-config"]
+xfail_strict = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",  # pycodestyle
+    "F",       # pyflakes
+    "I",       # isort
+    "N",       # pep8-naming
+    "B",       # bugbear
+    "C4",      # comprehensions
+    "UP",      # pyupgrade
+    "SIM",     # simplify
+    "PTH",     # pathlib over os.path
+    "RET",     # returns
+    "PT",      # pytest style
+    "RUF",     # ruff-specific
+]
+
+[tool.pyright]
+typeCheckingMode = "strict"
+pythonVersion = "3.14"
+include = ["packages", "tests"]
+venvPath = "."
+venv = ".venv"

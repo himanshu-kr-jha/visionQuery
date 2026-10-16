@@ -40,3 +40,6 @@ web/dist/
 
 # Local tool state
 .serena/
+
+# import-linter
+.import_linter_cache/
