@@ -64,7 +64,7 @@ def test_an_edited_migration_is_refused_by_name(database: str) -> None:
     assert "0001_extensions.sql was edited after it was applied" in refused["message"]
 
 
-def test_a_missing_database_url_is_named(database: str) -> None:
+def test_a_missing_database_url_is_named() -> None:
     status, lines, _ = _run()
     assert status == 2
     (line,) = lines
@@ -99,6 +99,11 @@ SECRET = "hunter2"
         f"postgresql://u:{SECRET}@host:notaport/db",
         f"postgresql://u:{SECRET}@host:99999999/db",
         f"postgresql://u:{SECRET}@[::1/db",
+        f"POSTGRESQL://u:{SECRET}@host/db",
+        f"postgresql://u:{SECRET}@127.0.0.1:1/db?sslmode=bogus",
+        f"postgresql://u:{SECRET}@127.0.0.1:1/db?nosuchoption=1",
+        f"postgresql://u:{SECRET}@127.0.0.1:1/db?options=%zz",
+        f"postgresql://u:{SECRET}@127.0.0.1:1/db?connect_timeout=%ZZ",
     ],
 )
 def test_a_malformed_url_is_a_settings_error_that_never_shows_it(url: str) -> None:
@@ -107,19 +112,3 @@ def test_a_malformed_url_is_a_settings_error_that_never_shows_it(url: str) -> No
     assert SECRET not in json.dumps(lines) + stderr
     (line,) = lines
     assert line["variables"] == ["VISIONQUERY_DATABASE__URL"]
-
-
-@pytest.mark.parametrize(
-    "url",
-    [
-        f"postgresql://u:{SECRET}@127.0.0.1:1/db?sslmode=bogus",
-        f"postgresql://u:{SECRET}@127.0.0.1:1/db?nosuchoption=1",
-        f"postgresql://u:{SECRET}@127.0.0.1:1/db?options=%zz",
-        f"postgresql://u:{SECRET}@127.0.0.1:1/db?connect_timeout=%ZZ",
-    ],
-)
-def test_a_url_libpq_cannot_read_fails_without_showing_it(url: str) -> None:
-    status, lines, stderr = _run(database__url=url)
-    assert status == 1
-    assert SECRET not in json.dumps(lines) + stderr
-    assert any(line["level"] == "CRITICAL" for line in lines)

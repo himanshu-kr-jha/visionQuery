@@ -34,7 +34,6 @@ from pathlib import Path
 from typing import Annotated
 
 import psycopg
-from psycopg.conninfo import conninfo_to_dict
 from pydantic import Field
 from visionquery.memory._sql import transaction_control
 from visionquery.memory.settings import DatabaseSettings
@@ -290,29 +289,11 @@ class MigrateSettings(Settings):
     metrics_port: Annotated[int, Field(ge=0, le=65535)] = 0
 
 
-def _parse(url: str) -> str:
-    """`url` if libpq can read it; otherwise exit, saying nothing of what it contained.
-
-    libpq's parse errors quote the text they could not parse, which may hold the password.
-    """
-    try:
-        conninfo_to_dict(url)
-    except psycopg.Error as error:
-        _log.critical(
-            "could not migrate the database: VISIONQUERY_DATABASE__URL cannot be parsed as a "
-            "connection URL",
-            extra={"error": type(error).__name__},
-        )
-        raise SystemExit(FAILED) from None
-    return url
-
-
 def main() -> None:
     """The `visionquery-migrate` command."""
     process = start("migrate", MigrateSettings)
     try:
-        url = _parse(process.settings.database.url.get_secret_value())
-        applied = migrate(url)
+        applied = migrate(process.settings.database.url.get_secret_value())
     except MigrationRefusedError as error:
         files = [problem.file for problem in error.problems]
         _log.critical("%s", error, extra={"error": type(error).__name__, "files": files})
@@ -328,8 +309,8 @@ def main() -> None:
         )
         raise SystemExit(FAILED) from None
     except psycopg.Error as error:
-        # Only a URL that parsed gets here (see `_parse`), so the server's or the socket's
-        # message cannot be libpq quoting the input back; the scrubber handles the rest.
+        # Only a URL libpq can read gets here (see `DatabaseSettings`), so the server's or the
+        # socket's message cannot be libpq quoting the input back; the scrubber handles the rest.
         _log.critical(
             "could not migrate the database: %s", error, extra={"error": type(error).__name__}
         )
