@@ -1,0 +1,54 @@
+# Prometheus, with the observability profile: scrapes every service's /metrics.
+#
+# Every target is found by looking its Compose service name up in DNS, never listed
+# statically. A service that is not running (Triton without the gpu profile) then has no
+# target rather than one that is down, and every replica of a scaled service (several
+# Perception Workers) is scraped. Each name ends in a dot so it is looked up as it is,
+# never under the host's search domains, which can only be slow or wrong. While a service
+# is not running, Prometheus logs that its name does not resolve, every refresh.
+#
+# A VisionQuery process serves its metrics on port 9100 (ADR 0012): each long-running one
+# gets a job here named after its service when it joins compose.yaml, and
+# tests/test_compose.py fails until it does.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    dns_sd_configs:
+      - names: [prometheus.]
+        type: A
+        port: 9090
+        refresh_interval: 15s
+
+  - job_name: grafana
+    dns_sd_configs:
+      - names: [grafana.]
+        type: A
+        port: 3000
+        refresh_interval: 15s
+
+  # Postgres has no metrics of its own; its exporter connects to it and serves them.
+  - job_name: postgres
+    dns_sd_configs:
+      - names: [postgres-exporter.]
+        type: A
+        port: 9187
+        refresh_interval: 15s
+
+  - job_name: mediamtx
+    dns_sd_configs:
+      - names: [mediamtx.]
+        type: A
+        port: 9998
+        refresh_interval: 15s
+
+  # Only with the gpu profile.
+  - job_name: triton
+    dns_sd_configs:
+      - names: [triton.]
+        type: A
+        port: 8002
+        refresh_interval: 15s

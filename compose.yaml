@@ -1,0 +1,211 @@
+# The VisionQuery stack.
+#
+#   cp .env.example .env              then set the three passwords in it
+#   docker compose up -d --wait       Postgres, migrations and MediaMTX; no GPU needed
+#   docker compose --profile observability up -d --wait     adds Prometheus and Grafana
+#   docker compose --profile gpu up -d --wait               adds Triton on the host's GPUs
+#   docker compose down               stop; add --volumes to delete the data as well
+#
+# Profiles:
+#   gpu            Triton, reserving every GPU. On a machine without one, add
+#                  `-f compose.yaml -f compose.no-gpu.yaml` to run it on the CPU.
+#   observability  Prometheus scraping every service's /metrics, and Grafana reading it.
+#   dev            the fake camera publisher (#6); until it lands, the same as no profile.
+#
+# Every variable is documented in .env.example. Ports are published on
+# VISIONQUERY_BIND_ADDRESS (loopback unless set) and each has a variable of its own.
+
+name: visionquery
+
+x-service: &service
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
+# What every VisionQuery process shares: the one image (Dockerfile) and the runtime's settings.
+x-visionquery: &visionquery
+  <<: *service
+  image: visionquery:dev
+  build: .
+  pull_policy: build
+  read_only: true
+  tmpfs: [/tmp]
+
+services:
+  postgres:
+    <<: *service
+    # TimescaleDB on PostgreSQL 18, with pgvector bundled (ADR 0006).
+    image: timescale/timescaledb:2.30.1-pg18@sha256:9dede0e3ccc071cf71935b17f76bf243331df0b1575338c8ac294640fcf12a36
+    environment:
+      POSTGRES_USER: visionquery
+      POSTGRES_DB: visionquery
+      POSTGRES_PASSWORD: ${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}
+      # The image would otherwise tune itself on every start and rewrite postgresql.conf.
+      NO_TS_TUNE: "true"
+    # A Deployment is closed (ADR 0001, ADR 0002), so TimescaleDB never reports home.
+    command: ["postgres", "-c", "timescaledb.telemetry_level=off"]
+    shm_size: 256m
+    volumes:
+      # PostgreSQL 18 images keep PGDATA in a versioned directory under this one.
+      - postgres:/var/lib/postgresql
+    ports:
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_POSTGRES_PORT:-15432}:5432"
+    healthcheck:
+      # Over TCP: while the image initialises a new database it listens on its socket only,
+      # so a socket check would pass before the server that stays is up.
+      test: ["CMD", "pg_isready", "--host=127.0.0.1", "--username=visionquery", "--dbname=visionquery"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+      start_interval: 1s
+
+  # Brings the schema up to date, then exits; safe to run on every start (ADR 0011).
+  migrate:
+    <<: *visionquery
+    restart: "no"
+    command: ["visionquery-migrate"]
+    environment:
+      VISIONQUERY_LOG_LEVEL: ${VISIONQUERY_LOG_LEVEL:-INFO}
+      VISIONQUERY_DATABASE__URL: postgresql://visionquery:${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}@postgres:5432/visionquery
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mediamtx:
+    <<: *service
+    image: visionquery-mediamtx:1.21.1
+    build: docker/mediamtx
+    pull_policy: build
+    read_only: true
+    environment:
+      MTX_AUTHINTERNALUSERS_3_PASS: ${VISIONQUERY_MEDIAMTX_API_PASSWORD:?set VISIONQUERY_MEDIAMTX_API_PASSWORD in .env (see .env.example)}
+    volumes:
+      # The directory, not the file: MediaMTX reloads its configuration when the file changes,
+      # and a bind-mounted file would keep showing the copy an editor replaced.
+      - ./docker/mediamtx:/etc/mediamtx:ro
+    ports:
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_RTSP_PORT:-8554}:8554"
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_API_PORT:-9997}:9997"
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_WEBRTC_PORT:-8889}:8889"
+      # WebRTC media; ICE announces 8189, so keep the same number on the host.
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_WEBRTC_UDP_PORT:-8189}:8189/udp"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:9997/v3/paths/list"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+  triton:
+    <<: *service
+    profiles: [gpu]
+    image: nvcr.io/nvidia/tritonserver:26.09-py3@sha256:350820308a0e62efbb22f9d4e5b29c970b7c7a54f7b275674e457e5fd8bab1a5
+    command:
+      - tritonserver
+      - --model-repository=/models
+      - --log-format=ISO8601
+    # What NVIDIA asks for: room for shared memory, locked memory and deep stacks.
+    shm_size: 1g
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes:
+      - ./docker/triton/models:/models:ro
+    ports:
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_TRITON_HTTP_PORT:-8000}:8000"
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_TRITON_GRPC_PORT:-8001}:8001"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://127.0.0.1:8000/v2/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+      start_interval: 2s
+    # compose.no-gpu.yaml removes this on a machine without a GPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  prometheus:
+    <<: *service
+    profiles: [observability]
+    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./docker/prometheus:/etc/prometheus:ro
+      - prometheus:/prometheus
+    ports:
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+  grafana:
+    <<: *service
+    profiles: [observability]
+    image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${VISIONQUERY_GRAFANA_ADMIN_PASSWORD:?set VISIONQUERY_GRAFANA_ADMIN_PASSWORD in .env (see .env.example)}
+      # A Deployment is closed: no usage reports, update checks or news feed.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana:/var/lib/grafana
+    ports:
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 1s
+
+  # Postgres's metrics for Prometheus; never published on the host.
+  postgres-exporter:
+    <<: *service
+    profiles: [observability]
+    image: prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
+    environment:
+      DATA_SOURCE_URI: postgres:5432/visionquery?sslmode=disable
+      DATA_SOURCE_USER: visionquery
+      DATA_SOURCE_PASS: ${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}
+    read_only: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:9187/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+volumes:
+  postgres:
+  prometheus:
+  grafana:

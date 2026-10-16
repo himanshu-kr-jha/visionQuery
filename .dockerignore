@@ -1,0 +1,10 @@
+# The VisionQuery image is built from pyproject.toml, uv.lock, .python-version and packages/
+# only; everything else stays out of the build context.
+*
+!pyproject.toml
+!uv.lock
+!.python-version
+!packages/
+**/__pycache__
+**/*.py[cod]
+packages/*/tests/

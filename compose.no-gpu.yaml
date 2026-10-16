@@ -1,0 +1,10 @@
+# Runs Triton (the gpu profile) on a machine without a GPU, for development and tests:
+#
+#   docker compose -f compose.yaml -f compose.no-gpu.yaml --profile gpu up -d --wait
+#
+# It only removes Triton's GPU reservation, which Docker refuses to start without NVIDIA's
+# container toolkit. Triton then serves on the CPU; models that need a GPU will not load.
+
+services:
+  triton:
+    deploy: !reset {}
