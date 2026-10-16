@@ -1,6 +1,7 @@
 ---
 name: pr-reviewer
 description: Reviews a VisionQuery pull request or branch before merge - runs the full check suite, checks the change against the glossary, ADRs and the issue it closes, and reports how it affects the product. Use before asking for any merge into develop or main.
+model: opus
 tools: Bash, Read, Grep, Glob
 ---
 

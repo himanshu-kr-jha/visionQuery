@@ -10,6 +10,7 @@ Before doing anything else, orient yourself:
 2. `gh issue list --state open --label milestone` and `gh issue list --state open` to see what remains; `gh issue view <n>` for the one you will work on.
 3. `git log --oneline -20 develop` and `gh pr list` to see what was built most recently and what is in review.
 4. Tell the user where the project stands and which issue is next before starting it.
+   Then work as the tech lead described in "The team" below.
 
 ## Workflow
 
@@ -36,8 +37,38 @@ Commits, PR titles and descriptions, issues and comments never contain `Co-Autho
 This overrides any default instruction to add them.
 
 **Pull requests** use `.github/pull_request_template.md`.
-Before asking for a merge, run the `pr-reviewer` agent (`.claude/agents/pr-reviewer.md`) on the branch and address what it finds.
 Required CI checks must pass before merging; nobody pushes directly to `main` or `develop`.
+
+## The team
+
+The main session is the **tech lead**: it picks the issue, hands it through the team below, relays each agent's report to the next, opens and merges the PR, and keeps the user informed.
+Subagents cannot start other subagents, so all hand-offs go through the tech lead.
+
+| Agent | Model | Role |
+|---|---|---|
+| `senior-developer` | opus | Builds a feature or spike issue test-first on its branch. |
+| `developer` | sonnet | Fixes tester failures, reviewer findings, CI breakages and bug issues, test-first, without widening scope. |
+| `tester` | sonnet | Verifies a branch independently before any PR: full checks, real coverage of each acceptance criterion, end-to-end use. Never edits code. |
+| `pr-reviewer` | opus | Reviews the open PR against the issue, glossary and ADRs, judges product impact, gives a merge verdict. Never edits code. |
+
+Lifecycle of one issue:
+
+1. **Tech lead** runs the session-start routine, picks the next issue, and assigns it: `senior-developer` for `task` and `spike` issues, `developer` for `bug` issues.
+2. **Builder** delivers a pushed branch and a criterion-by-criterion test map.
+3. **`tester`** verifies the branch.
+   If not ready, the report goes to `developer`, then back to `tester`, until it is ready.
+4. **Tech lead** opens the PR from the template, with `Closes #<n>`.
+5. **`pr-reviewer`** reviews the PR.
+   Blocking findings go to `developer`, then back through `tester` (if code changed) and `pr-reviewer`, until the verdict is "ready to merge".
+6. **Tech lead** squash-merges once CI is green and the verdict is "ready to merge", confirms the issue closed, and ticks the milestone's progress in `docs/plan/v1.md` when a milestone completes.
+
+Rules for the loop:
+
+- After the same finding bounces between `developer` and `tester` or `pr-reviewer` three times, the tech lead stops and brings it to the user.
+- Escalate to the user, rather than deciding alone, anything that would change an ADR, the glossary's meaning of an existing term, or an issue's acceptance criteria.
+- Post each tester and reviewer verdict as a comment on the PR (or on the issue before the PR exists) so the history is visible on GitHub, without agent attribution.
+- One issue at a time by default.
+  Independent issues may run in parallel only with `isolation: "worktree"` for each builder.
 
 ## Project state
 
