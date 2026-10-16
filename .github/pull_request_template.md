@@ -15,4 +15,5 @@ Closes #
 - [ ] Names follow `CONTEXT.md`; new domain terms added there
 - [ ] No ADR contradicted, or a new ADR supersedes it
 - [ ] README setup and `CLAUDE.md` Commands updated if setup, services, env vars or commands changed
-- [ ] `pr-reviewer` agent run and its findings addressed
+- [ ] `tester` verdict "ready for PR" on the final branch
+- [ ] `pr-reviewer` verdict "ready to merge", with all blocking findings addressed

@@ -37,3 +37,6 @@ web/dist/
 .idea/
 .vscode/
 .DS_Store
+
+# Local tool state
+.serena/
