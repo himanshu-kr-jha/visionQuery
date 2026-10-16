@@ -3,7 +3,10 @@ name = "visionquery-runtime"
 version = "0.1.0"
 description = "What every process starts with: env settings, scrubbed JSON logs and a Prometheus /metrics endpoint."
 requires-python = "==3.14.*"
-dependencies = []
+dependencies = [
+    "prometheus-client>=0.26.0",
+    "pydantic-settings>=2.16.0",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.7,<0.12"]
