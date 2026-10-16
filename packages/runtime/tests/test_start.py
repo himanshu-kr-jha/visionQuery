@@ -35,7 +35,7 @@ class ProbeSettings(Settings):
     camera_url: str
 
 
-settings = start("probe", ProbeSettings)
+settings = start("probe", ProbeSettings).settings
 Counter("probe_frames", "Frames read.").inc(5)
 logging.getLogger("probe").info("watching %s", settings.camera_url)
 sys.stdin.read()  # until the test lets go

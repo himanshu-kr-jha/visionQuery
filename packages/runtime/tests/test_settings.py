@@ -180,9 +180,11 @@ def test_a_missing_nested_variable_is_named_as_it_is_set(monkeypatch: pytest.Mon
 def test_a_field_with_an_alias_is_rejected_when_the_settings_are_declared() -> None:
     # An alias is read from a variable without the prefix, which would make the error and
     # the documentation name a variable that is not the one read.
-    with pytest.raises(TypeError, match=r"camera_url.*alias"):
-
+    def declare() -> type[Settings]:
         class Aliased(Settings):
             camera_url: str = Field(validation_alias="CAMERA_URL")
 
-        _ = Aliased
+        return Aliased
+
+    with pytest.raises(TypeError, match=r"camera_url.*alias"):
+        declare()

@@ -6,10 +6,9 @@ import logging
 import sys
 import threading
 import warnings
-from collections.abc import Iterator
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from visionquery.runtime import configure_logging
@@ -19,18 +18,7 @@ SCRUBBED = "rtsp://***@10.0.0.7:554/stream1"
 SECRETS = ("hunter2", "admin:")
 
 
-@pytest.fixture(autouse=True)
-def restore_logging() -> Iterator[None]:
-    root = logging.getLogger()
-    handlers, level = root.handlers[:], root.level
-    factory = logging.getLogRecordFactory()
-    hooks = sys.excepthook, threading.excepthook
-    yield
-    root.handlers[:] = handlers
-    root.setLevel(level)
-    logging.setLogRecordFactory(factory)
-    sys.excepthook, threading.excepthook = hooks
-    logging.captureWarnings(False)
+pytestmark = pytest.mark.usefixtures("restore_logging")
 
 
 @pytest.fixture
@@ -282,7 +270,9 @@ class _AccessFormatter(logging.Formatter):
     """Stands in for uvicorn's `AccessFormatter`, which unpacks `record.args` in `format`."""
 
     def format(self, record: logging.LogRecord) -> str:
-        client, method, path, http_version, status = record.args  # pyright: ignore[reportGeneralTypeIssues]
+        client, method, path, http_version, status = cast(
+            tuple[str, str, str, str, int], record.args
+        )
         return f'{client} - "{method} {path} HTTP/{http_version}" {status}'
 
 
