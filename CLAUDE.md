@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Start of every session
 
-Before doing anything else, orient yourself:
+The user starts or resumes the whole workflow with `/work` (or `/work <issue>`), defined in `.claude/skills/work/SKILL.md`.
+Whether or not it was invoked, before doing anything else, orient yourself:
 
 1. Read `CONTEXT.md`, then the `docs/adr/` titles, then `docs/plan/v1.md`.
 2. `gh issue list --state open --label milestone` and `gh issue list --state open` to see what remains; `gh issue view <n>` for the one you will work on.
