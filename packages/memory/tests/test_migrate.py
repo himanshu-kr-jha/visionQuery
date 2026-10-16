@@ -17,6 +17,7 @@ import pytest
 from visionquery.memory import migrate as runner
 from visionquery.memory.migrate import (
     LOCK_KEY,
+    ConnectionFailedError,
     MigrationFailedError,
     MigrationRefusedError,
     Problem,
@@ -429,7 +430,7 @@ def test_connecting_gives_up_after_the_default_timeout(migrations: Path) -> None
     with _listening_socket_that_never_answers() as server:
         url = f"postgresql://u:p@127.0.0.1:{server.getsockname()[1]}/db"
         started = time.monotonic()
-        with pytest.raises(psycopg.OperationalError):
+        with pytest.raises(ConnectionFailedError, match=r"timed out"):
             migrate(url, migrations, connect_timeout=1)
     assert time.monotonic() - started < 8
 
@@ -438,7 +439,7 @@ def test_a_connect_timeout_in_the_url_wins_over_the_default(migrations: Path) ->
     with _listening_socket_that_never_answers() as server:
         url = f"postgresql://u:p@127.0.0.1:{server.getsockname()[1]}/db?connect_timeout=1"
         started = time.monotonic()
-        with pytest.raises(psycopg.OperationalError):
+        with pytest.raises(ConnectionFailedError, match=r"timed out"):
             migrate(url, migrations, connect_timeout=60)
     assert time.monotonic() - started < 8
 
@@ -450,13 +451,30 @@ def test_a_blocked_statement_fails_naming_its_file_instead_of_stalling(
         setup.execute("CREATE TABLE busy (id int)")
     _write(migrations, "0001_alter.sql", "ALTER TABLE busy ADD COLUMN extra int;")
 
+    outcome: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            migrate(database, migrations, lock_timeout=0.5)
+        except BaseException as error:
+            outcome.append(error)
+
     with psycopg.connect(database) as holder:
         holder.execute("LOCK TABLE busy IN ACCESS EXCLUSIVE MODE")  # until this closes
         started = time.monotonic()
-        with pytest.raises(MigrationFailedError, match=r"0001_alter\.sql") as failed:
-            migrate(database, migrations, lock_timeout=0.5)
-    assert time.monotonic() - started < 10
-    assert isinstance(failed.value.__cause__, psycopg.errors.LockNotAvailable)
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        # A client-side deadline: were the lock_timeout not applied, the migration would wait
+        # for the holder for ever, and this must fail instead of hanging.
+        thread.join(timeout=10)
+        gave_up_in_time = not thread.is_alive()
+    thread.join(timeout=10)  # the holder is gone now, so a stuck run finishes
+    assert gave_up_in_time, "the blocked migration was still waiting: lock_timeout is not applied"
+    assert time.monotonic() - started < 15
+    (error,) = outcome
+    assert isinstance(error, MigrationFailedError)
+    assert "0001_alter.sql" in str(error)
+    assert isinstance(error.__cause__, psycopg.errors.LockNotAvailable)
     assert _recorded(database) == []
 
 
