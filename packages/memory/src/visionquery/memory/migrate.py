@@ -12,7 +12,8 @@ the ones before it stay applied. The record keeps the SHA-256 of the file's byte
 Migrations are append-only: an applied file that was edited, renamed, renumbered or removed
 means the database and the files now describe different schemas, so the run applies nothing
 and says which file is wrong. So does a gap or a repeat in the numbering, a file not named
-like a migration, and a new file numbered at or before the last one applied.
+like a migration, a new file numbered at or before the last one applied, and a pending file
+with a statement that begins, commits or rolls back a transaction (it would escape its own).
 
 **Runners take turns.**
 The whole run holds a Postgres advisory lock, so two runners started at once against one
@@ -33,7 +34,9 @@ from pathlib import Path
 from typing import Annotated
 
 import psycopg
+from psycopg.conninfo import conninfo_to_dict
 from pydantic import Field
+from visionquery.memory._sql import transaction_control
 from visionquery.memory.settings import DatabaseSettings
 from visionquery.runtime import Settings, start
 
@@ -119,6 +122,8 @@ def migrate(url: str, directory: Path = MIGRATIONS) -> tuple[str, ...]:
             raise MigrationRefusedError(problems)
         recorded = {record.name for record in applied}
         pending = [migration for migration in files if migration.name not in recorded]
+        if problems := _transaction_control(pending):
+            raise MigrationRefusedError(problems)
         for migration in pending:
             _apply(connection, migration)
         return tuple(migration.name for migration in pending)
@@ -234,6 +239,20 @@ def _numbering(files: Sequence[_Migration], applied: Sequence[_Applied]) -> list
     return problems
 
 
+def _transaction_control(pending: Sequence[_Migration]) -> list[Problem]:
+    """Each pending file with a statement that would end the transaction it runs in."""
+    problems: list[Problem] = []
+    for migration in pending:
+        statement = transaction_control(migration.sql.decode(errors="replace"))
+        if statement is not None:
+            message = (
+                f"{migration.name} contains {statement}; each migration runs in a transaction "
+                "of its own, so it must not begin, commit or roll one back"
+            )
+            problems.append(Problem(migration.name, message))
+    return problems
+
+
 def _apply(connection: psycopg.Connection, migration: _Migration) -> None:
     try:
         with connection.transaction():
@@ -265,16 +284,36 @@ class MigrateSettings(Settings):
     metrics_port: Annotated[int, Field(ge=0, le=65535)] = 0
 
 
+def _parse(url: str) -> str:
+    """`url` if libpq can read it; otherwise exit, saying nothing of what it contained.
+
+    libpq's parse errors quote the text they could not parse, which may hold the password.
+    """
+    try:
+        conninfo_to_dict(url)
+    except psycopg.Error as error:
+        _log.critical(
+            "could not migrate the database: VISIONQUERY_DATABASE__URL cannot be parsed as a "
+            "connection URL",
+            extra={"error": type(error).__name__},
+        )
+        raise SystemExit(FAILED) from None
+    return url
+
+
 def main() -> None:
     """The `visionquery-migrate` command."""
     process = start("migrate", MigrateSettings)
     try:
-        applied = migrate(process.settings.database.url.get_secret_value())
+        url = _parse(process.settings.database.url.get_secret_value())
+        applied = migrate(url)
     except MigrationRefusedError as error:
         files = [problem.file for problem in error.problems]
         _log.critical("%s", error, extra={"error": type(error).__name__, "files": files})
         raise SystemExit(REFUSED) from None
     except MigrationFailedError as error:
+        # The cause is the server's own message about the file's statements; it is scrubbed
+        # like any log line, and it was raised by a connected session, never by parsing the URL.
         _log.critical(
             "%s: %s",
             error,
@@ -283,6 +322,8 @@ def main() -> None:
         )
         raise SystemExit(FAILED) from None
     except psycopg.Error as error:
+        # Only a URL that parsed gets here (see `_parse`), so the server's or the socket's
+        # message cannot be libpq quoting the input back; the scrubber handles the rest.
         _log.critical(
             "could not migrate the database: %s", error, extra={"error": type(error).__name__}
         )

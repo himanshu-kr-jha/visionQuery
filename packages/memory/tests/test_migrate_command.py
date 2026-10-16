@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import psycopg
+import pytest
 
 COMMAND = Path(sys.executable).parent / "visionquery-migrate"
 
@@ -79,3 +80,46 @@ def test_an_unreachable_database_is_reported_without_its_password(database: str)
     (failed,) = [line for line in lines if line["level"] == "CRITICAL"]
     assert failed["error"] == "OperationalError"
     assert "hunter2" not in json.dumps(lines) + stderr
+
+
+# --- a URL that is not a URL must not leak into the output --------------------------------
+
+SECRET = "hunter2"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"u:{SECRET}",
+        f"user:{SECRET}@host/db",
+        f"host=h password={SECRET}",
+        f"password={SECRET}",
+        f"!!{SECRET}!! not a url",
+        f"mysql://u:{SECRET}@host/db",
+        f"postgresql://u:{SECRET}@host:notaport/db",
+        f"postgresql://u:{SECRET}@host:99999999/db",
+        f"postgresql://u:{SECRET}@[::1/db",
+    ],
+)
+def test_a_malformed_url_is_a_settings_error_that_never_shows_it(url: str) -> None:
+    status, lines, stderr = _run(database__url=url)
+    assert status == 2
+    assert SECRET not in json.dumps(lines) + stderr
+    (line,) = lines
+    assert line["variables"] == ["VISIONQUERY_DATABASE__URL"]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        f"postgresql://u:{SECRET}@127.0.0.1:1/db?sslmode=bogus",
+        f"postgresql://u:{SECRET}@127.0.0.1:1/db?nosuchoption=1",
+        f"postgresql://u:{SECRET}@127.0.0.1:1/db?options=%zz",
+        f"postgresql://u:{SECRET}@127.0.0.1:1/db?connect_timeout=%ZZ",
+    ],
+)
+def test_a_url_libpq_cannot_read_fails_without_showing_it(url: str) -> None:
+    status, lines, stderr = _run(database__url=url)
+    assert status == 1
+    assert SECRET not in json.dumps(lines) + stderr
+    assert any(line["level"] == "CRITICAL" for line in lines)

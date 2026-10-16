@@ -257,3 +257,75 @@ def test_files_that_are_not_sql_are_not_migrations(database: str, migrations: Pa
 def test_refuses_a_directory_that_is_not_there(database: str, tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="nowhere"):
         migrate(database, tmp_path / "nowhere")
+
+
+# --- a file and its record commit together --------------------------------------------------
+
+
+def test_a_file_and_its_record_commit_together(database: str, migrations: Path) -> None:
+    # The file's own statements succeed, then the runner's INSERT of its record collides with
+    # a row the file wrote. Everything the file did must go with it.
+    digest = "decode(repeat('00', 32), 'hex')"
+    _write(
+        migrations,
+        "0001_first.sql",
+        "CREATE TABLE leftovers (id int);\n"
+        "INSERT INTO schema_migrations (number, name, sha256) "
+        f"VALUES (1, '0001_first.sql', {digest});\n",
+    )
+
+    with pytest.raises(MigrationFailedError):
+        migrate(database, migrations)
+
+    assert not _table_exists(database, "leftovers")
+    assert _recorded(database) == []
+
+
+# --- transaction control inside a file ------------------------------------------------------
+
+ESCAPES = ["COMMIT;", "commit", "BEGIN;", "START TRANSACTION;", "END;", "ROLLBACK;", "ABORT;"]
+
+
+@pytest.mark.parametrize("statement", ESCAPES)
+def test_refuses_a_file_that_controls_the_transaction(
+    database: str, migrations: Path, statement: str
+) -> None:
+    _write(migrations, "0001_ok.sql", "CREATE TABLE fine (id int);")
+    _write(migrations, "0002_bad.sql", f"CREATE TABLE gone (id int);\n{statement}\n")
+
+    with pytest.raises(MigrationRefusedError) as refused:
+        migrate(database, migrations)
+
+    assert [problem.file for problem in refused.value.problems] == ["0002_bad.sql"]
+    assert not _table_exists(database, "fine")  # a refused run applies nothing
+    assert not _table_exists(database, "gone")
+
+
+def test_accepts_transaction_words_in_strings_comments_and_function_bodies(
+    database: str, migrations: Path
+) -> None:
+    _write(
+        migrations,
+        "0001_words.sql",
+        """
+-- COMMIT; BEGIN;
+/* ROLLBACK; /* nested COMMIT; */ END; */
+CREATE TABLE notes (body text);
+INSERT INTO notes VALUES ('COMMIT;'), (E'it''s a BEGIN;\\n'), ($q$ROLLBACK; 'END;'$q$);
+CREATE TABLE "commit" ("end" int);
+CREATE FUNCTION f() RETURNS int LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN 1;
+END;
+$$;
+CREATE FUNCTION g() RETURNS int LANGUAGE sql
+BEGIN ATOMIC
+    SELECT 1;
+END;
+SAVEPOINT s;
+ROLLBACK TO SAVEPOINT s;
+SELECT CASE WHEN true THEN 1 ELSE 2 END;
+""",
+    )
+
+    assert migrate(database, migrations) == ("0001_words.sql",)
