@@ -1,20 +1,21 @@
 """A real process started through the runtime: its settings, its log lines and its /metrics.
 
 Each test runs a small service in a child Python process, the way a container would run
-one, and watches only what an operator could see: its stdout, its stderr, its exit code
-and its metrics endpoint over HTTP.
+one, and watches only what whoever runs the container could see: its stdout, its stderr, its
+exit code and its metrics endpoint over HTTP.
 """
 
 import json
 import os
-import select
+import queue
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 import pytest
 from prometheus_client.parser import text_string_to_metric_families
@@ -66,20 +67,52 @@ def _run(service: Path, environment: dict[str, str]) -> subprocess.Popen[str]:
 
 
 def _lines_until(process: subprocess.Popen[str], message: str) -> Iterator[dict[str, Any]]:
-    """Each JSON line the process writes, up to and including the one with `message`."""
+    """Each JSON line the process writes, up to and including the one with `message`.
+
+    A thread reads the pipe into a queue, so a line already buffered by the reader is never
+    mistaken for "nothing yet" (as `select` on a buffered pipe would). The thread stops reading
+    at `message`, so what the process writes afterwards is left for `communicate`.
+    """
     assert process.stdout is not None
+    lines: queue.Queue[str] = queue.Queue()
+
+    def read(stream: TextIO) -> None:
+        for raw in iter(stream.readline, ""):
+            lines.put(raw)
+            if json.loads(raw)["message"] == message:
+                return
+        lines.put("")  # the end of the output
+
+    threading.Thread(target=read, args=(process.stdout,), daemon=True).start()
     deadline = time.monotonic() + 15
-    while time.monotonic() < deadline:
-        ready, _, _ = select.select([process.stdout], [], [], 0.1)
-        if not ready:
-            continue
-        raw = process.stdout.readline()
+    while (remaining := deadline - time.monotonic()) > 0:
+        try:
+            raw = lines.get(timeout=remaining)
+        except queue.Empty:
+            break
         assert raw, f"the process exited before logging {message!r}"
         line = json.loads(raw)
         yield line
         if line["message"] == message:
             return
     pytest.fail(f"no {message!r} within 15 s")
+
+
+def test_lines_are_seen_even_when_the_reader_is_late() -> None:
+    # The child flushes two lines and waits; the reader looks only half a second later.
+    child = (
+        "import sys, time\n"
+        "for m in ('first', 'second'):\n"
+        '    print(\'{"message": "%s"}\' % m, flush=True)\n'
+        "time.sleep(30)\n"
+    )
+    process = subprocess.Popen([sys.executable, "-c", child], stdout=subprocess.PIPE, text=True)
+    try:
+        time.sleep(0.5)
+        assert [line["message"] for line in _lines_until(process, "second")] == ["first", "second"]
+    finally:
+        process.kill()
+        process.wait()
 
 
 def _scrape(port: int) -> dict[str, float]:
