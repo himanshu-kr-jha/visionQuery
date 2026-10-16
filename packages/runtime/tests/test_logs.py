@@ -238,3 +238,41 @@ def test_warnings_are_logged_as_json_and_scrubbed(output: io.StringIO) -> None:
     assert line["level"] == "WARNING"
     assert line["logger"] == "py.warnings"
     _assert_clean(output)
+
+
+def test_a_lone_surrogate_still_comes_out_as_valid_json(output: io.StringIO) -> None:
+    logging.getLogger("x").info("bad \udcff byte", extra={"field": "\ud800"})
+    text = output.getvalue()
+    text.encode("utf-8")
+    (line,) = _lines(output)
+    assert line["message"] == "bad \udcff byte"
+    assert line["field"] == "\ud800"
+
+
+class _Unprintable:
+    def __repr__(self) -> str:
+        raise RuntimeError("no repr")
+
+    def __str__(self) -> str:
+        raise RuntimeError("no str")
+
+
+def test_an_argument_that_cannot_be_printed_never_raises_into_the_caller(
+    output: io.StringIO,
+) -> None:
+    logging.getLogger("x").info("value is %s", _Unprintable())
+    logging.getLogger("x").info(_Unprintable())
+    logging.getLogger("x").info("a %s b %s", _Unprintable(), URL)
+    first, second, third = _lines(output)
+    for line in (first, second, third):
+        assert line["level"] == "INFO"
+        assert "message" in line
+    _assert_clean(output)
+
+
+def test_a_structured_field_that_cannot_be_printed_never_raises_into_the_caller(
+    output: io.StringIO,
+) -> None:
+    logging.getLogger("x").info("hello", extra={"thing": _Unprintable()})
+    (line,) = _lines(output)
+    assert line["message"] == "hello"

@@ -10,6 +10,7 @@ it writes, which covers structured fields.
 import json
 import logging
 import math
+import re
 import sys
 import threading
 from collections.abc import Mapping
@@ -28,6 +29,9 @@ _log = logging.getLogger("visionquery.runtime")
 _STANDARD_ATTRIBUTES = frozenset(
     [*logging.LogRecord("", 0, "", 0, "", None, None).__dict__, "message", "asctime"]
 )
+
+_SURROGATES = re.compile("[\ud800-\udfff]")
+_UNPRINTABLE = "<unprintable>"
 
 _make_record = logging.getLogRecordFactory()
 _exceptions = logging.Formatter()
@@ -75,7 +79,9 @@ class JsonFormatter(logging.Formatter):
             # A structured field never hides one of the fields above.
             if key not in _STANDARD_ATTRIBUTES:
                 line.setdefault(key, value)
-        return json.dumps(_scrubbed(line), ensure_ascii=False)
+        text = json.dumps(_scrubbed(line), ensure_ascii=False)
+        # A lone surrogate cannot be encoded to UTF-8; as a JSON escape it round-trips.
+        return _SURROGATES.sub(lambda found: f"\\u{ord(found.group()):04x}", text)
 
 
 def _scrubbed(value: object) -> object:
@@ -93,20 +99,42 @@ def _scrubbed(value: object) -> object:
         case list() | tuple() | set() | frozenset():
             return [_scrubbed(item) for item in cast(list[object], value)]
         case _:
-            return scrub(str(value))
+            return scrub(_text(value))
+
+
+def _text(value: object) -> str:
+    """`str(value)`, or a placeholder when printing it raises."""
+    try:
+        return str(value)
+    except Exception:
+        return _UNPRINTABLE
+
+
+def _rendered(record: logging.LogRecord) -> str:
+    """The record's message, however badly its arguments fit; never raises."""
+    try:
+        return record.getMessage()
+    except Exception:  # arguments that do not fit must not cost the record
+        pass
+    try:
+        return f"{record.msg} {record.args!r}"
+    except Exception:
+        return _UNPRINTABLE
 
 
 def _scrubbed_record(*args: Any, **kwargs: Any) -> logging.LogRecord:
-    """A record whose message, exception and stack are already scrubbed and rendered."""
+    """A record whose message, exception and stack are already scrubbed and rendered.
+
+    Logging must never raise into the caller, so every rendering step is guarded.
+    """
     record = _make_record(*args, **kwargs)
-    try:
-        message = record.getMessage()
-    except Exception:  # arguments that do not fit must not cost the record
-        message = f"{record.msg} {record.args!r}"
-    record.msg, record.args = scrub(message), None
+    record.msg, record.args = scrub(_rendered(record)), None
     if record.exc_info:
         # Formatters use `exc_text` when it is set, rather than rendering the exception again.
-        record.exc_text = scrub(_exceptions.formatException(record.exc_info))
+        try:
+            record.exc_text = scrub(_exceptions.formatException(record.exc_info))
+        except Exception:
+            record.exc_text = _UNPRINTABLE
     if record.stack_info:
         record.stack_info = scrub(record.stack_info)
     return record

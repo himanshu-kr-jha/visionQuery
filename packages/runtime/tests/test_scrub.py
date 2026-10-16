@@ -1,5 +1,7 @@
 """`scrub` removes the credentials a URL can carry from any text, wherever the URL sits in it."""
 
+import time
+
 import pytest
 from visionquery.runtime import scrub
 
@@ -86,3 +88,85 @@ def test_two_urls_run_together_lose_more_than_their_credentials_but_never_leak()
     scrubbed = scrub("rtsp://u1:secret1@h1/s,rtsp://u2:secret2@h2/s")
     assert "secret1" not in scrubbed
     assert "secret2" not in scrubbed
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("password=hunter2", "password=***"),
+        ("password: hunter2", "password: ***"),
+        ("Password = hunter2 next", "Password = *** next"),
+        ("pwd=abc", "pwd=***"),
+        ("passwd=abc", "passwd=***"),
+        ("secret=abc", "secret=***"),
+        ("client_secret=abc", "client_secret=***"),
+        ("token=abc", "token=***"),
+        ("access_token=abc", "access_token=***"),
+        ("api_key=abc", "api_key=***"),
+        ("api-key: abc", "api-key: ***"),
+        ("x-api-key: abc123", "x-api-key: ***"),
+        ('{"password": "hunter2"}', '{"password": "***"}'),
+        ("{'password': 'hunter2'}", "{'password': '***'}"),
+        ('{"password":"hunter2","user":"a"}', '{"password":"***","user":"a"}'),
+        ("Authorization: Basic YWRtaW46aHVudGVyMg==", "Authorization: Basic ***"),
+        ("Authorization: Bearer abc.def-ghi", "Authorization: Bearer ***"),
+        ('{"Authorization": "Bearer abc"}', '{"Authorization": "Bearer ***"}'),
+        ("connect failed (password=hunter2) retrying", "connect failed (password=***) retrying"),
+    ],
+)
+def test_plain_text_credentials_are_masked(text: str, expected: str) -> None:
+    assert scrub(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "token count=5",
+        "password reset requested for user 7",
+        "max_tokens=5",
+        "the token was refreshed",
+        "secretary=bob",
+        "passwords: none",
+        "mypassword",
+    ],
+)
+def test_ordinary_words_are_left_alone(text: str) -> None:
+    assert scrub(text) == text
+
+
+_MB = 1_000_000
+_ADVERSARIAL = {
+    "letters": "a" * _MB,
+    "scheme_then_letters": "rtsp://" + "a" * _MB,
+    "many_separators": "a://" * (_MB // 4),
+    "bare_separators": "://" * (_MB // 3),
+    "many_ats": "rtsp://" + "@" * _MB,
+    "ats_after_words": "a@" * (_MB // 2),
+    "many_equals": "=" * _MB,
+    "keyword_equals": "password=" * (_MB // 9),
+    "keyword_spaces": "password" + " " * _MB,
+    "keyword_then_quotes": 'password="' * (_MB // 10),
+    "query_marks": "?key" * (_MB // 4),
+    "query_equals": "?key=" * (_MB // 5),
+    "authorization": "Authorization: " * (_MB // 15),
+    "authorization_spaces": "Authorization:" + " " * _MB,
+    "scheme_chars": "a.b-c+d" * (_MB // 7),
+}
+
+
+@pytest.mark.parametrize("name", list(_ADVERSARIAL))
+def test_scrubbing_a_megabyte_of_adversarial_text_is_fast(name: str) -> None:
+    text = _ADVERSARIAL[name]
+    started = time.perf_counter()
+    scrub(text)
+    assert time.perf_counter() - started < 1.0
+
+
+def test_credentials_are_still_removed_inside_large_inputs() -> None:
+    filler = "lorem ipsum " * 50_000
+    text = f"{filler}rtsp://admin:hunter2@cam/x password=hunter2 {filler}"
+    started = time.perf_counter()
+    result = scrub(text)
+    assert time.perf_counter() - started < 1.0
+    assert "hunter2" not in result
+    assert "rtsp://***@cam/x password=***" in result
