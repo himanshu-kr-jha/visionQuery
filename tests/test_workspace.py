@@ -1,5 +1,6 @@
 """The uv workspace holds exactly the packages CLAUDE.md names, each installable and locked."""
 
+import os
 import subprocess
 import tomllib
 from pathlib import Path
@@ -8,17 +9,24 @@ from typing import Any
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGES = {"memory", "tools", "perception", "linker", "recorder", "reasoner", "api"}
 
 
 def _pyproject(path: Path) -> dict[str, Any]:
     return tomllib.loads((path / "pyproject.toml").read_text())
 
 
-def test_workspace_members_are_the_named_packages() -> None:
+def _members() -> set[str]:
     members: list[str] = _pyproject(ROOT)["tool"]["uv"]["workspace"]["members"]
-    found = {p.parent.name for m in members for p in ROOT.glob(f"{m}/pyproject.toml")}
-    assert found == PACKAGES
+    return {p.parent.name for m in members for p in ROOT.glob(f"{m}/pyproject.toml")}
+
+
+PACKAGES = _members()
+
+
+def test_workspace_members_are_the_named_packages() -> None:
+    # CLAUDE.md names these seven; a new package is added here deliberately, with its ADR.
+    named = {"memory", "tools", "perception", "linker", "recorder", "reasoner", "api"}
+    assert named <= PACKAGES
 
 
 @pytest.mark.parametrize("package", sorted(PACKAGES))
@@ -38,15 +46,32 @@ def test_root_depends_on_every_package() -> None:
     assert set(dependencies) == {f"visionquery-{p}" for p in PACKAGES}
 
 
-def test_python_pin_matches_requires_python() -> None:
+def test_python_version_is_the_same_everywhere() -> None:
     pinned = (ROOT / ".python-version").read_text().strip()
-    assert _pyproject(ROOT)["project"]["requires-python"] == f"=={pinned}.*"
+    major_minor = pinned.split(".")
+    assert len(major_minor) == 2, "pin the minor only; uv picks the newest managed patch"
+    root = _pyproject(ROOT)
+    assert root["project"]["requires-python"] == f"=={pinned}.*"
+    assert root["tool"]["pyright"]["pythonVersion"] == pinned
+    assert root["tool"]["ruff"]["target-version"] == f"py{''.join(major_minor)}"
+    for package in PACKAGES:
+        project = _pyproject(ROOT / "packages" / package)["project"]
+        assert project["requires-python"] == f"=={pinned}.*", package
+
+
+def test_the_interpreter_is_uv_managed_so_every_machine_gets_the_same_patch() -> None:
+    assert _pyproject(ROOT)["tool"]["uv"]["python-preference"] == "only-managed"
+
+
+def test_pyright_brings_its_own_node() -> None:
+    dev: list[str] = _pyproject(ROOT)["dependency-groups"]["dev"]
+    assert any(d.startswith("pyright[nodejs]") for d in dev)
 
 
 def test_lockfile_is_committed_and_current() -> None:
     assert (ROOT / "uv.lock").is_file()
     result = subprocess.run(
-        ["uv", "lock", "--check", "--offline"],
+        [os.environ.get("UV", "uv"), "lock", "--check", "--offline"],
         cwd=ROOT,
         capture_output=True,
         text=True,
