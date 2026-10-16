@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+.coverage
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+web/dist/
+
+# Environment and secrets
+.env
+*.env
+!*.env.example
+
+# Runtime data
+/data/
+/footage/
+/recordings/
+*.mp4
+
+# Models and weights
+*.onnx
+*.pt
+*.engine
+*.plan
+
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
