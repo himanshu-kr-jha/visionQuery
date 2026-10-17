@@ -42,10 +42,10 @@ from pathlib import Path
 from typing import Annotated
 
 import psycopg
-from psycopg.conninfo import conninfo_to_dict
 from psycopg.pq import TransactionStatus
 from pydantic import Field
 from visionquery.memory._sql import transaction_control
+from visionquery.memory.connection import ConnectionFailedError, connect
 from visionquery.memory.settings import DatabaseSettings
 from visionquery.runtime import Settings, start
 
@@ -114,57 +114,6 @@ class MigrationFailedError(Exception):
         super().__init__(f"{file} failed and {outcome}")
 
 
-class ConnectionFailedError(Exception):
-    """The database could not be connected to.
-
-    Its message is fixed text by category and never libpq's own, which quotes back the parts of
-    the URL it could not use, and so may hold the password. The host and port are left out for
-    the same reason: a URL can put a secret anywhere.
-    """
-
-    def __init__(self, category: str, cause: str) -> None:
-        self.category = category
-        #: The name of the class of the error that was raised, never its text.
-        self.cause = cause
-        super().__init__(f"could not connect to the database: {category} ({cause})")
-
-
-#: libpq's SQLSTATE for a server that answered and refused.
-_BY_SQLSTATE = {
-    "28P01": "authentication failed",
-    "28000": "authentication failed",
-    "3D000": "database does not exist",
-    "57P03": "server is not accepting connections",
-    "53300": "server has too many connections",
-}
-#: What a client-side failure says, read only to choose a category and never repeated.
-_BY_SYMPTOM = (
-    # A server that answered: a connection failure carries no SQLSTATE, only the FATAL text.
-    ("authentication failed", ("authentication failed", "pg_hba.conf", 'role "')),
-    ("database does not exist", ("does not exist",)),
-    ("server is not accepting connections", ("starting up", "shutting down", "recovery mode")),
-    ("server has too many connections", ("too many clients", "remaining connection slots")),
-    ("host name could not be resolved", ("resolve host", "translate host", "name resolution")),
-    ("timed out", ("timeout expired", "timed out")),
-    (
-        "connection refused or host unreachable",
-        ("refused", "unreachable", "no such file or directory", "no route to host"),
-    ),
-)
-
-
-def _categorize(error: Exception) -> str:
-    """A fixed description of why connecting failed, from the SQLSTATE or the symptom."""
-    sqlstate = getattr(error, "sqlstate", None)
-    if sqlstate in _BY_SQLSTATE:
-        return _BY_SQLSTATE[sqlstate]
-    text = str(error).lower()
-    for category, symptoms in _BY_SYMPTOM:
-        if any(symptom in text for symptom in symptoms):
-            return category
-    return "other connection failure"
-
-
 @dataclass(frozen=True)
 class _Migration:
     number: int
@@ -196,7 +145,7 @@ def migrate(
     waits `lock_timeout` seconds for a lock fails its file.
     """
     files, problems = _read(directory)
-    connection = _connect(url, connect_timeout)
+    connection = connect(url, connect_timeout)
     with connection, _locked(connection):
         # Read under the lock, so what is pending is what nobody else is applying.
         connection.execute(_RECORD)
@@ -212,16 +161,6 @@ def migrate(
             _apply(connection, migration, lock_timeout)
             connection.execute(_RESET)
         return tuple(migration.name for migration in pending)
-
-
-def _connect(url: str, connect_timeout: int) -> psycopg.Connection:
-    """Connect, or raise `ConnectionFailedError` without a word of libpq's text."""
-    try:
-        # A timeout in the URL wins; `None` leaves the keyword out.
-        timeout = None if "connect_timeout" in conninfo_to_dict(url) else connect_timeout
-        return psycopg.connect(url, autocommit=True, connect_timeout=timeout)
-    except Exception as error:
-        raise ConnectionFailedError(_categorize(error), type(error).__name__) from None
 
 
 _RECORD = b"""

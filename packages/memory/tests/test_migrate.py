@@ -1,7 +1,7 @@
 """The migration runner applies numbered SQL files once each, in order, and refuses to guess.
 
-Every test runs against a real Postgres (see conftest.py), in a database of its own, with a
-directory of migrations written for the test.
+Every test runs against a real Postgres (see packages/conftest.py), in a database of its own,
+with a directory of migrations written for the test.
 """
 
 import hashlib
