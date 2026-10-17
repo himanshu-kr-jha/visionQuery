@@ -1131,6 +1131,30 @@ def test_mediamtx_refuses_an_unauthenticated_publish_and_read(dev_stack: Stack) 
     _assert_healthy(dev_stack, {"fake-cameras"})
 
 
+def test_the_webrtc_live_view_is_refused_without_visionquerys_credentials(
+    dev_stack: Stack,
+) -> None:
+    # A browser asks for a camera over WHEP, on the camera-facing WebRTC port.
+    url = dev_stack.url("mediamtx", 8889, "/lobby/whep")
+
+    def offer(credentials: tuple[str, str] | None = None) -> int:
+        request = urllib.request.Request(url, data=b"v=0\r\n", method="POST")
+        request.add_header("Content-Type", "application/sdp")
+        if credentials is not None:
+            token = base64.b64encode(":".join(credentials).encode()).decode()
+            request.add_header("Authorization", f"Basic {token}")
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return response.status
+        except urllib.error.HTTPError as error:
+            return error.code
+
+    assert offer() == 401
+    assert offer(("lobby", dev_stack.secret("VISIONQUERY_FAKE_CAMERA_PASSWORD"))) == 401
+    # With them MediaMTX goes on to the offer, which is deliberately not one it can answer.
+    assert offer(("visionquery", dev_stack.secret("VISIONQUERY_MEDIAMTX_API_PASSWORD"))) == 400
+
+
 def test_mediamtx_has_a_ready_path_for_exactly_the_configured_cameras(dev_stack: Stack) -> None:
     _wait_until_every_camera_is_ready(dev_stack, _dev_cameras(), timeout=30)
     paths = _paths(dev_stack)
