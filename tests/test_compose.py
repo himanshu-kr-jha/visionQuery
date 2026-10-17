@@ -33,7 +33,7 @@ GRAFANA_DATASOURCES = ROOT / "docker" / "grafana" / "provisioning" / "datasource
 
 PROFILES = ("dev", "gpu", "observability")
 #: What `docker compose up` starts with no profile, on a machine without a GPU.
-DEFAULT_SERVICES = {"postgres", "migrate", "mediamtx"}
+DEFAULT_SERVICES = {"postgres", "migrate", "mediamtx", "api"}
 #: What each profile adds.
 PROFILE_SERVICES: dict[str, set[str]] = {
     "dev": {"fake-cameras"},
@@ -338,12 +338,28 @@ def test_the_database_password_is_not_part_of_the_url() -> None:
     # A password with `@`, `/`, `:` or `#` in it would break a URL; libpq reads it from
     # PGPASSWORD instead, so any password works.
     password = "p@ss/w:rd#1"
-    migrate = _services(_config(env={"VISIONQUERY_POSTGRES_PASSWORD": password}))["migrate"]
-    environment = migrate["environment"]
-    assert password not in environment["VISIONQUERY_DATABASE__URL"]
-    assert "@" in environment["VISIONQUERY_DATABASE__URL"]
-    assert "visionquery:" not in environment["VISIONQUERY_DATABASE__URL"]
-    assert environment["PGPASSWORD"] == password
+    services = _services(_config(env={"VISIONQUERY_POSTGRES_PASSWORD": password}))
+    connecting = {
+        n: s for n, s in services.items() if "VISIONQUERY_DATABASE__URL" in s.get("environment", {})
+    }
+    assert set(connecting) >= {"migrate", "api"}
+    for name, service in connecting.items():
+        environment = service["environment"]
+        assert password not in environment["VISIONQUERY_DATABASE__URL"], name
+        assert "@" in environment["VISIONQUERY_DATABASE__URL"], name
+        assert "visionquery:" not in environment["VISIONQUERY_DATABASE__URL"], name
+        assert environment["PGPASSWORD"] == password, name
+
+
+def test_the_api_serves_on_its_own_port_and_is_healthy_only_when_health_says_so() -> None:
+    api = _services(_config())["api"]
+    assert api["command"] == ["visionquery-api"]
+    [port] = api["ports"]
+    assert (port["target"], port["published"]) == (8080, "8080")
+    # The image has no curl or wget: the healthcheck asks /health with the image's own Python,
+    # which fails on the 503 the api answers while the database cannot be reached.
+    test = " ".join(api["healthcheck"]["test"])
+    assert "http://127.0.0.1:8080/health" in test
 
 
 def _published(config: Mapping[str, Any]) -> list[tuple[str, str, str, str]]:

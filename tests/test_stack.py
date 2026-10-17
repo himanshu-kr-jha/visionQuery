@@ -324,10 +324,55 @@ def default_stack() -> Iterator[Stack]:
         yield stack
 
 
-def test_the_default_stack_starts_postgres_and_mediamtx_healthy(default_stack: Stack) -> None:
+def test_the_default_stack_starts_postgres_mediamtx_and_the_api_healthy(
+    default_stack: Stack,
+) -> None:
     containers = default_stack.containers()
-    assert set(containers) == {"postgres", "migrate", "mediamtx"}
-    _assert_healthy(default_stack, {"postgres", "mediamtx"})
+    assert set(containers) == {"postgres", "migrate", "mediamtx", "api"}
+    _assert_healthy(default_stack, {"postgres", "mediamtx", "api"})
+
+
+def _health(stack: Stack) -> tuple[int, dict[str, Any]]:
+    status, body = _get(stack.url("api", 8080, "/health"))
+    return status, json.loads(body)
+
+
+def test_the_api_reaches_the_database_with_the_awkward_password(default_stack: Stack) -> None:
+    assert _health(default_stack) == (
+        200,
+        {"status": "healthy", "database": {"status": "connected", "problem": None}},
+    )
+
+
+def test_the_api_logs_json_lines_only(default_stack: Stack) -> None:
+    # uvicorn runs with log_config=None, so its lines go through the runtime's JSON handler.
+    logs = default_stack.compose("logs", "--no-color", "--no-log-prefix", "api").stdout
+    lines = [json.loads(line) for line in logs.splitlines() if line.strip()]
+    assert any(line["logger"].startswith("uvicorn") for line in lines), logs
+    assert {line["service"] for line in lines} == {"api"}
+
+
+def test_the_api_says_when_the_database_is_down_and_recovers(default_stack: Stack) -> None:
+    default_stack.compose("stop", "postgres")
+    try:
+        status, body = _health(default_stack)
+        assert status == 503, body
+        assert body["status"] == "unhealthy"
+        assert body["database"]["status"] == "unreachable"
+        assert body["database"]["problem"] in {
+            "host name could not be resolved",
+            "connection refused or host unreachable",
+            "timed out",
+        }
+        assert default_stack.secret("VISIONQUERY_POSTGRES_PASSWORD") not in json.dumps(body)
+    finally:
+        default_stack.compose("up", "--detach", "--wait", "postgres", timeout=WAIT_TIMEOUT)
+
+    def healthy() -> tuple[int | None, str]:
+        status, body = _health(default_stack)
+        return (status, "") if status == 200 else (None, f"/health answered {status}: {body}")
+
+    wait_for(healthy, timeout=60)
 
 
 def test_migrate_ran_once_and_succeeded(default_stack: Stack) -> None:
@@ -598,7 +643,7 @@ def test_concurrent_projects_do_not_touch_each_others_images_or_containers() -> 
 # --- The observability profile --------------------------------------------------------------
 
 #: Every Prometheus job with a target in the stack without `gpu`.
-OBSERVED_JOBS = {"prometheus", "grafana", "postgres", "mediamtx"}
+OBSERVED_JOBS = {"prometheus", "grafana", "postgres", "mediamtx", "api"}
 
 
 @pytest.fixture(scope="module")

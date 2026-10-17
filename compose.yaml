@@ -1,7 +1,7 @@
 # The VisionQuery stack.
 #
 #   cp .env.example .env              then set the three passwords in it
-#   make up                           Postgres, migrations and MediaMTX; no GPU needed
+#   make up                           Postgres, migrations, MediaMTX and the api; no GPU
 #   make up COMPOSE_PROFILES=observability     adds Prometheus and Grafana
 #   make up COMPOSE_PROFILES=gpu               adds Triton on the host's GPUs
 #   make up COMPOSE_PROFILES=dev               adds fake cameras (`make fetch-samples` first)
@@ -105,6 +105,34 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+
+  # The HTTP api the web app and Operators use (`visionquery-api`).
+  api:
+    <<: *visionquery
+    command: ["visionquery-api"]
+    environment:
+      VISIONQUERY_LOG_LEVEL: ${VISIONQUERY_LOG_LEVEL:-INFO}
+      # As for migrate: the password is in PGPASSWORD, never in the URL.
+      VISIONQUERY_DATABASE__URL: postgresql://visionquery@postgres:5432/visionquery
+      PGPASSWORD: ${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_API_PORT:-8080}:8080"
+    healthcheck:
+      # The image has no curl or wget, so its own Python asks; urlopen fails on the 503 the api
+      # answers while it cannot reach the database, so the api is healthy only when it can serve.
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4)
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
 
   mediamtx:
     <<: *service

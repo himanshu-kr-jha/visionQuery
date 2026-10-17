@@ -1,3 +1,6 @@
 # The checksum of a migration is of its bytes (ADR 0011), so a checkout must never
 # change them: LF in the repository and in every working tree, whatever core.autocrlf says.
 *.sql text eol=lf
+# Generated from the api (`make api-types`), and checked byte for byte by `make check`.
+web/src/api/openapi.json text eol=lf linguist-generated
+web/src/api/schema.d.ts text eol=lf linguist-generated
