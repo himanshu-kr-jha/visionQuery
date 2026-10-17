@@ -55,9 +55,12 @@ Without `$ARGUMENTS`, if the earliest open milestone issue has no open sub-issue
 
 Follow the lifecycle and loop rules in `CLAUDE.md` exactly.
 Keep the pipeline full: as soon as `senior-developer` hands an issue back, start it on the next issue in a new worktree, then send the handed-back branch on to `tester`.
+Never run more than three agents at once; light docs or CI work (a docs-only or config-only review, a CI-fix on workflow files) may run beside them.
 
 1. `senior-developer` for `task` and `spike` issues, `developer` for `bug` issues: build on the branch, test-first, with `isolation: "worktree"`.
-2. `tester` verifies the branch and runs the stack tests once on its head; `developer` fixes and `tester` re-verifies.
+2. `tester` verifies the branch; `developer` fixes and `tester` re-verifies.
+   The tester runs the full stack tests once per PR, on the head it passes as ready for PR; a verification that finds the branch not ready, and each intermediate fix round, gets `make check` plus only the stack tests the change touches.
+   Once CI runs on the PR, its `stack` job is the stack-test run, and a local stack run is optional: tell the tester so.
    Docs-only and config-only changes skip this step.
 3. Open the PR from the template with `Closes #<n>`, without agent attribution.
 4. `pr-reviewer` reviews; blocking findings go to `developer`, then back through `tester` if code changed, then `pr-reviewer`.

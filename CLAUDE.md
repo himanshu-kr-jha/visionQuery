@@ -73,7 +73,9 @@ Lifecycle of one issue:
 2. **Builder** delivers a pushed branch and a criterion-by-criterion test map, and ends its run with that hand-back.
    The tech lead posts each builder hand-back as a comment on the PR if one exists, otherwise on the issue, and then unlocks and removes the builder's worktree (`git worktree unlock <path>; git worktree remove --force <path>`; agent worktrees are locked), after confirming the worktree has no uncommitted changes and `git rev-parse <branch>` equals `origin/<branch>`, so the branch is free for `developer`.
    The builder also updates the milestone's status marker in `docs/plan/v1.md` as part of the same PR: `[~]` in the first PR of a milestone, `[x]` in the PR that closes its last sub-issue.
-3. **`tester`** verifies the branch, and is the one agent that runs the full stack tests (`make test-stack`) on each PR head.
+3. **`tester`** verifies the branch, and is the one agent that runs the full stack tests (`make test-stack`), once per PR: on the head it passes as ready for PR, once everything else has passed there.
+   A verification that finds the branch not ready, and the re-verification after an intermediate fix round, runs `make check` plus only the stack tests the change touches (`uv run pytest -m stack tests/test_stack.py::<test>`).
+   Once CI runs on the PR, its `stack` job is the stack-test run for every later head, and a local stack run is optional.
    If not ready, the report goes to `developer`, then back to `tester`.
    Docs-only and config-only changes skip the tester: `pr-reviewer` alone checks them.
 4. **Tech lead** opens the PR from the template, with `Closes #<n>` and a Conventional Commit title.
@@ -99,7 +101,8 @@ Rules for the loop:
   Before filing one, the tech lead looks for it with `gh issue list --state all --search '"Follow-up to #<pr>" in:body'` and files none if it exists, so a PR gets at most one.
 - Escalate to the user, rather than deciding alone, anything that would change an ADR, the glossary's meaning of an existing term, or an issue's acceptance criteria.
 - Post each builder hand-back, tester verdict and reviewer verdict as a comment on the PR if one exists, otherwise on the issue, so the history is visible on GitHub, without agent attribution.
-- Work is pipelined: once `senior-developer` hands back an issue it never returns to it, and starts the next issue straight away while `tester`, `developer` and `pr-reviewer` finish the previous one.
+- At most three agents run at once, so that the machine keeps up with the stack tests and builds they run; light docs or CI work (a docs-only or config-only review, a CI-fix hand-back on workflow files) may run beside them.
+- Work is pipelined: once `senior-developer` hands back an issue it never returns to it, and starts the next issue straight away (within the three-agent limit) while `tester`, `developer` and `pr-reviewer` finish the previous one.
   Every builder runs with `isolation: "worktree"`, and so does `developer` whenever another agent is using the main checkout, so no two agents share a working tree.
   The next issue is the lowest-numbered open sub-issue of the earliest open milestone, preferring one that does not depend on unmerged work.
   If every candidate depends on unmerged work, the builder cuts its branch from the unmerged branch, never from a branch that itself depends on unmerged work (one level of dependency at most); once that merges, `developer` moves it onto develop with `git rebase --onto origin/develop <parent head>`, where `<parent head>` is the parent PR's final head (`gh pr view <parent> --json headRefOid`), and its PR is opened only after that.
@@ -110,7 +113,7 @@ Rules for the loop:
 
 ## Project state
 
-VisionQuery is being scaffolded (milestone M0): the uv workspace and its seven package skeletons exist, with no behaviour in them yet.
+The scaffold (milestone M0) is done: the uv workspace and its packages, the Compose stack with fake cameras, the api's health and the web app's page, CI, and the setup guide; the packages hold no domain behaviour yet, which milestone M1 starts.
 The design lives in three places, and they are the source of truth:
 
 - `CONTEXT.md` is the glossary.
