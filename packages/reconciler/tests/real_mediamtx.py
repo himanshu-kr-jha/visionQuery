@@ -1,14 +1,15 @@
 """A real MediaMTX, configured as the Deployment configures it, and ffmpeg to publish and read.
 
-The reconciler's tests import it by name (pytest's `pythonpath` holds this directory), and
-conftest.py makes the fixtures. `running_mediamtx()` runs one container of the MediaMTX release
-`docker/mediamtx/Dockerfile` builds on, with the Deployment's own `docker/mediamtx/mediamtx.yml`
-and a generated password for the `visionquery` user, on a Docker network of its own (as
-`mediamtx`). Its API is published on an ephemeral loopback port, so the tests reach it as the
-reconciler does: with credentials, and not from MediaMTX's own loopback. Cameras are played by
-ffmpeg containers (the image the fake cameras use) on the same network. The container and the
-network are removed afterwards; every container carries the label `packages/conftest.py` sweeps,
-should a session be killed.
+The reconciler's and the recorder's tests import it by name (pytest's `pythonpath` holds this
+directory), and each one's conftest.py makes the fixtures. `running_mediamtx()` runs one
+container of the MediaMTX release `docker/mediamtx/Dockerfile` builds on, with the Deployment's
+own `docker/mediamtx/mediamtx.yml` and a generated password for the `visionquery` user, on a
+Docker network of its own (as `mediamtx`). Its API and its RTSP port are published on loopback
+ports of their own, so the tests reach them as the reconciler and the recorder do: with
+credentials, and not from MediaMTX's own loopback. Cameras are played by ffmpeg containers (the
+image the fake cameras use) on the same network. The container and the network are removed
+afterwards; every container carries the label `packages/conftest.py` sweeps, should a session be
+killed.
 """
 
 import base64
@@ -97,6 +98,12 @@ class MediaMTX:
     api_url: str
     #: The `visionquery` user's password.
     password: str
+    #: The loopback port MediaMTX's RTSP is published on, for a reader on the host.
+    rtsp_port: int
+
+    def rtsp_url(self, path: str, user: str | None = None, password: str | None = None) -> str:
+        """`path`'s RTSP URL as a reader on the host reaches it."""
+        return f"rtsp://{_credentials(user, password)}127.0.0.1:{self.rtsp_port}/{path}"
 
     def restart(self) -> None:
         """Restart MediaMTX, which forgets everything set through its API."""
@@ -149,6 +156,20 @@ class MediaMTX:
         """Publish a test pattern for `seconds` to `path`, as a camera would; ffmpeg exits 0
         only when MediaMTX accepted it."""
         return _docker(*self._publisher(path, user, password, seconds), timeout=60)
+
+    def publish_file(
+        self, path: str, user: str, password: str, clip: Path
+    ) -> subprocess.CompletedProcess[str]:
+        """Publish `clip` once to `path` in real time, copied, as a camera would send it; ffmpeg
+        exits 0 only when MediaMTX accepted all of it."""
+        url = f"rtsp://{_credentials(user, password)}{RTSP}/{path}"
+        return _docker(
+            "run", "--rm", "--network", self.network, "--label", LABEL,
+            "--volume", f"{clip.resolve()}:/clip{clip.suffix}:ro",
+            FFMPEG_IMAGE, "-v", "error", "-re", "-i", f"/clip{clip.suffix}",
+            "-c", "copy", "-f", "rtsp", "-rtsp_transport", "tcp", url,
+            timeout=600,
+        )  # fmt: skip
 
     @contextmanager
     def publishing(self, path: str, user: str, password: str) -> Generator[None]:
@@ -211,7 +232,7 @@ def running_mediamtx() -> Generator[MediaMTX]:
     suffix = uuid.uuid4().hex[:12]
     network, container = f"vq-test-net-{suffix}", f"vq-test-mediamtx-{suffix}"
     password = secrets.token_hex(24)
-    port = _free_port()
+    port, rtsp_port = _free_port(), _free_port()
     assert _docker("network", "create", "--label", LABEL, network).returncode == 0
     try:
         started = _docker(
@@ -222,12 +243,13 @@ def running_mediamtx() -> Generator[MediaMTX]:
             "--volume", f"{MEDIAMTX_CONFIG}:/etc/mediamtx:ro",
             # A port of its own, not an ephemeral one, which a restart would change.
             "--publish", f"127.0.0.1:{port}:9997",
+            "--publish", f"127.0.0.1:{rtsp_port}:8554",
             MEDIAMTX_IMAGE, "/etc/mediamtx/mediamtx.yml",
             timeout=600,
         )  # fmt: skip
         assert started.returncode == 0, started.stderr
         try:
-            server = MediaMTX(container, network, f"http://127.0.0.1:{port}", password)
+            server = MediaMTX(container, network, f"http://127.0.0.1:{port}", password, rtsp_port)
             server.wait_until_ready()
             yield server
         finally:
