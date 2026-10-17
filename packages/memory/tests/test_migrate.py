@@ -373,7 +373,8 @@ def test_session_settings_of_one_file_do_not_leak_into_the_next(
     _write(
         migrations,
         "0001_settings.sql",
-        "CREATE SCHEMA other;\nSET search_path TO other, public;\nSET statement_timeout = '300ms';\n",
+        "CREATE SCHEMA other;\nSET search_path TO other, public;\n"
+        "SET statement_timeout = '300ms';\n",
     )
     _write(migrations, "0002_table.sql", "CREATE TABLE t2 (id int);")
     _write(migrations, "0003_sleep.sql", "SELECT pg_sleep(1);")
