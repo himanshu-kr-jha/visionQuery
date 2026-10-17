@@ -4,7 +4,7 @@ import logging
 import socket
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from functools import partial
 
 import pytest
@@ -187,9 +187,40 @@ def test_the_deadline_is_the_checks_budget_plus_a_margin() -> None:
     assert DEADLINE_MARGIN_SECONDS > 0
 
 
+_RELEASE_FOREVER = threading.Event()
+
+
+@pytest.fixture(autouse=True)
+def _release_stuck_checks() -> Iterator[None]:
+    """Lets the threads `_forever` holds finish when a test ends, so none outlives it."""
+    _RELEASE_FOREVER.clear()
+    yield
+    _RELEASE_FOREVER.set()
+
+
 def _forever() -> DatabaseHealth:
-    threading.Event().wait()
-    raise AssertionError("unreachable")
+    _RELEASE_FOREVER.wait()
+    return UP
+
+
+def test_a_failure_to_start_the_check_does_not_wedge_the_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    start = threading.Thread.start
+    failures = [RuntimeError("can't start new thread")]
+
+    def flaky_start(self: threading.Thread) -> None:
+        if failures:
+            raise failures.pop()
+        start(self)
+
+    check, clock = _Check(UP), _Clock()
+    probe = _probe(check, clock)
+    monkeypatch.setattr(threading.Thread, "start", flaky_start)
+    with pytest.raises(RuntimeError):
+        probe()
+    assert probe() == UP  # the next request starts a fresh check
+    assert check.calls == 1
 
 
 def test_the_request_that_runs_a_check_gives_up_at_the_deadline() -> None:
