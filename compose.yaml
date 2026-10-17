@@ -125,7 +125,7 @@ services:
     <<: *visionquery
     command: ["visionquery-api"]
     environment:
-      VISIONQUERY_LOG_LEVEL: ${VISIONQUERY_LOG_LEVEL:-INFO}
+      <<: *runtime-environment
       # The api listens on loopback unless told otherwise; in a container that would be
       # unreachable from outside it. Who can reach the published port is decided below
       # (VISIONQUERY_BIND_ADDRESS), not here.
