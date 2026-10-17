@@ -23,10 +23,10 @@ its video from the second the wall clock says, counted from the Unix epoch: at e
 ffmpeg, and at every restart, a camera joins the timeline at the next whole second (where there
 is a keyframe). Videos recorded together are therefore in step on every camera, whenever each
 was prepared or restarted, and the same footage repeats every DURATION seconds, from the same
-minutes of every hour. An ffmpeg that reports no frame for 15 s is hung: it is killed and
-restarted.
+minutes of every hour. An ffmpeg whose frame count has not moved for 15 s is hung (it goes on
+reporting the same count while its write blocks): it is killed and restarted.
 
-`health` exits 0 when every camera's ffmpeg has reported a frame in the last few seconds.
+`health` exits 0 when every camera's ffmpeg has sent a new frame in the last few seconds.
 """
 
 import asyncio
@@ -51,7 +51,7 @@ SYNTHETIC_SIZE = "1280x720"
 SYNTHETIC_RATE = 15
 #: How long the test pattern runs before it loops.
 SYNTHETIC_SECONDS = 60
-#: A camera whose ffmpeg last reported a frame longer ago than this is not publishing.
+#: A camera whose ffmpeg last sent a new frame longer ago than this is not publishing.
 STALE_AFTER = 5.0
 #: Changes whenever prepare_command does, so that samples prepared the old way are redone.
 PREPARATION = "3"
@@ -64,7 +64,7 @@ PLAYLIST_HOURS = 24
 #: Where that timeline starts, in Unix time: at 0, a loop of 300 s begins at every five minutes
 #: of the wall clock (hh:00, hh:05, ...), whatever the machine and whenever the cameras started.
 EPOCH = 0.0
-#: A running ffmpeg that has not reported a frame for this long is hung (a blocked RTSP write),
+#: A running ffmpeg that has not sent a new frame for this long is hung (a blocked RTSP write),
 #: and is killed so that it restarts; health reports it from STALE_AFTER on.
 HUNG_AFTER = 3 * STALE_AFTER
 #: How often a running ffmpeg is checked for that.
@@ -254,7 +254,7 @@ def restart_delay(failures: int) -> int:
 def not_publishing(
     cameras: Sequence[Camera], progress: Mapping[str, float], now: float
 ) -> list[str]:
-    """The cameras whose ffmpeg has not reported a frame recently."""
+    """The cameras whose ffmpeg has not sent a new frame recently."""
     return [
         c.name
         for c in cameras
@@ -325,7 +325,7 @@ class Ended:
 
     def __str__(self) -> str:
         if self.hung:
-            said = f"reported no progress for {HUNG_AFTER:.0f} s and was killed"
+            said = f"sent no new frame for {HUNG_AFTER:.0f} s and was killed"
         else:
             said = "could not start" if self.status is None else f"exited with {self.status}"
         if not self.errors:
@@ -344,7 +344,8 @@ async def _collect(stderr: asyncio.StreamReader, into: list[str]) -> None:
 
 
 class Publisher:
-    """Runs and restarts one ffmpeg per camera, and records when each last sent a frame."""
+    """Runs and restarts one ffmpeg per camera, and records when each last sent a new frame,
+    by the monotonic clock."""
 
     def __init__(
         self,
@@ -540,31 +541,36 @@ class Publisher:
         hung_after: float,
         hung: asyncio.Event,
     ) -> None:
-        """Kill the ffmpeg once it has reported no frame for `hung_after` seconds, as when a
-        write to a MediaMTX that stopped reading blocks and never fails."""
-        started = self._wall()
+        """Kill the ffmpeg once it has sent no new frame for `hung_after` seconds, as when a
+        write to a MediaMTX that stopped reading blocks and never fails. Timed by the monotonic
+        clock, so that a step of the wall clock, or a suspended host, does not look like that."""
+        started = self._clock()
         while process.returncode is None:
             await self._sleep(WATCH_EVERY)
-            if self._wall() - self._progress.get(label, started) > hung_after:
+            if self._clock() - self._progress.get(label, started) > hung_after:
                 hung.set()
                 process.kill()
                 return
 
     async def _read_progress(self, camera: str, stdout: asyncio.StreamReader) -> None:
-        """`-progress pipe:1` reports `frame=N` then `progress=continue` every second."""
-        frame = 0
+        """`-progress pipe:1` reports `frame=N` then `progress=continue` every second, and goes
+        on reporting the same N while a write blocks (ffmpeg 7 and later report from a thread of
+        their own): only a count that moved is progress."""
+        frame = sent = 0
         async for raw in stdout:
             key, _, value = raw.decode(errors="replace").strip().partition("=")
             if key == "frame" and value.isdigit():
                 frame = int(value)
-            elif key == "progress" and frame > 0:
-                self._progress[camera] = self._wall()
+            elif key == "progress" and frame > sent:
+                sent = frame
+                self._progress[camera] = self._clock()
 
     def _save_status(self) -> None:
-        """Tell `health` when each camera last sent a frame."""
+        """Tell `health` when each camera last sent a frame, in Unix time."""
         status = self._settings.status
         part = status.with_name(f"{status.name}.part")
-        part.write_text(json.dumps(self._progress))
+        ago = self._clock() - self._wall()
+        part.write_text(json.dumps({name: at - ago for name, at in self._progress.items()}))
         part.replace(status)
 
     async def _write_status(self) -> NoReturn:

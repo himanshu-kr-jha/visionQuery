@@ -308,7 +308,9 @@ def test_a_camera_is_publishing_while_its_frames_keep_coming() -> None:
 # --- Supervising ffmpeg -----------------------------------------------------------------------
 
 #: Stands in for ffmpeg: logs its arguments, reports progress like `-progress pipe:1` until
-#: told to stop, or exits at once when the file named by FAKE_FFMPEG_FAIL exists. Preparing a
+#: told to stop, or exits at once when the file named by FAKE_FFMPEG_FAIL exists. While the file
+#: named by FAKE_FFMPEG_STALL exists its frame count stops, as a real ffmpeg's does when its
+#: write blocks, but it goes on reporting it, as a real ffmpeg does. Preparing a
 #: sample (not the test pattern) takes until the file named by FAKE_FFMPEG_HOLD is gone, and
 #: fails while the file named by FAKE_FFMPEG_FAIL_PREPARE exists.
 FAKE_FFMPEG = textwrap.dedent(
@@ -333,7 +335,9 @@ FAKE_FFMPEG = textwrap.dedent(
         sys.exit(1)
     frame = 0
     while True:
-        frame += 15
+        # A write MediaMTX stopped reading blocks, and ffmpeg goes on reporting the same count.
+        if not Path(os.environ["FAKE_FFMPEG_STALL"]).exists():
+            frame += 15
         print(f"frame={frame}\\nprogress=continue", flush=True)
         time.sleep(0.2)
     """
@@ -352,6 +356,7 @@ class Publisher:
         self.fail = tmp_path / "fail"
         self.hold = tmp_path / "hold"
         self.fail_prepare = tmp_path / "fail-prepare"
+        self.stall = tmp_path / "stall"
         #: Where the test pattern is prepared.
         self.pattern = self.cache / f"{cache_key(None)}.mp4"
         for directory in (self.samples, self.cache):
@@ -371,6 +376,7 @@ class Publisher:
             "FAKE_FFMPEG_FAIL": str(self.fail),
             "FAKE_FFMPEG_HOLD": str(self.hold),
             "FAKE_FFMPEG_FAIL_PREPARE": str(self.fail_prepare),
+            "FAKE_FFMPEG_STALL": str(self.stall),
             "FAKE_CAMERAS_PREPARE_RETRY": "0.05",
         }
         self.process: subprocess.Popen[str] | None = None
@@ -490,6 +496,22 @@ def test_a_camera_that_fails_is_restarted_and_is_unhealthy_meanwhile(
         "Connection refused, and 1 more line); restarting in 1 s"
     )
     assert "Could not write header" not in output
+
+
+def test_a_camera_whose_frame_count_stops_is_unhealthy_though_ffmpeg_still_reports(
+    publisher: Callable[[str], Publisher],
+) -> None:
+    # A real ffmpeg whose RTSP write blocks prints the same `frame=` every second.
+    p = publisher("lobby=synthetic")
+    p.start()
+    _eventually(lambda: p.health().returncode == 0)
+    p.stall.touch()
+    _eventually(lambda: p.health().returncode != 0, timeout=fake_cameras.STALE_AFTER + 5)
+    assert "lobby" in p.health().stdout
+    # Its frames move again: it is publishing.
+    p.stall.unlink()
+    _eventually(lambda: p.health().returncode == 0)
+    p.stop()
 
 
 def test_a_sample_is_prepared_once_then_looped_from_the_cache(
@@ -803,8 +825,9 @@ def test_the_test_pattern_has_no_timeline_to_join(tmp_path: Path) -> None:
 # --- A hung ffmpeg ----------------------------------------------------------------------------
 
 #: Stands in for a publishing ffmpeg: writes its pid to the file named by its first argument,
-#: reports progress every 0.1 s, and (with `hang`) stops reporting after three reports while
-#: staying alive, as when a write to a MediaMTX that stopped reading blocks.
+#: and reports progress every 0.1 s. With `hang`, its frame count stops after three reports,
+#: as when a write to a MediaMTX that stopped reading blocks; and, as a real ffmpeg 7 or later
+#: does then, it goes on reporting that same count every time, alive.
 HANGING_FFMPEG = textwrap.dedent(
     """\
     import os, sys, time
@@ -812,18 +835,19 @@ HANGING_FFMPEG = textwrap.dedent(
     Path({pid!r}).write_text(str(os.getpid()))
     frame = 0
     while True:
-        frame += 15
+        if not ({hang} and frame >= 45):
+            frame += 15
         print(f"frame={{frame}}\\nprogress=continue", flush=True)
         time.sleep(0.1)
-        if {hang} and frame >= 45:
-            time.sleep(3600)
     """
 )
 
 
 class _Watched:
     """A publisher whose clock moves a tenth of a second per watchdog check, so that the
-    fifteen seconds before a hung ffmpeg is killed take about a second and a half."""
+    fifteen seconds before a hung ffmpeg is killed take about a second and a half. Its wall
+    clock does not move: the watchdog times ffmpeg by the monotonic clock, which a step of
+    the wall clock (or a suspended host) does not move."""
 
     def __init__(self, tmp_path: Path, hang: bool) -> None:
         self.pid = tmp_path / "ffmpeg.pid"
@@ -832,18 +856,21 @@ class _Watched:
             f"#!{sys.executable}\n" + HANGING_FFMPEG.format(pid=str(self.pid), hang=hang)
         )
         ffmpeg.chmod(0o755)
-        self.wall = 1000.0
+        self.now = 1000.0
         self.checks = 0
         #: The restart delays, which are the other thing the publisher sleeps for.
         self.restarts: list[float] = []
         self.publisher = RealPublisher(
-            _settings(tmp_path, ffmpeg=str(ffmpeg)), sleep=self.sleep, wall=lambda: self.wall
+            _settings(tmp_path, ffmpeg=str(ffmpeg)),
+            clock=lambda: self.now,
+            sleep=self.sleep,
+            wall=lambda: 1000.0,
         )
 
     async def sleep(self, seconds: float) -> None:
         if seconds == fake_cameras.WATCH_EVERY:
             self.checks += 1
-            self.wall += 0.1
+            self.now += 0.1
             await asyncio.sleep(0.01)
         else:
             self.restarts.append(seconds)
@@ -861,7 +888,7 @@ class _Watched:
         return keep_publishing(Camera("lobby", SYNTHETIC), tmp_path / "x.mp4", "u", "l")
 
 
-def test_an_ffmpeg_that_stops_reporting_progress_is_killed_and_restarted(
+def test_an_ffmpeg_whose_frame_count_stops_is_killed_and_restarted(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     watched = _Watched(tmp_path, hang=True)
@@ -875,12 +902,12 @@ def test_an_ffmpeg_that_stops_reporting_progress_is_killed_and_restarted(
     assert not watched.alive()
     # Not before it was hung for HUNG_AFTER seconds of the clock, which moves 0.1 s a check.
     assert watched.checks > HUNG_AFTER / 0.1
-    assert "lobby: ffmpeg reported no progress for 15 s and was killed; restarting in 1 s" in (
+    assert "lobby: ffmpeg sent no new frame for 15 s and was killed; restarting in 1 s" in (
         caplog.text
     )
 
 
-def test_an_ffmpeg_that_keeps_reporting_progress_is_left_running(tmp_path: Path) -> None:
+def test_an_ffmpeg_whose_frame_count_moves_is_left_running(tmp_path: Path) -> None:
     watched = _Watched(tmp_path, hang=False)
 
     async def run() -> None:
