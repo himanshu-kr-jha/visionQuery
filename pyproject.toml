@@ -33,6 +33,7 @@ visionquery-runtime = { workspace = true }
 
 [dependency-groups]
 dev = [
+    "actionlint-py>=1.7.12.25",
     "httpx2>=2.13.1",
     "import-linter>=2.15",
     "pre-commit>=4.7.0",

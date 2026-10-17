@@ -17,9 +17,12 @@ runs:
         # The uv the image is built with (Dockerfile); tests/test_ci.py keeps them equal.
         version: "0.11.7"
         enable-cache: true
+        cache-python: true
         cache-dependency-glob: |
           uv.lock
           .python-version
+        # Every job installs the same, so one job saves the cache instead of all racing to.
+        save-cache: ${{ github.job == 'lint' }}
     - if: inputs.web == 'true'
       uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
       with:

@@ -18,6 +18,7 @@ sync:
 lint:
 	uv run ruff check
 	uv run ruff format --check
+	uv run actionlint
 
 format:
 	uv run ruff check --fix

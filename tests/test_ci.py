@@ -106,6 +106,9 @@ def test_python_comes_from_uv_at_the_version_the_image_is_built_with() -> None:
     assert "uv.lock" in uv["with"]["cache-dependency-glob"]
     # uv installs the Python .python-version pins (python-preference = "only-managed").
     assert "python-version" not in uv["with"]
+    assert uv["with"]["cache-python"] is True
+    # Every job fills the cache alike, so one saves it rather than all racing to.
+    assert uv["with"]["save-cache"] == "${{ github.job == 'lint' }}"
     assert "uv sync --locked" in SETUP.read_text()
 
 
@@ -164,3 +167,16 @@ def test_a_newer_push_to_a_pr_cancels_the_run_it_supersedes() -> None:
     concurrency = _workflow()["concurrency"]
     assert "github.event.pull_request.number" in concurrency["group"]
     assert concurrency["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+
+
+def test_make_lint_lints_the_workflows_too() -> None:
+    # actionlint catches what only GitHub would otherwise report, after a push: an expression
+    # in a context that does not have it, an unknown input, a shell error in a `run:`.
+    dry = subprocess.run(
+        ["make", "--dry-run", "--no-print-directory", "lint"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    assert "uv run actionlint" in dry
