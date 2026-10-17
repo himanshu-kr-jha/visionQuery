@@ -38,8 +38,8 @@ def test_the_schema_is_rendered_the_same_every_time_and_ends_with_a_newline() ->
     assert render().endswith("}\n")
 
 
-def test_writes_the_schema_and_then_finds_it_current(tmp_path: Path) -> None:
-    path = tmp_path / "openapi.json"
+def test_writes_the_schema_where_told_and_then_finds_it_current(tmp_path: Path) -> None:
+    path = tmp_path / "src" / "api" / "openapi.json"  # directories made as needed
     written = _run(str(path))
     assert written.returncode == 0, written.stderr
     assert path.read_text() == render()

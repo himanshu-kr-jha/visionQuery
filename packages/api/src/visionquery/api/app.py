@@ -37,6 +37,7 @@ def create_app(check_database: Callable[[], DatabaseHealth]) -> FastAPI:
 
     @app.get(
         "/health",
+        operation_id="health",
         responses={status.HTTP_503_SERVICE_UNAVAILABLE: {"model": Health}},
         summary="Whether the Deployment's database can be reached",
     )

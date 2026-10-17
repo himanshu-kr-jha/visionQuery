@@ -41,10 +41,11 @@ def main() -> None:
     path: Path = arguments.path
     schema = render()
     if not arguments.check:
-        path.write_text(schema)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(schema, encoding="utf-8")
         return
     try:
-        current = path.read_text() == schema
+        current = path.read_text(encoding="utf-8") == schema
     except FileNotFoundError:
         current = False
     if not current:
