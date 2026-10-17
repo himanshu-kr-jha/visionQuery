@@ -37,6 +37,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -331,12 +332,12 @@ def default_stack() -> Iterator[Stack]:
         yield stack
 
 
-def test_the_default_stack_starts_postgres_mediamtx_its_reconciler_and_the_api_healthy(
+def test_the_default_stack_starts_postgres_mediamtx_its_reconciler_the_recorder_and_the_api(
     default_stack: Stack,
 ) -> None:
     containers = default_stack.containers()
-    assert set(containers) == {"postgres", "migrate", "mediamtx", "reconciler", "api"}
-    _assert_healthy(default_stack, {"postgres", "mediamtx", "reconciler", "api"})
+    assert set(containers) == {"postgres", "migrate", "mediamtx", "reconciler", "recorder", "api"}
+    _assert_healthy(default_stack, {"postgres", "mediamtx", "reconciler", "recorder", "api"})
 
 
 def _health(stack: Stack) -> tuple[int, dict[str, Any]]:
@@ -727,7 +728,9 @@ def test_concurrent_projects_do_not_touch_each_others_images_or_containers() -> 
 # --- The observability profile --------------------------------------------------------------
 
 #: Every Prometheus job with a target in the stack without `gpu`.
-OBSERVED_JOBS = {"prometheus", "grafana", "postgres", "mediamtx", "reconciler", "api"}
+OBSERVED_JOBS = {
+    "prometheus", "grafana", "postgres", "mediamtx", "reconciler", "recorder", "api",
+}  # fmt: skip
 
 
 @pytest.fixture(scope="module")
@@ -870,6 +873,8 @@ TIMELINE_CAMERAS = ("gate", "gate-again", "hall")
 #: The test pattern's size, which a camera without its video shows.
 TEST_PATTERN_SIZE = (1280, 720)
 SAMPLES_VARIABLE = "VISIONQUERY_TEST_SAMPLES"
+#: The dev stack's Segments, short so that several finish while the tests run.
+SEGMENT_SECONDS = 10
 
 
 def _make_samples(directory: Path) -> None:
@@ -1059,6 +1064,7 @@ def dev_stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
         "VISIONQUERY_FAKE_CAMERAS": DEV_CAMERAS,
         "VISIONQUERY_FAKE_CAMERA_SAMPLES": str(samples),
         "VISIONQUERY_FAKE_CAMERA_DURATION": str(MARKER_PERIOD),
+        "VISIONQUERY_SEGMENT_SECONDS": str(SEGMENT_SECONDS),
     }
     with running_stack(profiles=["dev"], environment=environment) as stack:
         yield stack
@@ -1085,6 +1091,58 @@ def test_each_fake_camera_is_a_registered_pushed_camera_publishing_as_itself(
         assert camera.publish_credentials is not None
         assert camera.publish_credentials.user == camera.name
         assert camera.publish_credentials.verify(password)
+
+
+#: Every finished Segment under the recorder's Footage directory, as the recorder reads them.
+LIST_SEGMENTS = """
+import json
+from pathlib import Path
+from visionquery.recorder.segment import segments
+print(json.dumps([
+    {"camera": int(s.path.parent.parent.name), "path": str(s.path), "reason": s.reason,
+     "time_from": s.time_from.isoformat(), "time_to": s.time_to.isoformat()}
+    for s in segments(Path("/footage"))
+]))
+"""
+
+
+def _segments(stack: Stack) -> list[dict[str, Any]]:
+    listed = stack.compose("exec", "-T", "recorder", "python", "-c", LIST_SEGMENTS).stdout
+    return json.loads(listed)
+
+
+def test_the_recorder_records_every_registered_camera_into_epoch_aligned_segments_that_play(
+    dev_stack: Stack,
+) -> None:
+    with _registry(dev_stack) as registry:
+        cameras = {camera.id: camera.name for camera in registry.list()}
+
+    def every_camera_rolled() -> tuple[list[dict[str, Any]] | None, str]:
+        found = _segments(dev_stack)
+        rolled = {s["camera"] for s in found if s["reason"] == "rolled"}
+        missing = sorted(cameras[c] for c in set(cameras) - rolled)
+        return (found, "") if not missing else (None, f"no rolled Segment yet for {missing}")
+
+    found = wait_for(every_camera_rolled, timeout=6 * SEGMENT_SECONDS + 60)
+    for camera_id, name in cameras.items():
+        of_camera = [s for s in found if s["camera"] == camera_id]
+        # Every Segment after a camera's first begins on the epoch-aligned boundary its
+        # predecessor rolled at, one running on from the next.
+        for before, after in pairwise(of_camera):
+            if before["reason"] == "rolled":
+                assert after["time_from"] == before["time_to"], name
+                start = datetime.fromisoformat(after["time_from"])
+                # Within a keyframe interval (a second) and a little latency of it.
+                assert start.timestamp() % SEGMENT_SECONDS < 2, (name, after)
+        rolled = next(s for s in of_camera if s["reason"] == "rolled")
+        played = dev_stack.compose(
+            "exec", "-T", "recorder", "ffmpeg", "-nostdin", "-v", "error",
+            "-i", rolled["path"], "-f", "null", "-",
+        )  # fmt: skip
+        assert played.stderr == "", (name, played.stderr)
+    # Footage is written by the recorder's own user, into a volume only it mounts.
+    owner = dev_stack.compose("exec", "-T", "recorder", "stat", "-c", "%U", "/footage").stdout
+    assert owner.strip() == "visionquery"
 
 
 def _publish(stack: Stack, path: str, credentials: str = "") -> subprocess.CompletedProcess[str]:
