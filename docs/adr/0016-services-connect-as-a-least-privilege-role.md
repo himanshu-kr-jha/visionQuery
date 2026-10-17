@@ -4,7 +4,7 @@ Only `visionquery-migrate` connects to Postgres as the superuser that owns the m
 Every long-running VisionQuery service connects as `visionquery_runtime`, which may connect to the memory's database and read and write the rows of its tables, and nothing more: it cannot create, alter, drop or truncate anything, create an extension, make a temporary table, or write `schema_migrations`.
 The Postgres exporter connects as `visionquery_monitoring`, a member of `pg_monitor` that reads none of the memory's rows.
 
-The roles are made by a migration (`0002_roles.sql`), so an existing Deployment gets them at its next `make up` like any other schema change.
+The roles are made by a migration (`0003_roles.sql`), so an existing Deployment gets them at its next `make up` like any other schema change.
 The migration grants the runtime role the rows of every table there is and, through default privileges, of every table and sequence the migrating role creates later, so a later migration never grants anything for it, unless it adds a schema, on which it grants `USAGE`.
 Roles belong to the server rather than to one database, so the migration makes each one only when missing, and strips one that existed of every attribute and membership but those it gives.
 

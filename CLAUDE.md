@@ -237,7 +237,7 @@ Each run seals the record before applying anything and again after, since a migr
 `visionquery-migrate status` changes nothing: it logs each applied migration (with `applied_at` and `sha256`), each pending one and a `status: N applied, M pending` line, in one read-only transaction and without waiting for a run in progress, and exits 0, or 3 when a run would refuse (1 and 2 as above).
 The role it connects as must be able to create the `timescaledb` and `vector` extensions, create roles and grant `pg_monitor` (in practice, a superuser).
 
-**Roles** (ADR 0016): migration `0002_roles.sql` makes `visionquery_runtime`, which every long-running service connects as and which may only read and write the rows of the memory's tables (those later migrations create included, by default privileges: a migration never grants for it, unless it adds a schema, on which it grants `USAGE`), and `visionquery_monitoring` (`pg_monitor`, no rows) for the Postgres exporter.
+**Roles** (ADR 0016): migration `0003_roles.sql` makes `visionquery_runtime`, which every long-running service connects as and which may only read and write the rows of the memory's tables (those later migrations create included, by default privileges: a migration never grants for it, unless it adds a schema, on which it grants `USAGE`), and `visionquery_monitoring` (`pg_monitor`, no rows) for the Postgres exporter.
 Neither can log in until `visionquery-migrate` gives it a login after a run, with `VISIONQUERY_RUNTIME_PASSWORD` and `VISIONQUERY_MONITORING_PASSWORD` when set (`visionquery.memory.roles.enable_logins`, which sends a SCRAM verifier, never the password); `status` never does.
 Roles belong to the server, so every database migrated on one server, the tests' included, shares them.
 

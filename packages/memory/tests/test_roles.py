@@ -16,6 +16,7 @@ from urllib.parse import quote, urlsplit
 import psycopg
 import pytest
 from psycopg import sql
+from visionquery.memory.cameras import CameraRegistry
 from visionquery.memory.migrate import MIGRATIONS, migrate
 from visionquery.memory.roles import MONITORING, RUNTIME, enable_logins
 
@@ -108,7 +109,7 @@ def test_two_databases_on_one_server_both_migrate(database: str, postgres: str) 
         admin.execute("DROP DATABASE IF EXISTS roles_second WITH (FORCE)")
         admin.execute("CREATE DATABASE roles_second TEMPLATE template0")
     try:
-        assert "0002_roles.sql" in migrate(other)
+        assert "0003_roles.sql" in migrate(other)
     finally:
         with psycopg.connect(postgres, autocommit=True) as admin:
             admin.execute("DROP DATABASE roles_second WITH (FORCE)")
@@ -168,6 +169,21 @@ def test_the_runtime_role_reads_and_writes_rows_of_tables_later_migrations_creat
     assert runtime.execute("SELECT count(*) FROM notes").fetchone() == (1,)
     # It may read what was applied, to check the schema it runs on.
     assert runtime.execute("SELECT count(*) FROM schema_migrations").fetchone() != (0,)
+
+
+def test_the_runtime_role_adds_changes_and_removes_a_camera_through_the_registry(
+    runtime: psycopg.Connection,
+) -> None:
+    registry = CameraRegistry(runtime)
+    pulled = registry.add_pulled("gate", "rtsp://cam.local:554/stream?token=s3cret")
+    pushed = registry.add_pushed("dock", "dock-feed")
+    assert {camera.name for camera in registry.list()} == {"gate", "dock"}
+    assert registry.rename(pulled.id, "front gate").name == "front gate"
+    registry.remove(pushed.id)
+    assert [camera.name for camera in registry.list()] == ["front gate"]
+    # The record of what was applied is still out of its reach.
+    with pytest.raises(psycopg.errors.InsufficientPrivilege):
+        runtime.execute("DELETE FROM schema_migrations")
 
 
 CANNOT = [

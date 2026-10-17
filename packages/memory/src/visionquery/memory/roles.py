@@ -1,6 +1,6 @@
 """The roles a Deployment's processes connect as, and letting them log in (ADR 0016).
 
-Migration `0002_roles.sql` makes them, unable to log in: `RUNTIME`, which every long-running
+Migration `0003_roles.sql` makes them, unable to log in: `RUNTIME`, which every long-running
 service connects as and which reads and writes the rows of the memory's tables and nothing
 more, and `MONITORING`, which the Postgres exporter connects as, with `pg_monitor`. Only
 `visionquery-migrate` connects as the superuser that owns the memory, and after migrating it
