@@ -9,9 +9,10 @@ Every `VISIONQUERY_RECONCILE_INTERVAL` seconds (5) it reads the cameras not remo
 MediaMTX match them (`visionquery.reconciler.reconcile`), so a change to the registry, and a
 restarted MediaMTX, which forgets everything its API was told, are both put right within one
 cycle. A cycle that fails (the database or MediaMTX unreachable, or MediaMTX holding a user it
-must not overwrite) is logged once, as a WARNING, while the failure stays the same, and the next
-cycle tries again; an INFO says when a cycle succeeds again. Nothing logged names a credential:
-a database failure is named by its category only, and MediaMTX's errors are scrubbed.
+must not overwrite) is logged once, as a WARNING, for as long as the same one of those fails
+(MediaMTX restarting, say, refuses and then resets connections), and the next cycle tries
+again; an INFO says when a cycle succeeds again. Nothing logged names a credential: a database
+failure is named by its category only, and MediaMTX's errors are scrubbed.
 
 After each successful cycle it writes a heartbeat file holding the time until which it counts
 as healthy, three cycles on, which `health` (Compose's healthcheck) reads.
@@ -145,28 +146,33 @@ class _Loop:
             MediaMTXClient(mediamtx.url, mediamtx.user, mediamtx.password)
         )
         self._connection: Connection | None = None
-        #: What the last cycle failed with; None after a success, and before the first cycle.
+        #: What the last cycle failed on (the database, the registry, MediaMTX, or a refusal);
+        #: None after a success, and before the first cycle.
         self._failing: str | None = None
 
     def cycle(self) -> None:
+        failing: str
         problem: str
         try:
             cameras = CameraRegistry(self._connected()).list()
             changes = self._reconciler.reconcile(cameras)
         except ConnectionFailedError as error:
+            failing = "database"
             problem = f"the database could not be reached: {error.category} ({error.cause})"
         except CameraRegistryError as error:
             self.close()
-            problem = f"the camera registry could not be read: {error}"
-        except (MediaMTXError, ReconcileError) as error:
-            problem = str(error)
+            failing, problem = "registry", f"the camera registry could not be read: {error}"
+        except MediaMTXError as error:
+            failing, problem = "mediamtx", str(error)
+        except ReconcileError as error:
+            failing, problem = "refused", str(error)
         else:
             self._succeeded(len(cameras), changes)
             return
         _CYCLES.labels("failed").inc()
-        if problem != self._failing:
+        if failing != self._failing:
             _log.warning("reconciling failed, and is retried every cycle: %s", problem)
-        self._failing = problem
+        self._failing = failing
 
     def close(self) -> None:
         if self._connection is not None:
