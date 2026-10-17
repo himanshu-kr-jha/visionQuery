@@ -15,7 +15,7 @@ on:
   pull_request:
     branches: [develop, main]
   push:
-    branches: [develop, main]
+    branches: [develop, main, feature/8-ci]
   workflow_dispatch:
 
 permissions:
