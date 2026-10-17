@@ -6,6 +6,7 @@ test, and runs `lint-imports` against that tree with the repository's own contra
 
 import configparser
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,10 +31,12 @@ PACKAGES = _workspace_packages()
 NO_REACHING_UP = "Perception and the recorder never import the reasoner or the api"
 ONLY_MEMORY_HOLDS_A_DRIVER = "Only memory imports a database driver"
 REASONER_THROUGH_TOOLS = "The reasoner reaches the memory only through tools"
+API_THROUGH_TOOLS = "The api reaches the memory only through tools, except its health probe"
 RUNTIME_IS_A_FOUNDATION = "The runtime imports no other VisionQuery package"
 NO_REACHING_UP_ID = "no-reaching-up"
 ONLY_MEMORY_HOLDS_A_DRIVER_ID = "only-memory-holds-a-driver"
 REASONER_THROUGH_TOOLS_ID = "reasoner-through-tools"
+API_THROUGH_TOOLS_ID = "api-through-tools"
 RUNTIME_IS_A_FOUNDATION_ID = "runtime-is-a-foundation"
 
 
@@ -65,16 +68,16 @@ def _lint_with(tmp_path: Path, modules: dict[str, str]) -> subprocess.CompletedP
 
 def _broken(result: subprocess.CompletedProcess[str]) -> set[str]:
     return {
-        line.removesuffix(" BROKEN").strip()
+        re.sub(r" BROKEN( \(.*\))?$", "", line).strip()
         for line in result.stdout.splitlines()
-        if line.endswith(" BROKEN")
+        if re.search(r" BROKEN( \(.*\))?$", line)
     }
 
 
 def test_the_workspace_keeps_every_contract() -> None:
     result = _lint_imports(ROOT)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Contracts: 4 kept, 0 broken." in result.stdout
+    assert "Contracts: 5 kept, 0 broken." in result.stdout
 
 
 def test_an_unchanged_copy_keeps_every_contract(tmp_path: Path) -> None:
@@ -94,6 +97,9 @@ def test_an_unchanged_copy_keeps_every_contract(tmp_path: Path) -> None:
         ("reasoner", "visionquery.perception", REASONER_THROUGH_TOOLS),
         ("reasoner", "visionquery.recorder", REASONER_THROUGH_TOOLS),
         ("reasoner", "visionquery.api", REASONER_THROUGH_TOOLS),
+        ("api", "visionquery.memory", API_THROUGH_TOOLS),
+        ("api", "visionquery.memory.migrate", API_THROUGH_TOOLS),
+        ("api", "visionquery.linker", API_THROUGH_TOOLS),
         *[(p, "psycopg", ONLY_MEMORY_HOLDS_A_DRIVER) for p in PACKAGES if p != "memory"],
         *[
             ("runtime", f"visionquery.{p}", RUNTIME_IS_A_FOUNDATION)
@@ -128,6 +134,51 @@ def test_the_reasoner_may_reach_the_memory_through_tools(tmp_path: Path) -> None
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_the_api_may_reach_the_memory_through_tools(tmp_path: Path) -> None:
+    result = _lint_with(
+        tmp_path,
+        {
+            "visionquery.tools.lookup": "import visionquery.memory\n",
+            "visionquery.linker.follow": "import visionquery.memory\n",
+            "visionquery.tools.following": "import visionquery.linker.follow\n",
+            "visionquery.api.routes": (
+                "import visionquery.tools.lookup\nimport visionquery.tools.following\n"
+            ),
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_api_s_health_probe_may_import_the_memory_health_check(tmp_path: Path) -> None:
+    probe = ROOT / "packages/api/src/visionquery/api/probe.py"
+    source = probe.read_text() + "\nimport visionquery.memory.health\n"
+    result = _lint_with(tmp_path, {"visionquery.api.probe": source})
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_another_api_module_importing_the_memory_health_check_is_reported(tmp_path: Path) -> None:
+    # The exception names the modules that have it; a new route is not one of them.
+    result = _lint_with(tmp_path, {"visionquery.api.routes": "import visionquery.memory.health\n"})
+    assert _broken(result) == {API_THROUGH_TOOLS}, result.stdout
+    assert "visionquery.api.routes -> visionquery.memory.health" in result.stdout
+
+
+def test_the_api_s_exception_is_no_wider_than_the_probe_and_settings() -> None:
+    ignored = {
+        line.strip()
+        for line in _config()[f"importlinter:contract:{API_THROUGH_TOOLS_ID}"]["ignore_imports"]
+        .strip()
+        .splitlines()
+    }
+    assert ignored == {
+        "visionquery.api.app -> visionquery.memory.connection",
+        "visionquery.api.app -> visionquery.memory.health",
+        "visionquery.api.probe -> visionquery.memory.health",
+        "visionquery.api.serve -> visionquery.memory.health",
+        "visionquery.api.serve -> visionquery.memory.settings",
+    }
+
+
 def test_every_package_may_import_the_runtime(tmp_path: Path) -> None:
     result = _lint_with(
         tmp_path,
@@ -155,7 +206,7 @@ def test_a_package_that_imports_memory_does_not_count_as_importing_the_driver(
         },
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Contracts: 4 kept, 0 broken." in result.stdout
+    assert "Contracts: 5 kept, 0 broken." in result.stdout
 
 
 def test_the_reasoner_may_reach_the_linker_through_tools(tmp_path: Path) -> None:
@@ -200,7 +251,9 @@ def test_every_package_but_memory_is_checked_for_driver_imports() -> None:
     assert checked == set(PACKAGES) - {"memory"}
 
 
-@pytest.mark.parametrize("contract", [ONLY_MEMORY_HOLDS_A_DRIVER_ID, REASONER_THROUGH_TOOLS_ID])
+@pytest.mark.parametrize(
+    "contract", [ONLY_MEMORY_HOLDS_A_DRIVER_ID, REASONER_THROUGH_TOOLS_ID, API_THROUGH_TOOLS_ID]
+)
 def test_the_contracts_that_forbid_a_path_see_through_the_memory_package(contract: str) -> None:
     # Both rules are about naming a module, not about what a module reaches: reasoner ->
     # tools -> memory -> psycopg is legal, so these must tolerate indirect imports.
@@ -221,7 +274,7 @@ def test_the_callers_pythonpath_does_not_change_what_is_analysed(
     monkeypatch.setenv("PYTHONPATH", str(tree))
     result = _lint_imports(ROOT)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Contracts: 4 kept, 0 broken." in result.stdout
+    assert "Contracts: 5 kept, 0 broken." in result.stdout
 
 
 def _modules(contract: str, key: str) -> set[str]:
