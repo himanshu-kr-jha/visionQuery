@@ -43,6 +43,11 @@ _STANDARD_ATTRIBUTES = frozenset(
     [*logging.LogRecord("", 0, "", 0, "", None, None).__dict__, "message", "asctime"]
 )
 
+#: Libraries whose records below WARNING may hold what scrubbing cannot recognise, kept at
+#: WARNING or above whatever the process's level: psycopg logs each failed connection attempt
+#: at DEBUG with libpq's text, which can quote any part of a database URL.
+_QUIET_BELOW_WARNING = ("psycopg",)
+
 _SURROGATES = re.compile("[\ud800-\udfff]")
 _UNPRINTABLE = "<unprintable>"
 
@@ -66,6 +71,8 @@ def configure_logging(service: str, level: LogLevel, *, stream: TextIO | None = 
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level)
+    for name in _QUIET_BELOW_WARNING:
+        logging.getLogger(name).setLevel(max(logging.WARNING, root.level))
     factory = logging.getLogRecordFactory()
     if factory not in _OURS:
         logging.setLogRecordFactory(_scrubbing_factory(factory))

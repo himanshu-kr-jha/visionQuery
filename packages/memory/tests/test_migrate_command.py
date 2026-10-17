@@ -304,6 +304,14 @@ def test_a_secret_used_as_a_host_name_never_reaches_the_logs() -> None:
     assert failed["error"] == "ConnectionFailedError"
 
 
+def test_a_secret_never_reaches_the_logs_even_at_debug() -> None:
+    # psycopg logs every failed attempt at DEBUG with libpq's text; the runtime keeps it quiet.
+    url = f"postgresql://u:{LEAK}@/d?host={LEAK},127.0.0.1&port=,1&connect_timeout=3"
+    status, lines, stderr = _run(database__url=url, log_level="DEBUG")
+    assert status == 1
+    assert LEAK not in json.dumps(lines) + stderr
+
+
 def _failure(url: str) -> str:
     status, lines, stderr = _run(database__url=url)
     assert status == 1
