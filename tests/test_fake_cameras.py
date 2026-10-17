@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -26,6 +27,7 @@ from fake_cameras import (
     DURATION,
     HUNG_AFTER,
     PLAYLIST_HOURS,
+    PLAYLIST_MOST_PASSES,
     PUBLISHED_LONG_ENOUGH,
     SYNTHETIC,
     Camera,
@@ -207,6 +209,16 @@ def test_a_playlist_from_the_beginning_has_no_inpoint() -> None:
     assert len(entries) == PLAYLIST_HOURS * 3600 // 20
 
 
+def test_a_playlist_stays_small_however_short_the_duration() -> None:
+    # A day of one-second loops would be 86,400 entries; it ends sooner, and rejoins.
+    text = playlist(Path("/cache/abc.mp4"), 0, 1)
+    assert len(_entries(text)) == PLAYLIST_MOST_PASSES
+    assert len(text.encode()) < 256 * 1024
+    # Long enough to need no rejoining more than every hour or so at any sensible duration.
+    assert PLAYLIST_MOST_PASSES >= 3600
+    assert len(_entries(playlist(Path("/cache/abc.mp4"), 0, 20))) < PLAYLIST_MOST_PASSES
+
+
 def test_a_playlist_quotes_the_names_it_lists() -> None:
     assert _entries(playlist(Path("/cache/it's.mp4"), 0, 20))[0][0] == r"file '/cache/it'\''s.mp4'"
 
@@ -262,6 +274,19 @@ def test_every_sample_is_prepared_to_the_same_duration() -> None:
     other = prepare_command(Path("/samples/a.avi"), Path("/cache/a.part"), duration=20)
     assert _after(other, "-t") == "20"
     assert "stop_duration=20" in _after(other, "-vf")
+
+
+def test_a_sample_is_prepared_at_a_whole_number_of_frames_a_second() -> None:
+    # At 29.97 frames a second no picture falls on a whole second after the first, so neither
+    # would a keyframe, where every camera joins the timeline: its own rate, rounded, does.
+    command = prepare_command(Path("/samples/a.avi"), Path("/cache/a.part"))
+    # The filters, split at the commas between them, not at those escaped inside one.
+    filters = re.split(r"(?<!\\),", _after(command, "-vf"))
+    rate = r"fps=fps=max(1\,round(source_fps))"
+    assert rate in filters
+    # Its pictures counted from 0 first, and the last held only once the rate is whole.
+    assert filters.index("setpts=PTS-STARTPTS") < filters.index(rate)
+    assert filters.index(rate) < [f.startswith("tpad=") for f in filters].index(True)
 
 
 def test_a_sample_is_prepared_again_when_the_duration_changes(tmp_path: Path) -> None:
@@ -802,6 +827,159 @@ def test_every_start_and_restart_of_a_sample_rejoins_the_shared_timeline(tmp_pat
     assert all(_played(c) == str(tmp_path / "x.mp4") for c in commands)
 
 
+def _play_to_the_end(tmp_path: Path, runs: list[float]) -> tuple[list[float], list[str]]:
+    """Publish a sample with ffmpegs that each exit with 0 after `runs` seconds, as one does
+    at the end of its playlist; what the publisher slept for, and where each ffmpeg started."""
+    wall = [1000.4]
+    starts: list[str] = []
+    delays: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        delays.append(seconds)
+        wall[0] += seconds
+        if not runs:
+            raise asyncio.CancelledError
+
+    publisher = RealPublisher(
+        _settings(tmp_path), clock=lambda: wall[0], sleep=sleep, wall=lambda: wall[0]
+    )
+
+    async def run(label: str, command: list[str], hung_after: float | None = None) -> Ended:
+        starts.append(Path(_after(command, "-i")).read_text().splitlines()[1])
+        wall[0] += runs.pop(0)
+        return Ended(0, [])
+
+    publisher._run = run  # type: ignore[method-assign]
+    keep_publishing = publisher._keep_publishing  # pyright: ignore[reportPrivateUsage]
+    with contextlib.suppress(asyncio.CancelledError):
+        asyncio.run(keep_publishing(Camera("lobby", "a.mp4"), tmp_path / "x.mp4", "u", "l", True))
+    return delays, starts
+
+
+def test_a_playlist_played_to_its_end_rejoins_the_timeline_at_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    day = PLAYLIST_HOURS * 3600.0
+    with caplog.at_level(logging.INFO, logger="fake-cameras"):
+        delays, starts = _play_to_the_end(tmp_path, [day, day])
+    # Only the waits for the next whole second (none: a day of whole seconds went by), never a
+    # restart's backoff.
+    assert delays == [pytest.approx(0.6), 0, 0]
+    assert starts == ["inpoint 101", "inpoint 101"]
+    # The daily reconnect is expected: said, not warned about.
+    assert [r.levelname for r in caplog.records if "lobby: " in r.message] == ["INFO"] * 3
+    assert "lobby: played its playlist to the end; rejoining the timeline" in caplog.text
+
+
+def test_an_ffmpeg_that_ends_soon_after_it_started_is_restarted_as_a_failure(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A playlist is a day long: one that ended at once did not play, whatever ffmpeg says.
+    with caplog.at_level(logging.WARNING, logger="fake-cameras"):
+        delays, _ = _play_to_the_end(tmp_path, [0.1, 0.1])
+    assert 1 in delays
+    assert 2 in delays
+    assert "lobby: ffmpeg exited with 0; restarting in 1 s" in caplog.text
+
+
+def _publish_samples(
+    settings: Settings, wall: list[float], clock: list[float]
+) -> tuple[RealPublisher, dict[str, list[str]]]:
+    """A publisher of `settings`' cameras, whose samples are prepared already, with ffmpegs
+    that publish until they are stopped; and, for each camera, where each of its ffmpegs
+    started on the timeline (`loop` for the test pattern, which has none)."""
+    for directory in (settings.samples, settings.cache):
+        directory.mkdir()
+    for camera in settings.cameras:
+        if camera.source != SYNTHETIC:
+            video = settings.samples / camera.source
+            video.write_bytes(camera.source.encode())
+            (settings.cache / f"{cache_key(video, settings.duration)}.mp4").write_bytes(b"x")
+    (settings.cache / f"{cache_key(None)}.mp4").write_bytes(b"x")
+    starts: dict[str, list[str]] = {}
+
+    async def sleep(seconds: float) -> None:
+        await asyncio.sleep(0.001)
+
+    publisher = RealPublisher(settings, clock=lambda: clock[0], sleep=sleep, wall=lambda: wall[0])
+
+    async def run(label: str, command: list[str], hung_after: float | None = None) -> Ended:
+        read = _after(command, "-i")
+        start = "loop" if "concat" not in command else Path(read).read_text().splitlines()[1]
+        starts.setdefault(label, []).append(start)
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    publisher._run = run  # type: ignore[method-assign]
+    return publisher, starts
+
+
+def _until(condition: Callable[[], bool]) -> Coroutine[None, None, None]:
+    async def wait() -> None:
+        async with asyncio.timeout(10):
+            while not condition():
+                await asyncio.sleep(0.01)
+
+    return wait()
+
+
+@pytest.mark.parametrize(
+    ("step", "position"),
+    [
+        # The host was suspended for 1234 s: the wall clock moved on, the monotonic one did not.
+        (1234.0, 135),
+        # The wall clock was set back by a minute.
+        (-60.0, 41),
+    ],
+)
+def test_a_step_of_the_wall_clock_makes_every_sample_rejoin_the_timeline_together(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, step: float, position: int
+) -> None:
+    settings = _settings(tmp_path, "a=walk.avi,b=other.avi,c=synthetic")
+    wall, clock = [1000.4], [50.0]
+    publisher, starts = _publish_samples(settings, wall, clock)
+
+    async def scenario() -> None:
+        running = asyncio.create_task(publisher.run())
+        await _until(lambda: all(len(starts.get(c, [])) == 1 for c in "abc"))
+        wall[0] += step
+        await _until(lambda: all(len(starts.get(c, [])) == 2 for c in "ab"))
+        await asyncio.sleep(0.1)
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+
+    with caplog.at_level(logging.INFO, logger="fake-cameras"):
+        asyncio.run(scenario())
+    assert starts["a"] == starts["b"] == ["inpoint 101", f"inpoint {position}"]
+    # The test pattern is on no timeline, and goes on as it was.
+    assert starts["c"] == ["loop"]
+    assert f"the wall clock stepped by {step:+.0f} s" in caplog.text
+    # Not a failure: no backoff, no warning.
+    assert "restarting in" not in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_the_wall_clock_moving_with_the_monotonic_one_restarts_nothing(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, "a=walk.avi")
+    wall, clock = [1000.4], [50.0]
+    publisher, starts = _publish_samples(settings, wall, clock)
+
+    async def scenario() -> None:
+        running = asyncio.create_task(publisher.run())
+        await _until(lambda: len(starts.get("a", [])) == 1)
+        for _ in range(20):
+            wall[0] += 0.2 + 0.001  # A clock slewed by NTP gains a little.
+            clock[0] += 0.2
+            await asyncio.sleep(0.01)
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+
+    asyncio.run(scenario())
+    assert starts["a"] == ["inpoint 101"]
+
+
 def test_the_test_pattern_has_no_timeline_to_join(tmp_path: Path) -> None:
     commands: list[list[str]] = []
 
@@ -1072,3 +1250,48 @@ def test_a_video_looped_by_several_cameras_is_read_once(
 
     asyncio.run(use())
     assert sorted(h.name for h in hashed if h is not None) == ["other.avi", "walk.avi"]
+
+
+@pytest.mark.parametrize("gone", ["deleted", "made unreadable"])
+def test_a_video_that_goes_after_it_was_found_gets_the_test_pattern(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    gone: str,
+) -> None:
+    # It was there when the publisher looked for it, and is gone when it is read to be named.
+    if gone == "made unreadable" and os.geteuid() == 0:
+        pytest.skip("root reads whatever the mode says")
+    settings = _settings(tmp_path, "a=walk.avi,b=synthetic")
+    wall, clock = [1000.4], [50.0]
+    publisher, starts = _publish_samples(settings, wall, clock)
+    video = settings.samples / "walk.avi"
+    if gone == "deleted":
+        video.unlink()
+    else:
+        video.chmod(0o000)
+    def found(samples: Path, source: str) -> Path:
+        return samples / source
+
+    monkeypatch.setattr(fake_cameras, "find_sample", found)
+    (settings.cache / "0123-old.mp4").write_bytes(b"perhaps walk.avi's, once it is back")
+
+    async def scenario() -> None:
+        running = asyncio.create_task(publisher.run())
+        # Every camera is up, the one whose video went on the test pattern.
+        await _until(lambda: running.done() or all(len(starts.get(c, [])) == 1 for c in "ab"))
+        await asyncio.sleep(0.1)
+        if running.done():
+            running.result()  # Says why it ended, which it must not.
+            pytest.fail("the publisher ended")
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+
+    with caplog.at_level(logging.WARNING, logger="fake-cameras"):
+        asyncio.run(scenario())
+    assert starts == {"a": ["loop"], "b": ["loop"]}
+    assert "a: walk.avi could not be read" in caplog.text
+    assert "gets the test pattern instead" in caplog.text
+    # Its prepared copy may come back into use: it is kept, as for a video that is missing.
+    assert (settings.cache / "0123-old.mp4").exists()

@@ -54,13 +54,16 @@ SYNTHETIC_SECONDS = 60
 #: A camera whose ffmpeg last sent a new frame longer ago than this is not publishing.
 STALE_AFTER = 5.0
 #: Changes whenever prepare_command does, so that samples prepared the old way are redone.
-PREPARATION = "3"
+PREPARATION = "4"
 #: Every sample is prepared to this many seconds (a whole number, so that every restart can
 #: land on a keyframe), and every camera plays it from the same point of the shared timeline.
 DURATION = 300
 #: How long a camera plays its video before its ffmpeg ends and a new one joins the timeline
 #: again, which lets a playlist stand in for a loop (see `playlist`).
 PLAYLIST_HOURS = 24
+#: But a playlist lists the sample at most this many times, which keeps it to a few hundred kB
+#: however short the duration; one that ends sooner than a day rejoins the timeline sooner.
+PLAYLIST_MOST_PASSES = 5000
 #: Where that timeline starts, in Unix time: at 0, a loop of 300 s begins at every five minutes
 #: of the wall clock (hh:00, hh:05, ...), whatever the machine and whenever the cameras started.
 EPOCH = 0.0
@@ -69,6 +72,12 @@ EPOCH = 0.0
 HUNG_AFTER = 3 * STALE_AFTER
 #: How often a running ffmpeg is checked for that.
 WATCH_EVERY = 0.5
+#: Every ffmpeg paces its sample by the monotonic clock, and the timeline is the wall clock's:
+#: once the two have moved apart by more than this (the wall clock was set, or the host was
+#: suspended, which stops the monotonic clock), every camera playing a sample rejoins the
+#: timeline. Checked this often.
+CLOCK_STEP = 0.5
+CLOCK_EVERY = 1.0
 #: Preparing a sample is tried this many times, this many seconds apart, before the cameras
 #: that loop it keep the test pattern.
 PREPARE_ATTEMPTS = 3
@@ -186,7 +195,7 @@ def playlist(
     if start:
         first.append(f"inpoint {start}")
     first.append(f"duration {duration - start}")
-    passes = max(2, math.ceil(hours * 3600 / duration))
+    passes = min(PLAYLIST_MOST_PASSES, max(2, math.ceil(hours * 3600 / duration)))
     return "\n".join([*first, *[f"file '{name}'\nduration {duration}"] * (passes - 1)]) + "\n"
 
 
@@ -226,8 +235,12 @@ def prepare_command(
         given = ["-f", "lavfi", "-i", pattern]
     else:
         # The pictures start at 0 whatever the recording's first ones are (MEVA's lose two to
-        # the AVI), so that the keyframes fall on whole seconds, where the timeline joins.
-        pad = f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={duration}"
+        # the AVI), and come a whole number of times a second (29.97 becomes 30), so that the
+        # keyframes fall on whole seconds, where the timeline joins.
+        pad = (
+            r"setpts=PTS-STARTPTS,fps=fps=max(1\,round(source_fps)),"
+            f"tpad=stop_mode=clone:stop_duration={duration}"
+        )
         given = ["-i", str(source), "-map", "0:v:0", "-vf", pad, "-t", str(duration)]
     return [
         *_quiet(ffmpeg),
@@ -366,6 +379,8 @@ class Publisher:
         self._keys: dict[Path, asyncio.Task[str]] = {}
         # One preparation at a time: each uses every core, and the first camera is up sooner.
         self._preparing = asyncio.Semaphore(1)
+        # Set, and replaced by a new one, when the wall clock steps (see `_watch_clock`).
+        self._stepped = asyncio.Event()
 
     async def run(self) -> None:
         # Nothing is publishing yet, whatever an earlier run left behind.
@@ -374,6 +389,7 @@ class Publisher:
         await self._prepare(None, self._pattern)
         async with asyncio.TaskGroup() as group:
             group.create_task(self._write_status())
+            group.create_task(self._watch_clock())
             for camera in self._settings.cameras:
                 group.create_task(self._camera(camera))
 
@@ -401,7 +417,13 @@ class Publisher:
         cameras = self._settings.cameras
         videos = {v for c in cameras if (v := self._video(c)) is not None}
         keep_all = any(c.source != SYNTHETIC and self._video(c) is None for c in cameras)
-        keys = {await self._key(v) for v in videos} | {self._pattern.stem}
+        keys = {self._pattern.stem}
+        for video in videos:
+            try:
+                keys.add(await self._key(video))
+            except OSError:
+                # It went since it was found, and may come back as a missing one may.
+                keep_all = True
         for path in self._settings.cache.iterdir():
             complete = path.name == f"{path.stem}.mp4"
             if not complete or (path.stem not in keys and not keep_all):
@@ -415,7 +437,19 @@ class Publisher:
                 problem = find_sample(self._settings.samples, camera.source)
                 _LOG.warning("%s: %s", camera.name, problem)
             await self._keep_publishing(camera, self._pattern, url, "the test pattern")
-        prepared = self._settings.cache / f"{await self._key(video)}.mp4"
+        try:
+            key = await self._key(video)
+        except OSError as error:
+            # Deleted, or made unreadable, since it was found.
+            _LOG.warning(
+                "%s: %s could not be read (%s), so it gets the test pattern instead; restart "
+                "fake-cameras once it is back",
+                camera.name,
+                camera.source,
+                error.strerror or error,
+            )
+            await self._keep_publishing(camera, self._pattern, url, "the test pattern")
+        prepared = self._settings.cache / f"{key}.mp4"
         if not prepared.exists():
             # Preparing takes a while, and the camera is up meanwhile.
             _LOG.info("%s: the test pattern until %s is prepared", camera.name, camera.source)
@@ -437,24 +471,71 @@ class Publisher:
     ) -> NoReturn:
         """Loop `source` (`label` in the log) into MediaMTX, restarting ffmpeg whenever it
         exits or hangs. A `timed` source (a sample, not the test pattern) is joined at the
-        point of the shared timeline that every camera is at, at every start and restart."""
+        point of the shared timeline that every camera is at, at every start and restart: when
+        its playlist ends, a day later, and when the wall clock steps, it rejoins at once."""
         _LOG.info("%s: publishing %s to %s", camera.name, label, redact(url))
         failures = 0
         while True:
-            playing = None
-            if timed:
+            if not timed:
+                command = publish_command(source, url, self._settings.ffmpeg)
+                started = self._clock()
+                ended = await self._run(camera.name, command, HUNG_AFTER)
+            else:
                 wait, start = timeline_start(self._wall(), self._settings.duration)
                 playing = self._settings.status.with_name(f"{camera.name}.concat")
                 playing.write_text(playlist(source, start, self._settings.duration))
                 await self._sleep(wait)
-            command = publish_command(source, url, self._settings.ffmpeg, playing)
-            started = self._clock()
-            ended = await self._run(camera.name, command, HUNG_AFTER)
+                command = publish_command(source, url, self._settings.ffmpeg, playing)
+                started = self._clock()
+                ended = await self._run_on_the_timeline(camera.name, command)
             self._progress.pop(camera.name, None)
-            failures = restart_failures(failures, self._clock() - started)
+            published = self._clock() - started
+            if ended is None:
+                _LOG.info("%s: rejoining the timeline", camera.name)
+                failures = 0
+                continue
+            if timed and ended.status == 0 and published > PUBLISHED_LONG_ENOUGH:
+                _LOG.info("%s: played its playlist to the end; rejoining the timeline", camera.name)
+                failures = 0
+                continue
+            failures = restart_failures(failures, published)
             delay = restart_delay(failures)
             _LOG.warning("%s: ffmpeg %s; restarting in %d s", camera.name, ended, delay)
             await self._sleep(delay)
+
+    async def _run_on_the_timeline(self, label: str, command: list[str]) -> Ended | None:
+        """Run a camera's ffmpeg as `_run` does, unless the wall clock steps meanwhile, which
+        stops it (None) so that the camera rejoins the timeline the clock now says."""
+        stepped = asyncio.create_task(self._stepped.wait())
+        run = asyncio.create_task(self._run(label, command, HUNG_AFTER))
+        try:
+            await asyncio.wait({run, stepped}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            stepped.cancel()
+            if not run.done():
+                run.cancel()
+                # Waited for, not awaited: this task's own cancellation must not be lost.
+                await asyncio.wait({run})
+        return None if run.cancelled() else run.result()
+
+    async def _watch_clock(self) -> NoReturn:
+        """Tell every camera playing a sample when the wall clock has stepped (it was set, or
+        the host was suspended): each ffmpeg goes on at the pace of the monotonic clock, from
+        where it was, so that the cameras are no longer where the timeline says, and one that
+        restarted would no longer be in step with the others."""
+        offset = self._wall() - self._clock()
+        while True:
+            await self._sleep(CLOCK_EVERY)
+            step = self._wall() - self._clock() - offset
+            if abs(step) > CLOCK_STEP:
+                _LOG.info(
+                    "the wall clock stepped by %+.0f s: every camera playing a sample rejoins "
+                    "the timeline",
+                    step,
+                )
+                offset += step
+                self._stepped.set()
+                self._stepped = asyncio.Event()
 
     async def _prepare(self, source: Path | None, output: Path) -> bool:
         """Prepare `source` (None for the test pattern) into `output`, once however many
