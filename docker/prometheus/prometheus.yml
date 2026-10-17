@@ -5,7 +5,8 @@
 # target rather than one that is down, and every replica of a scaled service (several
 # Perception Workers) is scraped. Each name ends in a dot so it is looked up as it is,
 # never under the host's search domains, which can only be slow or wrong. While a service
-# is not running, Prometheus logs that its name does not resolve, every refresh.
+# is not running, Prometheus logs that its name does not resolve, every refresh, so a service
+# that is only sometimes there (Triton) is found through a file its profile writes instead.
 #
 # A VisionQuery process serves its metrics on port 9100 (ADR 0012): each long-running one
 # gets a job here named after its service when it joins compose.yaml, and
@@ -45,10 +46,9 @@ scrape_configs:
         port: 9998
         refresh_interval: 15s
 
-  # Only with the gpu profile.
+  # Only with the gpu profile: the `triton-scrape` service writes this file then (see
+  # compose.yaml), so that without it there is no name to look up and nothing to log.
   - job_name: triton
-    dns_sd_configs:
-      - names: [triton.]
-        type: A
-        port: 8002
+    file_sd_configs:
+      - files: [/etc/prometheus-targets/*.yml]
         refresh_interval: 15s

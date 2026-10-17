@@ -123,12 +123,12 @@ Run everything from the repository root.
 | A single test | `uv run pytest tests/test_import_contracts.py::test_the_workspace_keeps_every_contract` |
 | Every check CI runs | `make check` |
 | Apply the database migrations | `VISIONQUERY_DATABASE__URL=postgresql://... uv run visionquery-migrate` |
-| Start the stack (Postgres, migrations, MediaMTX) | `docker compose up -d --wait` |
-| ...with Prometheus and Grafana | `docker compose --profile observability up -d --wait` |
-| ...with Triton on the GPUs | `docker compose --profile gpu up -d --wait` |
-| ...with Triton on a machine without a GPU | `docker compose -f compose.yaml -f compose.no-gpu.yaml --profile gpu up -d --wait` |
-| Stop the stack (add `--volumes` to delete its data) | `docker compose down` |
-| Build the VisionQuery image | `docker compose build` |
+| Start the stack (Postgres, migrations, MediaMTX); fails if the migrations fail | `make up` |
+| ...with Prometheus and Grafana | `make up COMPOSE_PROFILES=observability` |
+| ...with Triton on the GPUs | `make up COMPOSE_PROFILES=gpu` |
+| ...with Triton on a machine without a GPU | `make up COMPOSE_FILE=compose.yaml:compose.no-gpu.yaml COMPOSE_PROFILES=gpu` |
+| Stop the stack (`docker compose down --volumes` deletes its data) | `make down` |
+| Build the VisionQuery image after changing code (`up` builds only a missing image) | `docker compose build` or `docker compose up --build` |
 | Stack tests (bring the stack up for real) | `make test-stack` (`uv run pytest -m stack`) |
 
 `make lint` runs both ruff commands.
@@ -136,7 +136,8 @@ After changing a dependency, run `uv lock` and commit `uv.lock` with the change.
 
 **The stack** is `compose.yaml` (Compose project `visionquery`), configured only through `.env`: copy `.env.example`, which documents every variable, and set the three passwords it leaves empty, or Compose refuses to start.
 Every published port listens on `VISIONQUERY_BIND_ADDRESS` (loopback by default) and has a variable of its own; Postgres is on host port 15432.
-Every VisionQuery process runs from the one image the root `Dockerfile` builds (`visionquery:dev`), choosing its process by its Compose `command`; `migrate` is a one-shot service that runs `visionquery-migrate` once Postgres is healthy.
+Every VisionQuery process runs from the one image the root `Dockerfile` builds (`visionquery:dev`), choosing its process by its Compose `command`; `migrate` is a one-shot service that runs `visionquery-migrate` once Postgres is healthy, with the password in `PGPASSWORD` rather than in the URL.
+Every future long-running service built from that image must declare `depends_on: migrate: condition: service_completed_successfully` (`tests/test_compose.py` enforces it), and the stack is started with `make up` because `up --wait` returns while `migrate` still runs.
 Profiles: `gpu` adds Triton with the model repository in `docker/triton/models/`, `observability` adds Prometheus (`docker/prometheus/prometheus.yml`, which must scrape every long-running service) and Grafana, and `dev` is reserved for the fake camera publisher.
 Every image is pinned to an exact tag and its digest; MediaMTX's configuration is `docker/mediamtx/mediamtx.yml`.
 `tests/test_compose.py` checks all of this without starting anything (it needs the `docker` CLI, not the daemon) and runs with `make check`.

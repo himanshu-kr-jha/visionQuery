@@ -1,10 +1,13 @@
 # The VisionQuery stack.
 #
 #   cp .env.example .env              then set the three passwords in it
-#   docker compose up -d --wait       Postgres, migrations and MediaMTX; no GPU needed
-#   docker compose --profile observability up -d --wait     adds Prometheus and Grafana
-#   docker compose --profile gpu up -d --wait               adds Triton on the host's GPUs
-#   docker compose down               stop; add --volumes to delete the data as well
+#   make up                           Postgres, migrations and MediaMTX; no GPU needed
+#   make up COMPOSE_PROFILES=observability     adds Prometheus and Grafana
+#   make up COMPOSE_PROFILES=gpu               adds Triton on the host's GPUs
+#   make down                         stop; `docker compose down --volumes` deletes the data too
+# `make up` is `docker compose up -d --wait` and then checks that `migrate` exited 0, which
+# `--wait` does not: it returns while a migration is still running. Images are built when
+# missing only: after changing code or a Dockerfile, run `docker compose up --build`.
 #
 # Profiles:
 #   gpu            Triton, reserving every GPU. On a machine without one, add
@@ -29,7 +32,12 @@ x-visionquery: &visionquery
   <<: *service
   image: visionquery:dev
   build: .
-  pull_policy: build
+  # Built when the image is missing, never rebuilt by a plain `up`. A rebuild gives a new
+  # image ID even when no layer changed (BuildKit's provenance attestation carries a
+  # timestamp, and Compose 5.1 ignores `provenance: false` in this file), and Compose recreates
+  # a container whose image ID changed, so every `up` would recreate migrate and mediamtx and
+  # drop live streams. Rebuild on purpose: `docker compose up --build`, or `docker compose build`.
+  pull_policy: missing
   read_only: true
   tmpfs: [/tmp]
 
@@ -63,13 +71,21 @@ services:
       start_interval: 1s
 
   # Brings the schema up to date, then exits; safe to run on every start (ADR 0011).
+# `up --wait` returns while this still runs, so start the stack with `make up`, which also
+# fails when it did not exit 0.
+# EVERY long-running service built from the VisionQuery image (recorder, linker, api...) must
+# declare `depends_on: { migrate: { condition: service_completed_successfully } }`;
+# tests/test_compose.py fails until it does.
   migrate:
     <<: *visionquery
     restart: "no"
     command: ["visionquery-migrate"]
     environment:
       VISIONQUERY_LOG_LEVEL: ${VISIONQUERY_LOG_LEVEL:-INFO}
-      VISIONQUERY_DATABASE__URL: postgresql://visionquery:${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}@postgres:5432/visionquery
+      # The password is not part of the URL, where `@`, `/`, `:` or `#` in it would break the
+      # URL: libpq reads it from PGPASSWORD, so any password works.
+      VISIONQUERY_DATABASE__URL: postgresql://visionquery@postgres:5432/visionquery
+      PGPASSWORD: ${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,7 +94,7 @@ services:
     <<: *service
     image: visionquery-mediamtx:1.21.1
     build: docker/mediamtx
-    pull_policy: build
+    pull_policy: missing
     read_only: true
     environment:
       MTX_AUTHINTERNALUSERS_3_PASS: ${VISIONQUERY_MEDIAMTX_API_PASSWORD:?set VISIONQUERY_MEDIAMTX_API_PASSWORD in .env (see .env.example)}
@@ -134,6 +150,21 @@ services:
               count: all
               capabilities: [gpu]
 
+  # With the gpu profile, tells Prometheus where Triton's metrics are: it writes a file that
+  # Prometheus reads (file_sd), so that without the profile there is no target and no lookup
+  # of a name that does not resolve, which Prometheus would log as an error every 15 s.
+  # The file stays in the volume once written, so a stack that ran Triton and then stopped it
+  # shows the target as down until `docker compose down --volumes`.
+  triton-scrape:
+    <<: *service
+    profiles: [gpu]
+    restart: "no"
+    image: alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+    command: ["sh", "-c", "echo '- targets: [\"triton:8002\"]' > /targets/triton.yml"]
+    read_only: true
+    volumes:
+      - scrape-targets:/targets
+
   prometheus:
     <<: *service
     profiles: [observability]
@@ -144,7 +175,13 @@ services:
       - --storage.tsdb.retention.time=15d
     volumes:
       - ./docker/prometheus:/etc/prometheus:ro
+      - scrape-targets:/etc/prometheus-targets:ro
       - prometheus:/prometheus
+    depends_on:
+      # Only when the gpu profile is on: then its file is written before Prometheus starts.
+      triton-scrape:
+        condition: service_completed_successfully
+        required: false
     ports:
       - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_PROMETHEUS_PORT:-9090}:9090"
     healthcheck:
@@ -206,6 +243,7 @@ services:
       start_interval: 1s
 
 volumes:
+  scrape-targets:
   postgres:
   prometheus:
   grafana:

@@ -7,6 +7,7 @@ Each run reads `.env.example` instead of a developer's `.env`, so what is checke
 fresh clone gets, and the variables `.env.example` leaves empty (the secrets) are filled in.
 """
 
+import fnmatch
 import itertools
 import json
 import os
@@ -34,7 +35,7 @@ DEFAULT_SERVICES = {"postgres", "migrate", "mediamtx"}
 #: What each profile adds. `dev` is where the fake camera publisher (#6) arrives.
 PROFILE_SERVICES: dict[str, set[str]] = {
     "dev": set(),
-    "gpu": {"triton"},
+    "gpu": {"triton", "triton-scrape"},
     "observability": {"prometheus", "grafana", "postgres-exporter"},
 }
 #: Where each long-running service that is not a VisionQuery process serves its metrics.
@@ -237,12 +238,45 @@ def test_every_image_is_pinned_to_a_version_and_its_digest() -> None:
         if "build" in service:
             images += _dockerfile_bases(service)
             # A built image is named for this project, so it is never pulled from a registry.
-            assert service.get("pull_policy") == "build", name
+            assert service.get("pull_policy") == "missing", name
         else:
             images.append(service["image"])
     assert images
     unpinned = [image for image in images if not PINNED.match(image)]
     assert unpinned == []
+
+
+def test_up_builds_an_image_only_when_it_is_missing() -> None:
+    # A rebuild gives a new image ID even when no layer changed, and Compose recreates a
+    # container whose image ID changed, which drops live streams. So `up` must not rebuild;
+    # `up --build` is the explicit way. (tests/test_stack.py checks that `up` recreates nothing.)
+    built = {n: s for n, s in _services(_config()).items() if "build" in s}
+    assert set(built) >= {"migrate", "mediamtx"}
+    assert {name: s.get("pull_policy") for name, s in built.items()} == dict.fromkeys(
+        built, "missing"
+    )
+
+
+def test_every_service_built_from_our_image_waits_for_the_migrations_to_succeed() -> None:
+    # Otherwise a long-running process could start against a schema that is not up to date,
+    # or that a failed migration left behind.
+    for name, service in _services(_config()).items():
+        if name == "migrate" or not _is_visionquery_process(service):
+            continue
+        condition = service.get("depends_on", {}).get("migrate", {}).get("condition")
+        assert condition == "service_completed_successfully", name
+
+
+def test_the_database_password_is_not_part_of_the_url() -> None:
+    # A password with `@`, `/`, `:` or `#` in it would break a URL; libpq reads it from
+    # PGPASSWORD instead, so any password works.
+    password = "p@ss/w:rd#1"
+    migrate = _services(_config(env={"VISIONQUERY_POSTGRES_PASSWORD": password}))["migrate"]
+    environment = migrate["environment"]
+    assert password not in environment["VISIONQUERY_DATABASE__URL"]
+    assert "@" in environment["VISIONQUERY_DATABASE__URL"]
+    assert "visionquery:" not in environment["VISIONQUERY_DATABASE__URL"]
+    assert environment["PGPASSWORD"] == password
 
 
 def _published(config: Mapping[str, Any]) -> list[tuple[str, str, str, str]]:
@@ -305,11 +339,19 @@ def test_data_lives_in_named_volumes_and_configuration_is_read_only() -> None:
                 assert mount.get("read_only") is True, f"{name} can write to {mount['source']}"
 
 
+def _written_targets() -> set[str]:
+    """The targets the gpu profile's `triton-scrape` service writes for Prometheus to read."""
+    command = " ".join(_services(_config())["triton-scrape"]["command"])
+    return set(re.findall(r"[\w-]+:\d+", command))
+
+
 def _scraped() -> set[str]:
-    """Every `host:port` Prometheus scrapes by looking a service's name up in DNS."""
+    """Every `host:port` Prometheus scrapes: looked up in DNS, or in a file a profile writes."""
     targets: set[str] = set()
     for job in yaml.safe_load(PROMETHEUS.read_text())["scrape_configs"]:
         assert job.get("metrics_path", "/metrics") == "/metrics", job["job_name"]
+        if "file_sd_configs" in job:
+            targets |= _written_targets()
         for dns in job.get("dns_sd_configs", []):
             assert dns["type"] == "A", job["job_name"]
             assert all(name.endswith(".") for name in dns["names"]), job["job_name"]
@@ -328,7 +370,28 @@ def test_prometheus_scrapes_every_long_running_service() -> None:
         assert expected in scraped, f"Prometheus does not scrape {name} at {expected}"
 
 
-def test_every_target_is_found_through_dns() -> None:
+def test_triton_is_scraped_only_through_a_file_the_gpu_profile_writes() -> None:
+    # Looked up in DNS without the gpu profile, its name would not resolve and Prometheus would
+    # log an error every 15 s; and the file must be where Prometheus reads it.
+    config = _config()
+    jobs = {j["job_name"]: j for j in yaml.safe_load(PROMETHEUS.read_text())["scrape_configs"]}
+    assert "dns_sd_configs" not in jobs["triton"]
+    (file_sd,) = jobs["triton"]["file_sd_configs"]
+    (pattern,) = file_sd["files"]
+    prometheus = {m["target"]: m for m in _services(config)["prometheus"]["volumes"]}
+    directory = str(Path(pattern).parent)
+    assert prometheus[directory]["source"] == "scrape-targets"
+    assert prometheus[directory]["read_only"] is True
+    depends = _services(config)["prometheus"]["depends_on"]["triton-scrape"]
+    assert depends == {"condition": "service_completed_successfully", "required": False}
+    writer = _services(config)["triton-scrape"]
+    assert [m["source"] for m in writer["volumes"]] == ["scrape-targets"]
+    assert writer["profiles"] == ["gpu"]
+    assert f"{writer['volumes'][0]['target']}/triton.yml" in " ".join(writer["command"])
+    assert fnmatch.fnmatch("triton.yml", Path(pattern).name)
+
+
+def test_every_target_is_found_through_dns_or_a_file() -> None:
     # A statically listed target that is not running shows as down; a name that does not
     # resolve yields no target at all, so the stack without `gpu` still has every target up,
     # and every replica of a scaled service is scraped.

@@ -8,27 +8,29 @@ port ephemeral on loopback, so it never touches a stack a developer is running o
 else on the host. Taking it down removes its containers, network and volumes. A session
 starts by taking down `vqtest-` projects over an hour old, which a killed session left behind.
 
-Triton's image is about 25 GB on disk, so its test runs only when `VISIONQUERY_TEST_TRITON` says how:
-`gpu` reserves the host's GPUs as a Deployment does, `cpu` adds `compose.no-gpu.yaml` so that
-Triton starts on a machine without one.
+Triton's image is about 25 GB on disk, so its test runs only when
+`VISIONQUERY_TEST_TRITON` says how: `gpu` reserves the host's GPUs as a Deployment does, `cpu`
+adds `compose.no-gpu.yaml` so that Triton starts on a machine without one.
 """
 
 import base64
 import json
 import os
 import secrets
+import shlex
 import shutil
 import subprocess
 import time
 import urllib.error
 import urllib.request
 import uuid
-from collections.abc import Callable, Generator, Iterable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import psycopg
 import pytest
@@ -122,9 +124,8 @@ class Stack:
     def secret(self, name: str) -> str:
         return self.env[name]
 
-    def compose(
-        self, *args: str, timeout: float = 300, check: bool = True
-    ) -> subprocess.CompletedProcess[str]:
+    def command(self) -> list[str]:
+        """`docker compose` aimed at this project, its files and its profiles."""
         command = ["docker", "compose", "-p", self.project, "--project-directory", str(ROOT)]
         for file in self.files:
             command += ["-f", str(file)]
@@ -132,8 +133,25 @@ class Stack:
         command += ["--env-file", str(ENV_EXAMPLE)]
         for profile in self.profiles:
             command += ["--profile", profile]
+        return command
+
+    def make(self, target: str, timeout: float = 600) -> subprocess.CompletedProcess[str]:
+        """A target of the Makefile, run against this project."""
+        return subprocess.run(
+            ["make", "--no-print-directory", target, f"COMPOSE={shlex.join(self.command())}"],
+            cwd=ROOT,
+            env=self.env,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+        )
+
+    def compose(
+        self, *args: str, timeout: float = 300, check: bool = True
+    ) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
-            [*command, *args],
+            [*self.command(), *args],
             cwd=ROOT,
             env=self.env,
             capture_output=True,
@@ -171,35 +189,45 @@ class Stack:
         return f"--- ps ---\n{ps}\n--- logs ---\n{logs}"
 
 
-def _one_shot(stack: Stack) -> list[str]:
-    """The services that run once and exit, such as `migrate`."""
-    services = json.loads(stack.compose("config", "--format", "json").stdout)["services"]
-    return sorted(name for name, s in services.items() if s.get("restart", "no") == "no")
-
-
-@contextmanager
-def running_stack(profiles: Iterable[str] = (), files: Iterable[Path] = ()) -> Generator[Stack]:
-    """Bring the stack up with these profiles, wait for every healthcheck, then take it down."""
+def _new_stack(
+    profiles: Iterable[str] = (),
+    files: Iterable[Path] = (),
+    environment: Mapping[str, str] | None = None,
+) -> Stack:
+    """A project of its own, with fresh secrets and every host port ephemeral."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("VISIONQUERY_", "COMPOSE_"))}
     for name, value in _documented().items():
         if not value:
             env[name] = secrets.token_hex(16)
         elif name.endswith("_PORT"):
             env[name] = "0"  # an ephemeral port, so nothing on the host is ever in the way
-    stack = Stack(
+    env |= environment or {}
+    return Stack(
         project=f"{PREFIX}{uuid.uuid4().hex[:10]}",
         files=(COMPOSE, *files),
         profiles=tuple(profiles),
         env=env,
     )
+
+
+@contextmanager
+def running_stack(
+    profiles: Iterable[str] = (),
+    files: Iterable[Path] = (),
+    environment: Mapping[str, str] | None = None,
+) -> Generator[Stack]:
+    """Bring the stack up with `make up`, which waits for every healthcheck and for `migrate`
+    to succeed, then take it down."""
+    stack = _new_stack(profiles, files, environment)
     try:
         stack.compose("build", timeout=BUILD_TIMEOUT)
         stack.compose("pull", "--ignore-buildable", "--quiet", timeout=BUILD_TIMEOUT)
         started = time.monotonic()
-        stack.compose("up", "--detach", "--wait", "--wait-timeout", str(WAIT_TIMEOUT))
-        # `--wait` counts a one-shot job that is still running as started, so wait for it to
-        # finish; its exit status is for the tests to judge.
-        stack.compose("wait", *_one_shot(stack), timeout=WAIT_TIMEOUT, check=False)
+        up = stack.make("up", timeout=WAIT_TIMEOUT + 60)
+        if up.returncode != 0:
+            raise AssertionError(
+                f"`make up` failed:\n{up.stdout}\n{up.stderr}\n{stack.diagnostics()}"
+            )
         print(f"{stack.project} {stack.profiles} healthy in {time.monotonic() - started:.1f} s")
         yield stack
     finally:
@@ -245,9 +273,15 @@ def _assert_healthy(stack: Stack, services: set[str]) -> None:
 # --- The default stack: no profile, no GPU --------------------------------------------------
 
 
+#: Every character that breaks a URL, and a space, a quote and a backslash for good measure.
+AWKWARD_PASSWORD = "p@ss/w:rd#1?%&= '\"\\"
+
+
 @pytest.fixture(scope="module")
 def default_stack() -> Iterator[Stack]:
-    with running_stack() as stack:
+    # A password full of special characters: the stack must not care what the password is.
+    environment = {"VISIONQUERY_POSTGRES_PASSWORD": AWKWARD_PASSWORD}
+    with running_stack(environment=environment) as stack:
         yield stack
 
 
@@ -264,7 +298,7 @@ def test_migrate_ran_once_and_succeeded(default_stack: Stack) -> None:
 
 def _database_url(stack: Stack) -> str:
     host, port = stack.address("postgres", 5432)
-    password = stack.secret("VISIONQUERY_POSTGRES_PASSWORD")
+    password = quote(stack.secret("VISIONQUERY_POSTGRES_PASSWORD"), safe="")
     return f"postgresql://visionquery:{password}@{host}:{port}/visionquery"
 
 
@@ -303,6 +337,48 @@ def test_mediamtx_api_answers_the_visionquery_user_only(default_stack: Stack) ->
     assert _get(url, ("visionquery", "wrong"))[0] == 401
 
 
+def test_the_awkward_password_reached_both_postgres_and_the_migrations(
+    default_stack: Stack,
+) -> None:
+    assert default_stack.secret("VISIONQUERY_POSTGRES_PASSWORD") == AWKWARD_PASSWORD
+    # The migrations connected with it, from another container, through PGPASSWORD.
+    assert default_stack.containers()["migrate"]["ExitCode"] == 0
+
+
+def test_up_on_an_unchanged_tree_recreates_nothing(default_stack: Stack) -> None:
+    # `up` must not rebuild, or the image ID changes and mediamtx and migrate are recreated,
+    # which drops live streams. `make up` also runs migrate again, which is safe.
+    def identifiers() -> dict[str, str]:
+        return {name: c["ID"] for name, c in default_stack.containers().items()}
+
+    before = identifiers()
+    for _ in range(2):
+        up = default_stack.make("up")
+        assert up.returncode == 0, up.stdout + up.stderr
+        assert identifiers() == before
+    default_stack.compose("up", "--detach")
+    assert identifiers() == before
+    assert default_stack.containers()["migrate"]["ExitCode"] == 0
+
+
+def test_make_up_fails_visibly_when_the_migrations_fail(tmp_path: Path) -> None:
+    broken = tmp_path / "compose.broken-migrate.yaml"
+    broken.write_text(
+        "services:\n  migrate:\n    environment:\n"
+        "      VISIONQUERY_DATABASE__URL: postgresql://visionquery@127.0.0.1:1/visionquery\n"
+    )
+    stack = _new_stack(files=[broken])
+    try:
+        stack.compose("build", timeout=BUILD_TIMEOUT)
+        stack.compose("pull", "--ignore-buildable", "--quiet", timeout=BUILD_TIMEOUT)
+        up = stack.make("up", timeout=WAIT_TIMEOUT + 60)
+        assert up.returncode != 0, up.stdout + up.stderr
+        assert "migrations failed" in up.stderr, up.stdout + up.stderr
+        assert stack.containers()["migrate"]["ExitCode"] != 0
+    finally:
+        stack.compose("down", "--volumes", "--remove-orphans", timeout=300, check=False)
+
+
 # --- The observability profile --------------------------------------------------------------
 
 #: Every Prometheus job with a target in the stack without `gpu`.
@@ -335,6 +411,13 @@ def test_prometheus_sees_every_target_up(observed_stack: Stack) -> None:
     wait_for(every_target_up, timeout=90)
 
 
+def test_prometheus_logs_no_failed_lookup_without_the_gpu_profile(observed_stack: Stack) -> None:
+    # A job looking up `triton` without Triton would log a DNS error every 15 s.
+    time.sleep(20)  # longer than a refresh
+    logs = observed_stack.compose("logs", "--no-color", "prometheus").stdout
+    assert "triton" not in logs, logs
+
+
 def test_grafana_reaches_prometheus_through_its_provisioned_datasource(
     observed_stack: Stack,
 ) -> None:
@@ -355,7 +438,8 @@ def triton_stack() -> Iterator[Stack]:
             f"Triton's image is about 25 GB on disk: set {TRITON_MODE_VARIABLE}=gpu, or =cpu on a "
             "machine without a GPU, to run it"
         )
-    with running_stack(profiles=["gpu"], files=[NO_GPU] if TRITON_MODE == "cpu" else []) as stack:
+    profiles = ["gpu", "observability"]
+    with running_stack(profiles=profiles, files=[NO_GPU] if TRITON_MODE == "cpu" else []) as stack:
         yield stack
 
 
@@ -367,3 +451,22 @@ def test_the_gpu_profile_adds_triton_healthy_with_an_empty_model_repository(
     status, body = _get(triton_stack.url("triton", 8000, "/v2/repository/index"), data=b"{}")
     assert status == 200, body
     assert json.loads(body) == []
+
+
+def test_prometheus_finds_triton_through_the_file_the_gpu_profile_writes(
+    triton_stack: Stack,
+) -> None:
+    url = triton_stack.url("prometheus", 9090, "/api/v1/targets?state=active")
+
+    def triton_up() -> tuple[str | None, str]:
+        status, body = _get(url)
+        if status != 200:
+            return None, f"Prometheus answered {status}"
+        health = {
+            t["labels"]["job"]: t["health"] for t in json.loads(body)["data"]["activeTargets"]
+        }
+        if health.get("triton") != "up":
+            return None, f"targets are {health}, triton is wanted up"
+        return "up", ""
+
+    wait_for(triton_up, timeout=90)
