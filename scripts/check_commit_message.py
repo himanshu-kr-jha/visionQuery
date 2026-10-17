@@ -3,10 +3,13 @@
     check_commit_message.py COMMIT_MSG_FILE      as a commit-msg hook (`#` lines are ignored)
     check_commit_message.py --env PR_TITLE       a PR title, which becomes the squash subject
 
-The subject is `type(scope): subject` or `type: subject`, with `!` before the colon for a
-breaking change. The scope is a package under packages/, `web`, or one of REPO_SCOPES. Subjects
-git writes itself (merges, reverts, fixup! and squash! commits) pass, and a body must be
-separated from the subject by a blank line. Exits 0 when the message conforms, 1 otherwise.
+The subject is `type(scope): subject`, with `!` before the colon for a breaking change. The
+scope is a package under packages/, `web`, or one of REPO_SCOPES. In a commit message it may be
+left out (`type: subject`); a PR title must have one, as CLAUDE.md asks, because it becomes the
+squash commit's subject. Subjects git writes itself (merges, reverts, fixup! and squash!
+commits) pass in a commit message file, but not as a PR title, which is never written by git. A
+body must be separated from the subject by a blank line. Exits 0 when the message conforms, 1
+otherwise.
 """
 
 import argparse
@@ -27,8 +30,9 @@ def _scopes() -> list[str]:
     return [*packages, "web", *REPO_SCOPES]
 
 
-def _subject_pattern(scopes: list[str]) -> re.Pattern[str]:
-    return re.compile(rf"^({'|'.join(TYPES)})(\(({'|'.join(scopes)})\))?!?: \S")
+def _subject_pattern(scopes: list[str], *, scope_required: bool) -> re.Pattern[str]:
+    scope = rf"\(({'|'.join(scopes)})\)"
+    return re.compile(rf"^({'|'.join(TYPES)}){scope if scope_required else f'({scope})?'}!?: \S")
 
 
 def _lines(text: str) -> list[str]:
@@ -44,16 +48,17 @@ def _lines(text: str) -> list[str]:
     return kept
 
 
-def problems(text: str) -> list[str]:
+def problems(text: str, *, pr_title: bool = False) -> list[str]:
     lines = _lines(text)
     subject = lines[0] if lines else ""
-    if WRITTEN_BY_GIT.match(subject):
+    if not pr_title and WRITTEN_BY_GIT.match(subject):
         return []
     scopes = _scopes()
     found: list[str] = []
-    if not _subject_pattern(scopes).match(subject):
+    if not _subject_pattern(scopes, scope_required=pr_title).match(subject):
+        shape = "`type(scope): subject`" if pr_title else "`type(scope): subject` (or `type: subject`)"
         found.append(
-            f"{subject!r} is not `type(scope): subject` (or `type: subject`), with type one of "
+            f"{subject!r} is not {shape}, with type one of "
             f"{', '.join(TYPES)} and scope one of {', '.join(scopes)}"
         )
     if len(lines) > 1 and lines[1].strip():
@@ -73,7 +78,7 @@ def main() -> int:
         where, text = arguments.env, os.environ.get(arguments.env, "")
     else:
         where, text = arguments.file, Path(arguments.file).read_text(encoding="utf-8")
-    found = problems(text)
+    found = problems(text, pr_title=bool(arguments.env))
     for problem in found:
         print(f"{where}: {problem}", file=sys.stderr)
     return 1 if found else 0

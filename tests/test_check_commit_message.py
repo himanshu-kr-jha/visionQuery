@@ -109,15 +109,48 @@ def test_git_comments_before_the_subject_are_ignored(tmp_path: Path) -> None:
     assert _check_text(tmp_path, text).returncode == 0
 
 
-def test_a_pr_title_is_checked_from_the_environment() -> None:
-    def check(title: str) -> int:
-        return subprocess.run(
-            [sys.executable, str(SCRIPT), "--env", "PR_TITLE"],
-            env={"PATH": "/usr/bin:/bin", "PR_TITLE": title},
-            capture_output=True,
-            check=False,
-            timeout=60,
-        ).returncode
+def _check_title(title: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPT), "--env", "PR_TITLE"],
+        env={"PATH": "/usr/bin:/bin", "PR_TITLE": title},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=60,
+    )
 
-    assert check("ci: run every check on each PR") == 0
-    assert check("CI workflow, pre-commit and branch rules") == 1
+
+def test_a_pr_title_is_checked_from_the_environment() -> None:
+    assert _check_title("ci(ci): run every check on each PR").returncode == 0
+    assert _check_title("CI workflow, pre-commit and branch rules").returncode == 1
+
+
+@pytest.mark.parametrize("title", ["ci: run every check on each PR", "feat!: drop the old route"])
+def test_a_pr_title_needs_a_scope_as_claude_md_asks(title: str) -> None:
+    # The PR title becomes the squash commit's subject: CLAUDE.md asks for `type(scope): subject`.
+    result = _check_title(title)
+    assert result.returncode == 1
+    assert "`type(scope): subject`" in result.stderr
+    assert "(or `type: subject`)" not in result.stderr
+
+
+def test_a_pr_title_with_a_scope_and_a_breaking_mark_passes() -> None:
+    assert _check_title("feat(api)!: answer every Question with Evidence").returncode == 0
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "Merge branch 'develop' into feature/8-ci",
+        'Revert "feat(api): add a route"',
+        "fixup! feat(api): add a route",
+        "squash! feat(api): add a route",
+        "amend! feat(api): add a route",
+    ],
+)
+def test_what_git_writes_itself_is_not_a_valid_pr_title(title: str) -> None:
+    assert _check_title(title).returncode == 1
+
+
+def test_claude_md_says_the_pr_title_has_a_scope() -> None:
+    assert "The PR title must be a Conventional Commit `type(scope): subject`" in CLAUDE
