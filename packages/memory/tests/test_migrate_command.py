@@ -276,12 +276,16 @@ def test_a_missing_database_url_is_named() -> None:
     assert line["variables"] == ["VISIONQUERY_DATABASE__URL"]
 
 
+def _with(database: str, variable: str, value: str) -> Any:
+    return {"database__url": database, variable: value}
+
+
 @pytest.mark.parametrize("variable", ["runtime_password", "monitoring_password"])
 def test_an_empty_role_password_is_unset_and_clears_nothing(database: str, variable: str) -> None:
     role = "visionquery_" + variable.removesuffix("_password")
-    status, _, _ = _run(database__url=database, **{variable: "first-password"})
+    status, _, _ = _run(**_with(database, variable, "first-password"))
     assert status == 0
-    status, _, _ = _run(database__url=database, **{variable: ""})
+    status, _, _ = _run(**_with(database, variable, ""))
     assert status == 0
     with psycopg.connect(database) as connection:
         stored = connection.execute(
