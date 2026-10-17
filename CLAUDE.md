@@ -198,7 +198,7 @@ It is not part of the Compose stack yet; the api will serve it later.
 
 **The api** (`visionquery-api`) is FastAPI served by uvicorn with `log_config=None`, so its logs are the runtime's JSON lines, and with no access log (it would be mostly the healthcheck's).
 `GET /health` reports readiness, not just that the process runs: 200 when the database can be reached and 503 otherwise, naming the problem only by category (`visionquery.memory.connection.ConnectionProblem`), never with any part of the URL.
-Before the first check has finished the database's status is "checking", with no problem, and the answer is 503; the web page then keeps saying it is checking and asks again a second later.
+Until the first check has finished or its deadline has passed, the database's status is "checking", with no problem, and the answer is 503; the web page then keeps saying it is checking and asks again a second later.
 The Compose healthcheck asks it, so an api that could answer nothing is not marked healthy.
 The check has one time budget, `HEALTH_BUDGET_SECONDS` in `visionquery.memory.health` (2 s to connect plus 2 s for its query); the probe gives up on a check one second after that (`DEADLINE_SECONDS`), and every client of `/health` waits longer still: the Compose healthcheck 6 s, the web page 8 s (`tests/test_compose.py` and `tests/test_web.py` keep them above the deadline).
 It stays at the root, for infrastructure; every Operator operation goes under `/api` (`visionquery.api.app.operator_router`) and calls `tools` (ADR 0009), never the memory.
