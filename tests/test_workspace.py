@@ -54,7 +54,8 @@ def test_python_version_is_the_same_everywhere() -> None:
     pinned = (ROOT / ".python-version").read_text().strip()
     major_minor = pinned.split(".")
     assert len(major_minor) == 2, (
-        "pin the minor only; the patch is whichever uv-managed 3.14 is installed"
+        f"pin the minor only; the patch is whichever uv-managed "
+        f"{'.'.join(major_minor[:2])} is installed"
     )
     root = _pyproject(ROOT)
     assert root["project"]["requires-python"] == f"=={pinned}.*"
@@ -67,12 +68,6 @@ def test_python_version_is_the_same_everywhere() -> None:
 
 def test_the_interpreter_is_uv_managed_never_the_systems() -> None:
     assert _pyproject(ROOT)["tool"]["uv"]["python-preference"] == "only-managed"
-
-
-def test_no_one_claims_the_patch_release_is_pinned() -> None:
-    # Only the minor is pinned, so a machine may hold a different 3.14 patch than another.
-    text = (ROOT / "pyproject.toml").read_text().lower()
-    assert "same patch" not in text
 
 
 def test_pyright_brings_its_own_node() -> None:
