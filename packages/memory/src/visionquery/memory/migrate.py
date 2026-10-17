@@ -34,6 +34,11 @@ transaction runs with a `lock_timeout` (`LOCK_TIMEOUT`) so a blocked statement f
 name, and waiting for the advisory lock is logged every few seconds, however long it takes.
 A connection that breaks mid-file leaves its outcome unknown; rerunning is safe.
 
+**The Deployment's roles get their logins.**
+After a run, the command lets the roles every other process connects as log in (ADR 0016,
+`visionquery.memory.roles`) with the passwords in `VISIONQUERY_RUNTIME_PASSWORD` and
+`VISIONQUERY_MONITORING_PASSWORD`, each when it is set; `status` never does.
+
 The command reads `VISIONQUERY_DATABASE__URL` and exits 0 when the schema is up to date, 1
 when a migration failed or the database could not be connected to (a fixed message by
 category, never libpq's text), 2 when its settings are
@@ -61,9 +66,10 @@ from typing import Annotated, LiteralString
 import psycopg
 from psycopg import sql
 from psycopg.pq import TransactionStatus
-from pydantic import Field
+from pydantic import Field, SecretStr
 from visionquery.memory._sql import transaction_control
 from visionquery.memory.connection import ConnectionFailedError, connect
+from visionquery.memory.roles import MONITORING, RUNTIME, enable_logins
 from visionquery.memory.settings import DatabaseSettings
 from visionquery.runtime import Settings, start
 
@@ -600,6 +606,16 @@ class MigrateSettings(Settings):
     lock_timeout: Annotated[float, Field(gt=0)] = LOCK_TIMEOUT
     #: Seconds to wait for a connection, unless the URL sets `connect_timeout`.
     connect_timeout: Annotated[int, Field(ge=1)] = CONNECT_TIMEOUT
+    #: The passwords the runtime and monitoring roles log in with, given to them after every
+    #: run that migrated or found nothing to do; a role whose password is not set is left as
+    #: it is (unable to log in, unless an earlier run gave it a password).
+    runtime_password: SecretStr | None = None
+    monitoring_password: SecretStr | None = None
+
+    def logins(self) -> dict[str, str]:
+        """The password of each role that one is set for."""
+        passwords = {RUNTIME: self.runtime_password, MONITORING: self.monitoring_password}
+        return {r: p.get_secret_value() for r, p in passwords.items() if p is not None}
 
 
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -632,6 +648,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         applied = migrate(
             url, connect_timeout=settings.connect_timeout, lock_timeout=settings.lock_timeout
         )
+        if logins := settings.logins():
+            enable_logins(url, logins, connect_timeout=settings.connect_timeout)
     except MigrationRefusedError as error:
         files = [problem.file for problem in error.problems]
         _log.critical("%s", error, extra={"error": type(error).__name__, "files": files})

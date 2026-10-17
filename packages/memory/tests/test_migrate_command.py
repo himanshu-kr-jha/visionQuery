@@ -12,7 +12,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import SplitResult, urlsplit
+from urllib.parse import SplitResult, quote, urlsplit
 
 import psycopg
 import pytest
@@ -86,6 +86,50 @@ def test_a_wrong_pgpassword_fails_without_showing_it(database: str) -> None:
     (failed,) = [line for line in lines if line["level"] == "CRITICAL"]
     assert failed["error"] == "ConnectionFailedError"
     assert "wrongPW9" not in json.dumps(lines) + stderr
+
+
+def _login(database: str, role: str, password: str) -> str:
+    parts = urlsplit(database)
+    netloc = f"{role}:{quote(password, safe='')}@{_host(parts)}:{parts.port}"
+    with psycopg.connect(parts._replace(netloc=netloc).geturl(), connect_timeout=5) as connection:
+        row = connection.execute("SELECT current_user").fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+def test_after_migrating_the_runtime_and_monitoring_roles_log_in_with_their_passwords(
+    database: str,
+) -> None:
+    status, lines, stderr = _run(
+        database__url=database,
+        runtime_password="runtimePW7 @/:#",
+        monitoring_password="monitoringPW8",
+    )
+    assert (status, stderr) == (0, "")
+    (enabled,) = [line for line in lines if line["message"] == "logins enabled"]
+    assert enabled["roles"] == ["visionquery_monitoring", "visionquery_runtime"]
+    assert "runtimePW7" not in json.dumps(lines)
+    assert "monitoringPW8" not in json.dumps(lines)
+    assert _login(database, "visionquery_runtime", "runtimePW7 @/:#") == "visionquery_runtime"
+    assert _login(database, "visionquery_monitoring", "monitoringPW8") == "visionquery_monitoring"
+
+
+def test_status_never_changes_a_login(database: str) -> None:
+    assert _run(database__url=database, runtime_password="before1")[0] == 0
+    status, lines, _ = _run(args=("status",), database__url=database, runtime_password="after2")
+    assert status == 0
+    assert not any(line["message"] == "logins enabled" for line in lines)
+    assert _login(database, "visionquery_runtime", "before1") == "visionquery_runtime"
+
+
+def test_a_refused_run_changes_no_login(database: str) -> None:
+    assert _run(database__url=database, runtime_password="before3")[0] == 0
+    with psycopg.connect(database) as connection:
+        connection.execute(
+            "UPDATE schema_migrations SET sha256 = sha256('before'::bytea) WHERE number = 1"
+        )
+    assert _run(database__url=database, runtime_password="after4")[0] == 3
+    assert _login(database, "visionquery_runtime", "before3") == "visionquery_runtime"
 
 
 def test_an_edited_migration_is_refused_by_name(database: str) -> None:
