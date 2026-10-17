@@ -78,7 +78,7 @@ A video that exists but that the container cannot read (as after `umask 077`) is
 Every port listens on loopback only unless `VISIONQUERY_BIND_ADDRESS` (or, for the camera-facing ports of MediaMTX alone, `VISIONQUERY_MEDIAMTX_BIND_ADDRESS`) says otherwise, and each can be moved with its own variable when something on the machine already uses it.
 
 Every VisionQuery process is configured only through environment variables prefixed `VISIONQUERY_`, logs JSON lines to stdout, and serves Prometheus metrics on `/metrics` (port `9100` unless `VISIONQUERY_METRICS_PORT` says otherwise, on loopback unless `VISIONQUERY_METRICS_HOST` does; Compose sets it to `0.0.0.0` so Prometheus can reach it, without publishing the port).
-The variables every process reads are listed in [`CLAUDE.md`](CLAUDE.md#architecture); a process that is missing one it needs exits with status 2 after logging which.
+The variables every process reads are listed in [`CLAUDE.md`](CLAUDE.md#architecture); a process that is missing one it needs, or given a metrics address it cannot bind, exits with status 2 after logging which variable to change.
 
 The database schema is applied with `visionquery-migrate`, which reads `VISIONQUERY_DATABASE__URL` (a `postgresql://` URL to a Postgres with TimescaleDB and pgvector) and is safe to run on every start: it applies only what is new, and refuses, naming the file, when the migrations and the database disagree.
 

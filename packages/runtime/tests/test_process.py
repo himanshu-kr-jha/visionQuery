@@ -1,5 +1,6 @@
 """`start` hands back the loaded settings and the running metrics server, in one call."""
 
+import errno
 import json
 import socket
 import urllib.request
@@ -89,3 +90,45 @@ def test_a_metrics_host_that_is_not_this_machines_stops_the_process_naming_it(
     (line,) = _logged(capsys)
     assert line["variables"] == ["VISIONQUERY_METRICS_HOST"]
     assert "exception" not in line
+
+
+def _failing_bind(error: OSError) -> Any:
+    def serve_metrics(host: str, port: int) -> Any:
+        raise error
+
+    return serve_metrics
+
+
+@pytest.mark.parametrize(
+    ("error", "variable"),
+    [
+        (socket.gaierror(socket.EAI_NONAME, "Name or service not known"), "HOST"),
+        (OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address"), "HOST"),
+        (OSError(errno.EAFNOSUPPORT, "Address family not supported by protocol"), "HOST"),
+        (OSError(errno.EADDRINUSE, "Address already in use"), "PORT"),
+        (OSError(errno.EACCES, "Permission denied"), "PORT"),
+    ],
+)
+def test_a_bind_failure_names_the_variable_it_is_the_fault_of(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    error: OSError,
+    variable: str,
+) -> None:
+    monkeypatch.setattr("visionquery.runtime.process.serve_metrics", _failing_bind(error))
+    with pytest.raises(SystemExit) as exited:
+        start("probe", Settings)
+    assert exited.value.code == 2
+    (line,) = _logged(capsys)
+    assert line["variables"] == [f"VISIONQUERY_METRICS_{variable}"]
+
+
+@pytest.mark.parametrize("code", [errno.EMFILE, errno.ENOMEM, errno.ENOBUFS])
+def test_a_bind_failure_that_is_neither_the_host_nor_the_port_is_not_blamed_on_either(
+    monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    error = OSError(code, "resource trouble")
+    monkeypatch.setattr("visionquery.runtime.process.serve_metrics", _failing_bind(error))
+    with pytest.raises(OSError, match="resource trouble") as raised:
+        start("probe", Settings)
+    assert raised.value is error

@@ -2,6 +2,7 @@
 
 import errno
 import logging
+import socket
 from dataclasses import dataclass
 
 from visionquery.runtime.logs import configure_logging
@@ -13,11 +14,14 @@ __all__ = ["Process", "start"]
 _log = logging.getLogger("visionquery.runtime")
 
 #: The exit status of a process whose settings are missing or invalid (as for a usage error),
-#: or name an address `/metrics` cannot listen on.
+#: or name an address `/metrics` cannot listen on. Any other failure
+#: to bind is not about the address and is raised as it is.
 BAD_SETTINGS = 2
 
-#: Bind errors the port is to blame for; any other is the host's.
+#: Bind errors the port is to blame for.
 _PORT_ERRORS = frozenset([errno.EADDRINUSE, errno.EACCES])
+#: Bind errors the host is to blame for (a name that does not resolve is a `socket.gaierror`).
+_HOST_ERRORS = frozenset([errno.EADDRNOTAVAIL, errno.EAFNOSUPPORT])
 
 
 @dataclass(frozen=True)
@@ -57,7 +61,12 @@ def start[S: Settings](service: str, settings: type[S]) -> Process[S]:
     try:
         metrics = serve_metrics(host, port)
     except OSError as error:
-        variable = f"{PREFIX}METRICS_{'PORT' if error.errno in _PORT_ERRORS else 'HOST'}"
+        if isinstance(error, socket.gaierror) or error.errno in _HOST_ERRORS:
+            variable = f"{PREFIX}METRICS_HOST"
+        elif error.errno in _PORT_ERRORS:
+            variable = f"{PREFIX}METRICS_PORT"
+        else:
+            raise  # not an address problem (out of file descriptors, memory...): say what it is
         address = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
         _log.critical(
             "/metrics cannot listen on %s (%s); change %s",
