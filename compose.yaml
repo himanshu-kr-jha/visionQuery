@@ -251,8 +251,9 @@ services:
   # the videos are read from VISIONQUERY_FAKE_CAMERA_SAMPLES, where `make fetch-samples` puts
   # the ones samples/manifest.toml lists, and `synthetic` is a test pattern needing no video.
   # Each video is re-encoded once as a camera would send it and kept in the `fake-cameras`
-  # volume, then looped without transcoding. Each camera reconnects by itself when MediaMTX
-  # restarts. Not scraped by Prometheus: it is never part of a Deployment.
+  # volume, then looped without transcoding. Every camera shows the same moment of its video
+  # as every other (all are cut to VISIONQUERY_FAKE_CAMERA_DURATION seconds and follow the wall
+  # clock), also after a restart. Each camera reconnects by itself when MediaMTX restarts. Not scraped by Prometheus: it is never part of a Deployment.
   fake-cameras:
     <<: *service
     profiles: [dev]
@@ -265,6 +266,7 @@ services:
     environment:
       FAKE_CAMERAS: ${VISIONQUERY_FAKE_CAMERAS:-gym-g299=meva-school-g299.avi,gym-g330=meva-school-g330.avi,stairs-g420=meva-school-g420.avi}
       FAKE_CAMERAS_RTSP: rtsp://mediamtx:8554
+      FAKE_CAMERAS_DURATION: ${VISIONQUERY_FAKE_CAMERA_DURATION:-300}
     volumes:
       - ${VISIONQUERY_FAKE_CAMERA_SAMPLES:-./samples}:/samples:ro
       - fake-cameras:/cache

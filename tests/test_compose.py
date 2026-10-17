@@ -640,6 +640,13 @@ def test_the_cameras_and_their_videos_come_from_the_environment() -> None:
     assert cameras["environment"]["FAKE_CAMERAS"] == chosen
 
 
+def test_every_sample_is_cut_to_the_same_duration_the_environment_names() -> None:
+    assert _fake_cameras()["environment"]["FAKE_CAMERAS_DURATION"] == "300"
+    chosen = _fake_cameras(env={"VISIONQUERY_FAKE_CAMERA_DURATION": "20"})
+    assert chosen["environment"]["FAKE_CAMERAS_DURATION"] == "20"
+    assert _example()["VISIONQUERY_FAKE_CAMERA_DURATION"] == "300"
+
+
 def _mount(service: Mapping[str, Any], target: str) -> dict[str, Any]:
     (mount,) = [m for m in service["volumes"] if m["target"] == target]
     return mount

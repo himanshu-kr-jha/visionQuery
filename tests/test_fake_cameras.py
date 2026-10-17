@@ -15,11 +15,16 @@ import subprocess
 import sys
 import textwrap
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Coroutine, Iterator
+from dataclasses import replace
 from pathlib import Path
+from typing import NoReturn
 
+import fake_cameras
 import pytest
 from fake_cameras import (
+    DURATION,
+    HUNG_AFTER,
     PUBLISHED_LONG_ENOUGH,
     SYNTHETIC,
     Camera,
@@ -31,6 +36,8 @@ from fake_cameras import (
     parse_cameras,
     prepare_command,
     publish_command,
+    redact,
+    timeline_start,
 )
 from fake_cameras import Publisher as RealPublisher
 
@@ -79,6 +86,67 @@ def test_a_malformed_configuration_is_refused_saying_why(spec: str, complaint: s
         parse_cameras(spec)
 
 
+def _environment(**changes: str) -> dict[str, str]:
+    return {"FAKE_CAMERAS": "a=synthetic"} | changes
+
+
+def test_every_sample_is_five_minutes_long_unless_configured() -> None:
+    assert DURATION == 300
+    assert Settings.from_environment(_environment()).duration == 300
+    assert Settings.from_environment(_environment(FAKE_CAMERAS_DURATION="20")).duration == 20
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"FAKE_CAMERAS_DURATION": "0"},
+        {"FAKE_CAMERAS_DURATION": "2.5"},
+        {"FAKE_CAMERAS_DURATION": "five"},
+        {"FAKE_CAMERAS_PREPARE_ATTEMPTS": "0"},
+        {"FAKE_CAMERAS_PREPARE_RETRY": "-1"},
+    ],
+)
+def test_a_duration_or_attempts_that_make_no_sense_are_refused(changes: dict[str, str]) -> None:
+    with pytest.raises(ValueError, match="FAKE_CAMERAS_"):
+        Settings.from_environment(_environment(**changes))
+
+
+# --- The shared timeline ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("now", "wait", "position"),
+    [
+        # Cameras join at the next whole second, where the samples have a keyframe.
+        (1000.4, 0.6, 101),
+        (1000.0, 0.0, 100),
+        (1799.999, 0.001, 0),
+        (299.25, 0.75, 0),
+        (300.0, 0.0, 0),
+        # Whenever they start, 300 s later they are at the same point.
+        (1000.4 + 300, 0.6, 101),
+    ],
+)
+def test_a_camera_joins_the_timeline_at_the_next_whole_second(
+    now: float, wait: float, position: int
+) -> None:
+    got_wait, got_position = timeline_start(now, 300)
+    assert got_wait == pytest.approx(wait, abs=1e-6)
+    assert got_position == position
+
+
+def test_the_timeline_follows_the_wall_clock_not_when_a_camera_started() -> None:
+    # With the epoch at 0 and 300 s, a loop starts at every five minutes of the hour.
+    five_past_ten = 1_700_000_000 - 1_700_000_000 % 300
+    assert timeline_start(five_past_ten, 300) == (0, 0)
+    assert timeline_start(five_past_ten + 17.5, 300)[1] == 18
+    assert timeline_start(five_past_ten + 17.5, 20)[1] == 18
+
+
+def test_the_timeline_can_start_elsewhere() -> None:
+    assert timeline_start(1000.0, 300, epoch=990.0) == (0, 10)
+
+
 # --- The commands -----------------------------------------------------------------------------
 
 URL = "rtsp://mediamtx:8554/lobby"
@@ -96,6 +164,18 @@ def test_a_camera_loops_a_prepared_sample_in_real_time_without_transcoding() -> 
     assert command.index("-re") < command.index("-i")
     assert _after(command, "-i") == "/cache/abc.mp4"
     assert _after(command, "-c") == "copy"
+
+
+def test_a_camera_joins_the_timeline_before_reading_its_input_and_then_loops_from_the_start() -> (
+    None
+):
+    command = publish_command(Path("/cache/abc.mp4"), URL, start=101)
+    assert _after(command, "-ss") == "101"
+    # Before -i, so that it seeks (to a keyframe) rather than decodes up to the point.
+    assert command.index("-ss") < command.index("-i")
+    # A loop reads from the beginning again, which -ss does only once.
+    assert _after(command, "-stream_loop") == "-1"
+    assert _after(publish_command(Path("/cache/abc.mp4"), URL), "-ss") == "0"
 
 
 def test_every_camera_publishes_over_rtsp_on_tcp_to_its_own_path() -> None:
@@ -137,12 +217,32 @@ def test_preparing_a_sample_makes_it_camera_like() -> None:
     assert command[-3:] == ["-f", "mp4", "/cache/a.part"]
 
 
+def test_every_sample_is_prepared_to_the_same_duration() -> None:
+    command = prepare_command(Path("/samples/a.avi"), Path("/cache/a.part"))
+    # Samples differ in length (MEVA's are 300.0 and 300.3 s), which would drift their loops.
+    assert _after(command, "-t") == "300"
+    assert command.index("-t") > command.index("-i")
+    # One shorter than that holds its last picture rather than looping early.
+    assert "tpad=stop_mode=clone:stop_duration=300" in _after(command, "-vf")
+    other = prepare_command(Path("/samples/a.avi"), Path("/cache/a.part"), duration=20)
+    assert _after(other, "-t") == "20"
+    assert "stop_duration=20" in _after(other, "-vf")
+
+
+def test_a_sample_is_prepared_again_when_the_duration_changes(tmp_path: Path) -> None:
+    sample = tmp_path / "walk.mp4"
+    sample.write_bytes(b"one")
+    assert cache_key(sample, 300) != cache_key(sample, 20)
+    assert cache_key(sample) == cache_key(sample, DURATION)
+
+
 def test_the_test_pattern_is_a_sample_prepared_like_any_other() -> None:
     # Encoded once and looped, so that many synthetic cameras cost no more than many samples.
     command = prepare_command(None, Path("/cache/b.part"))
     assert _after(command, "-f") == "lavfi"
     assert _after(command, "-i").startswith("testsrc2=")
     assert "duration=" in _after(command, "-i")
+    assert "-t" not in command
     _camera_like(command)
     assert command[-3:] == ["-f", "mp4", "/cache/b.part"]
 
@@ -174,7 +274,8 @@ def test_a_camera_is_publishing_while_its_frames_keep_coming() -> None:
 
 #: Stands in for ffmpeg: logs its arguments, reports progress like `-progress pipe:1` until
 #: told to stop, or exits at once when the file named by FAKE_FFMPEG_FAIL exists. Preparing a
-#: sample (not the test pattern) takes until the file named by FAKE_FFMPEG_HOLD is gone.
+#: sample (not the test pattern) takes until the file named by FAKE_FFMPEG_HOLD is gone, and
+#: fails while the file named by FAKE_FFMPEG_FAIL_PREPARE exists.
 FAKE_FFMPEG = textwrap.dedent(
     """\
     import json, os, sys, time
@@ -184,6 +285,9 @@ FAKE_FFMPEG = textwrap.dedent(
     if sys.argv[-2] == "mp4":
         while "lavfi" not in sys.argv and Path(os.environ["FAKE_FFMPEG_HOLD"]).exists():
             time.sleep(0.1)
+        if "lavfi" not in sys.argv and Path(os.environ["FAKE_FFMPEG_FAIL_PREPARE"]).exists():
+            print("[libx264 @ 0x7f02] the encoder broke", file=sys.stderr, flush=True)
+            sys.exit(1)
         Path(sys.argv[-1]).write_bytes(b"prepared")
         sys.exit(0)
     if Path(os.environ["FAKE_FFMPEG_FAIL"]).exists():
@@ -212,6 +316,7 @@ class Publisher:
         self.calls = tmp_path / "ffmpeg.log"
         self.fail = tmp_path / "fail"
         self.hold = tmp_path / "hold"
+        self.fail_prepare = tmp_path / "fail-prepare"
         #: Where the test pattern is prepared.
         self.pattern = self.cache / f"{cache_key(None)}.mp4"
         for directory in (self.samples, self.cache):
@@ -230,6 +335,8 @@ class Publisher:
             "FAKE_FFMPEG_LOG": str(self.calls),
             "FAKE_FFMPEG_FAIL": str(self.fail),
             "FAKE_FFMPEG_HOLD": str(self.hold),
+            "FAKE_FFMPEG_FAIL_PREPARE": str(self.fail_prepare),
+            "FAKE_CAMERAS_PREPARE_RETRY": "0.05",
         }
         self.process: subprocess.Popen[str] | None = None
 
@@ -549,7 +656,7 @@ def _restart_delays(tmp_path: Path, runs: list[float]) -> list[float]:
     )
     publisher = RealPublisher(settings, clock=lambda: time_.now, sleep=time_.sleep)
 
-    async def run(label: str, command: list[str]) -> Ended:
+    async def run(label: str, command: list[str], hung_after: float | None = None) -> Ended:
         time_.now += time_.runs.pop(0)
         return Ended(1, [])
 
@@ -582,3 +689,311 @@ def test_a_restart_is_logged_with_its_delay(
         _restart_delays(tmp_path, [0.1, 0.1])
     assert "restarting in 1 s" in caplog.text
     assert "restarting in 2 s" in caplog.text
+
+
+# --- Rejoining the timeline at every start ----------------------------------------------------
+
+
+def _settings(tmp_path: Path, spec: str = "lobby=synthetic", **changes: object) -> Settings:
+    base = Settings(
+        cameras=parse_cameras(spec),
+        rtsp="rtsp://mediamtx.test:8554",
+        ffmpeg="ffmpeg",
+        samples=tmp_path / "samples",
+        cache=tmp_path / "cache",
+        status=tmp_path / "status.json",
+    )
+    return replace(base, **changes)
+
+
+def test_every_start_and_restart_of_a_sample_rejoins_the_shared_timeline(tmp_path: Path) -> None:
+    wall = [1000.4]
+    commands: list[list[str]] = []
+
+    async def sleep(seconds: float) -> None:
+        wall[0] += seconds
+        if len(commands) >= 3:
+            raise asyncio.CancelledError
+
+    publisher = RealPublisher(
+        _settings(tmp_path), clock=lambda: wall[0], sleep=sleep, wall=lambda: wall[0]
+    )
+
+    async def run(label: str, command: list[str], hung_after: float | None = None) -> Ended:
+        commands.append(command)
+        wall[0] += 40  # It published for a while, and then exited.
+        return Ended(1, [])
+
+    publisher._run = run  # type: ignore[method-assign]
+    keep_publishing = publisher._keep_publishing  # pyright: ignore[reportPrivateUsage]
+    with contextlib.suppress(asyncio.CancelledError):
+        asyncio.run(keep_publishing(Camera("lobby", "a.mp4"), tmp_path / "x.mp4", "u", "l", True))
+    # Started at 1001 s (the next whole second), then restarted at 1042 s and at 1083 s, each
+    # time at the point of the sample the other cameras are at: not from its beginning.
+    assert [_after(c, "-ss") for c in commands] == ["101", "142", "183"]
+
+
+def test_the_test_pattern_has_no_timeline_to_join(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+
+    async def sleep(seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    publisher = RealPublisher(_settings(tmp_path), sleep=sleep, wall=lambda: 1000.4)
+
+    async def run(label: str, command: list[str], hung_after: float | None = None) -> Ended:
+        commands.append(command)
+        return Ended(1, [])
+
+    publisher._run = run  # type: ignore[method-assign]
+    keep_publishing = publisher._keep_publishing  # pyright: ignore[reportPrivateUsage]
+    with contextlib.suppress(asyncio.CancelledError):
+        asyncio.run(keep_publishing(Camera("lobby", SYNTHETIC), tmp_path / "x.mp4", "u", "l"))
+    assert [_after(c, "-ss") for c in commands] == ["0"]
+
+
+# --- A hung ffmpeg ----------------------------------------------------------------------------
+
+#: Stands in for a publishing ffmpeg: writes its pid to the file named by its first argument,
+#: reports progress every 0.1 s, and (with `hang`) stops reporting after three reports while
+#: staying alive, as when a write to a MediaMTX that stopped reading blocks.
+HANGING_FFMPEG = textwrap.dedent(
+    """\
+    import os, sys, time
+    from pathlib import Path
+    Path({pid!r}).write_text(str(os.getpid()))
+    frame = 0
+    while True:
+        frame += 15
+        print(f"frame={{frame}}\\nprogress=continue", flush=True)
+        time.sleep(0.1)
+        if {hang} and frame >= 45:
+            time.sleep(3600)
+    """
+)
+
+
+class _Watched:
+    """A publisher whose clock moves a tenth of a second per watchdog check, so that the
+    fifteen seconds before a hung ffmpeg is killed take about a second and a half."""
+
+    def __init__(self, tmp_path: Path, hang: bool) -> None:
+        self.pid = tmp_path / "ffmpeg.pid"
+        ffmpeg = tmp_path / "ffmpeg"
+        ffmpeg.write_text(
+            f"#!{sys.executable}\n" + HANGING_FFMPEG.format(pid=str(self.pid), hang=hang)
+        )
+        ffmpeg.chmod(0o755)
+        self.wall = 1000.0
+        self.checks = 0
+        #: The restart delays, which are the other thing the publisher sleeps for.
+        self.restarts: list[float] = []
+        self.publisher = RealPublisher(
+            _settings(tmp_path, ffmpeg=str(ffmpeg)), sleep=self.sleep, wall=lambda: self.wall
+        )
+
+    async def sleep(self, seconds: float) -> None:
+        if seconds == fake_cameras.WATCH_EVERY:
+            self.checks += 1
+            self.wall += 0.1
+            await asyncio.sleep(0.01)
+        else:
+            self.restarts.append(seconds)
+            raise asyncio.CancelledError
+
+    def alive(self) -> bool:
+        try:
+            os.kill(int(self.pid.read_text()), 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def keep_publishing(self, tmp_path: Path) -> Coroutine[None, None, NoReturn]:
+        keep_publishing = self.publisher._keep_publishing  # pyright: ignore[reportPrivateUsage]
+        return keep_publishing(Camera("lobby", SYNTHETIC), tmp_path / "x.mp4", "u", "l")
+
+
+def test_an_ffmpeg_that_stops_reporting_progress_is_killed_and_restarted(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    watched = _Watched(tmp_path, hang=True)
+    with (
+        caplog.at_level(logging.WARNING, logger="fake-cameras"),
+        contextlib.suppress(asyncio.CancelledError),
+    ):
+        asyncio.run(asyncio.wait_for(watched.keep_publishing(tmp_path), timeout=30))
+    assert HUNG_AFTER == 15
+    assert watched.restarts == [1]
+    assert not watched.alive()
+    # Not before it was hung for HUNG_AFTER seconds of the clock, which moves 0.1 s a check.
+    assert watched.checks > HUNG_AFTER / 0.1
+    assert "lobby: ffmpeg reported no progress for 15 s and was killed; restarting in 1 s" in (
+        caplog.text
+    )
+
+
+def test_an_ffmpeg_that_keeps_reporting_progress_is_left_running(tmp_path: Path) -> None:
+    watched = _Watched(tmp_path, hang=False)
+
+    async def run() -> None:
+        task = asyncio.create_task(watched.keep_publishing(tmp_path))
+        # Twice as long as it takes to kill a hung one.
+        while watched.checks < 3 * int(HUNG_AFTER / 0.1):
+            await asyncio.sleep(0.05)
+            assert not task.done()
+        assert watched.alive()
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(asyncio.wait_for(run(), timeout=30))
+    assert watched.restarts == []
+    # Cancelling the publisher stops its ffmpeg too.
+    assert not watched.alive()
+
+
+# --- A video that cannot be prepared ----------------------------------------------------------
+
+
+def test_a_video_that_will_not_prepare_is_given_up_after_a_few_attempts(
+    publisher: Callable[[str], Publisher],
+) -> None:
+    p = publisher("a=walk.avi,b=walk.avi,c=synthetic")
+    (p.samples / "walk.avi").write_bytes(b"a video")
+    p.fail_prepare.touch()
+    p.start()
+    attempts = fake_cameras.PREPARE_ATTEMPTS
+    _eventually(lambda: len(_prepared(p.ffmpeg_calls())) == attempts)
+    # Not retried for ever, and not for each camera that loops it.
+    time.sleep(1)
+    assert len(_prepared(p.ffmpeg_calls())) == attempts
+    # The cameras are up all the same, on the test pattern.
+    _eventually(lambda: p.health().returncode == 0)
+    output = p.stop()
+    assert _inputs(p.ffmpeg_calls()) == {str(p.pattern)}
+    errors = [line for line in output.splitlines() if line.startswith("ERROR")]
+    # One error, naming the file and ffmpeg's reason.
+    assert len(errors) == 1, output
+    assert "walk.avi" in errors[0]
+    assert f"failed {attempts} times" in errors[0]
+    assert "the encoder broke" in errors[0]
+    assert "keep the test pattern" in errors[0]
+
+
+def test_the_attempts_to_prepare_a_video_can_be_configured(
+    publisher: Callable[[str], Publisher],
+) -> None:
+    p = publisher("a=walk.avi")
+    p.env["FAKE_CAMERAS_PREPARE_ATTEMPTS"] = "1"
+    (p.samples / "walk.avi").write_bytes(b"a video")
+    p.fail_prepare.touch()
+    p.start()
+    _eventually(lambda: len(_prepared(p.ffmpeg_calls())) == 1)
+    time.sleep(0.5)
+    p.stop()
+    assert len(_prepared(p.ffmpeg_calls())) == 1
+
+
+def test_a_video_that_prepares_at_the_second_attempt_is_looped(
+    publisher: Callable[[str], Publisher],
+) -> None:
+    p = publisher("a=walk.avi")
+    (p.samples / "walk.avi").write_bytes(b"a video")
+    p.fail_prepare.touch()
+    p.start()
+    _eventually(lambda: len(_prepared(p.ffmpeg_calls())) >= 1)
+    p.fail_prepare.unlink()
+    cached = str(p.cache / f"{cache_key(p.samples / 'walk.avi')}.mp4")
+    _eventually(lambda: cached in _inputs(p.ffmpeg_calls()))
+    output = p.stop()
+    assert "ERROR" not in output
+
+
+# --- Credentials never reach the log ----------------------------------------------------------
+
+
+def test_the_user_and_password_of_a_url_are_redacted() -> None:
+    assert redact("rtsp://user:s3cret@mediamtx:8554/gate") == "rtsp://***@mediamtx:8554/gate"
+    assert redact("rtsp://mediamtx:8554/gate") == "rtsp://mediamtx:8554/gate"
+    assert redact("a path/with@sign") == "a path/with@sign"
+    assert redact("tcp://u:p@h:1 and rtsp://v:q@i:2/x") == "tcp://***@h:1 and rtsp://***@i:2/x"
+
+
+def test_a_cameras_url_is_logged_without_its_credentials(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def sleep(seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    publisher = RealPublisher(_settings(tmp_path), sleep=sleep)
+
+    async def run(label: str, command: list[str], hung_after: float | None = None) -> Ended:
+        return Ended(1, ["[tcp @ 0x7f00] Connection to tcp://user:s3cret@mediamtx:8554 failed"])
+
+    publisher._run = run  # type: ignore[method-assign]
+    keep_publishing = publisher._keep_publishing  # pyright: ignore[reportPrivateUsage]
+    url = "rtsp://user:s3cret@mediamtx:8554/lobby"
+    with (
+        caplog.at_level(logging.INFO, logger="fake-cameras"),
+        contextlib.suppress(asyncio.CancelledError),
+    ):
+        asyncio.run(keep_publishing(Camera("lobby", SYNTHETIC), tmp_path / "x.mp4", url, "l"))
+    assert "s3cret" not in caplog.text
+    assert "publishing l to rtsp://***@mediamtx:8554/lobby" in caplog.text
+    assert "Connection to tcp://***@mediamtx:8554 failed" in caplog.text
+
+
+# --- The cache --------------------------------------------------------------------------------
+
+
+def test_a_video_missing_for_now_keeps_its_prepared_copy(
+    publisher: Callable[[str], Publisher],
+) -> None:
+    # `make fetch-samples` was not run yet (or the samples directory was unmounted): the
+    # prepared copy, named by the video's content, may be this camera's, so it stays.
+    p = publisher("a=synthetic,b=walk.avi")
+    (p.cache / "0123-old.mp4").write_bytes(b"prepared from a video that is missing now")
+    (p.cache / "0123-old.mp4.part").write_bytes(b"from a killed preparation")
+    p.start()
+    _eventually(lambda: p.health().returncode == 0)
+    p.stop()
+    assert sorted(p.cache.iterdir()) == sorted([p.cache / "0123-old.mp4", p.pattern])
+
+
+def test_a_prepared_copy_no_video_could_use_is_deleted(
+    publisher: Callable[[str], Publisher],
+) -> None:
+    p = publisher("b=walk.avi")
+    (p.samples / "walk.avi").write_bytes(b"a video")
+    (p.cache / "0123-old.mp4").write_bytes(b"prepared from another video")
+    p.start()
+    _eventually(lambda: p.health().returncode == 0)
+    p.stop()
+    assert not (p.cache / "0123-old.mp4").exists()
+
+
+def test_a_video_looped_by_several_cameras_is_read_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hashed: list[Path | None] = []
+    real = fake_cameras.cache_key
+
+    def counting(source: Path | None, duration: int = DURATION) -> str:
+        hashed.append(source)
+        return real(source, duration)
+
+    monkeypatch.setattr(fake_cameras, "cache_key", counting)
+    settings = _settings(tmp_path, "a=walk.avi,b=walk.avi,c=other.avi,d=synthetic")
+    for directory in (settings.samples, settings.cache):
+        directory.mkdir()
+    for name in ("walk.avi", "other.avi"):
+        (settings.samples / name).write_bytes(name.encode())
+    publisher = RealPublisher(settings)
+
+    async def use() -> None:
+        await publisher._prune_cache()  # pyright: ignore[reportPrivateUsage]
+        for video in (settings.samples / "walk.avi", settings.samples / "walk.avi"):
+            await publisher._key(video)  # pyright: ignore[reportPrivateUsage]
+
+    asyncio.run(use())
+    assert sorted(h.name for h in hashed if h is not None) == ["other.avi", "walk.avi"]
