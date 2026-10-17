@@ -54,7 +54,11 @@ def test_a_table_in_another_schema_makes_a_database_foreign_too(
     database: str, migrations: Path
 ) -> None:
     _execute(database, "CREATE SCHEMA billing", "CREATE VIEW billing.totals AS SELECT 1 AS n")
-    assert "billing.totals" in _refused(database, migrations)
+    message = _refused(database, migrations)
+    assert "billing.totals" in message
+    # A view is not a table, so the refusal must not claim the database has tables.
+    assert "it has objects and no record" in message
+    assert "tables" not in message
 
 
 def test_a_schema_migrations_table_that_is_not_ours_is_refused(

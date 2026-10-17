@@ -335,7 +335,7 @@ def _foreign(connection: psycopg.Connection) -> str | None:
     if not relations:
         return None
     named = ", ".join(relations[:3]) + (" and more" if len(relations) > 3 else "")
-    return f"it has tables and no record of VisionQuery migrations: {named}"
+    return f"it has objects and no record of VisionQuery migrations: {named}"
 
 
 #: What one file may have set or left on the session (`SET search_path`, `SET ROLE`, a temporary
