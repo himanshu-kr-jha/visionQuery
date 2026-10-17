@@ -128,8 +128,10 @@ Run everything from the repository root.
 
 | What | Command |
 |---|---|
+| Bootstrap a development environment from a fresh clone: check the prerequisites, write `.env` with generated passwords unless it exists, then `make sync` | `make bootstrap` |
 | Install everything from the lockfiles: Python (`uv sync --locked`) and the web app (`npm --prefix web ci`) | `make sync` |
-| Lint | `uv run ruff check` |
+| Build the images (`make up` does it first) | `make build` |
+| Lint: ruff, ruff format and actionlint | `make lint` (`uv run ruff check`) |
 | Format check | `uv run ruff format --check` |
 | Format and autofix | `make format` |
 | Type check (pyright strict) | `uv run pyright` (`make typecheck`) |
@@ -165,7 +167,7 @@ Run everything from the repository root.
 After changing a dependency, run `uv lock` and commit `uv.lock` with the change.
 
 **CI** is `.github/workflows/ci.yml`, run on every PR into `develop` or `main`, and every push to them (there is no manual trigger, so a run cannot replace a required check's result on the same commit; repeat one with `gh run rerun`).
-Each job runs the `make` target a developer runs, so CI and a local run never drift (`tests/test_ci.py` fails when `make check` gains a target no job runs): `lint`, `typecheck`, `contracts`, `test` (`make test` against a Postgres service of the tests' own image), `web` (`make web api-types-check`), `stack` (`make test-stack` without Triton, about 7 minutes), and `commits`, which fails when a commit of the PR, or its title or body, carries agent attribution (`scripts/check_attribution.py`), or when the title is not a `type(scope): subject` Conventional Commit (`scripts/check_commit_message.py`; a commit message may leave the scope out, a PR title may not).
+Each job runs the `make` target a developer runs, so CI and a local run never drift (`tests/test_ci.py` fails when `make check` gains a target no job runs): `lint`, `typecheck`, `contracts`, `test` (`make test` against a Postgres service of the tests' own image), `web` (`make web api-types-check`), `stack` (`make test-stack` without Triton, about 7 minutes), `setup-guide` (README's "From a fresh clone" commands as written, on a runner with only the prerequisites: `make bootstrap`, `make up COMPOSE_PROFILES=dev`, the health and camera checks, `make down VOLUMES=1`; `tests/test_setup_guide.py` keeps its steps and the README's commands the same), and `commits`, which fails when a commit of the PR, or its title or body, carries agent attribution (`scripts/check_attribution.py`), or when the title is not a `type(scope): subject` Conventional Commit (`scripts/check_commit_message.py`; a commit message may leave the scope out, a PR title may not).
 The `develop` and `main` rulesets require every job, with the PR up to date with its base, and `make branch-rules` (`scripts/branch_rules.py`) is how they are set: it derives the checks from the workflow's job ids, so after adding or renaming a job, run it once the change has passed on `develop`.
 It resets what it manages (the `deletion`, `non_fast_forward`, `pull_request` and `required_status_checks` rules, with the parameters it sets) and keeps what it does not: the live `pull_request` parameters it does not set, the bypass actors, and any other rule type.
 Actions are pinned by full commit SHA with the version in a comment, and uv is the version the Dockerfile builds with (`tests/test_ci.py` checks both).
@@ -175,10 +177,10 @@ Scripts the workflow and the hooks run live in `scripts/`, with their tests in `
 
 **After CI first lands** (the tech lead, once the PR that adds `ci.yml` is merged into `develop`; this is what proves the merge gate works):
 
-1. Wait for the run triggered by the push to `develop` (`gh run list --branch develop --workflow ci.yml`, then `gh run watch <id>`) and confirm all 7 jobs (`lint`, `typecheck`, `contracts`, `test`, `web`, `stack`, `commits`) are green.
+1. Wait for the run triggered by the push to `develop` (`gh run list --branch develop --workflow ci.yml`, then `gh run watch <id>`) and confirm every job (`lint`, `typecheck`, `contracts`, `test`, `web`, `stack`, `setup-guide`, `commits`) is green.
    If one is not, fix it with a `fix/` PR first: the rulesets must not require a check that does not pass.
 2. Run `make branch-rules` as a repository admin.
-3. Verify both rulesets with `gh api repos/{owner}/{repo}/rulesets`, then `gh api repos/{owner}/{repo}/rulesets/<id>` for `protect-develop` and `protect-main`: `enforcement` is `active`, the `pull_request`, `non_fast_forward` and `deletion` rules are present, and `required_status_checks` lists all 7 contexts.
+3. Verify both rulesets with `gh api repos/{owner}/{repo}/rulesets`, then `gh api repos/{owner}/{repo}/rulesets/<id>` for `protect-develop` and `protect-main`: `enforcement` is `active`, the `pull_request`, `non_fast_forward` and `deletion` rules are present, and `required_status_checks` lists every job as a context.
 4. Open a throwaway, non-draft PR into `develop` from a branch (`chore/ci-gate-check`) that adds one failing test.
    Confirm the `test` check goes red, `gh pr view <n> --json mergeStateStatus` reports `BLOCKED`, and `gh pr merge <n> --squash` is refused.
 5. Close the PR without merging (`gh pr close <n> --delete-branch`), and confirm the branch is gone.
