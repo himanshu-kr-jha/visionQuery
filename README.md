@@ -30,7 +30,7 @@ Everything lives in one PostgreSQL database (TimescaleDB for time partitioning, 
 
 The project is being scaffolded (milestone M0): the stack runs, with fake cameras for development, but nothing watches them yet.
 
-You need Docker Engine 25 or newer with the Compose plugin v2.30 or newer (`docker compose wait`; the Dockerfile frontend that `COPY --parents` needs is pinned in the Dockerfile and fetched by BuildKit) and, to work on the code, [uv](https://docs.astral.sh/uv/).
+You need Docker Engine 25 or newer with the Compose plugin v2.30 or newer (`docker compose wait`; the Dockerfile frontend that `COPY --parents` needs is pinned in the Dockerfile and fetched by BuildKit) and, to work on the code, [uv](https://docs.astral.sh/uv/) and Node.js 24 with npm (`web/.nvmrc`; `make sync` installs the Python packages and the web app's from their lockfiles).
 A GPU is needed only for Triton (the `gpu` profile), and then with NVIDIA's container toolkit.
 
 1. Configure the stack.
@@ -39,15 +39,16 @@ A GPU is needed only for Triton (the `gpu` profile), and then with NVIDIA's cont
 2. Start it: `make up`.
    It builds the images (rebuilding only what changed, so edited code is what runs; a bare `docker compose up` builds only an image that is absent and never rebuilds), then starts Postgres and runs the database migrations and waits for them to succeed (`MIGRATE_TIMEOUT`, 300 s), and only then starts the long-running services and waits for their healthchecks (`WAIT_TIMEOUT`, 300 s).
    `docker compose up --wait` alone would return while a migration is still running, so a failed or stuck migration stops `make up` with an error and the migration's log.
-   It starts Postgres (TimescaleDB and pgvector) and MediaMTX, and returns once every service is healthy.
-   Postgres listens on `127.0.0.1:15432` (user and database `visionquery`), MediaMTX on `127.0.0.1:8554` (RTSP) and `127.0.0.1:9997` (API, user `visionquery`).
+   It starts Postgres (TimescaleDB and pgvector), MediaMTX and the VisionQuery api, and returns once every service is healthy.
+   Postgres listens on `127.0.0.1:15432` (user and database `visionquery`), MediaMTX on `127.0.0.1:8554` (RTSP) and `127.0.0.1:9997` (API, user `visionquery`), and the api on `127.0.0.1:8080`, where <http://127.0.0.1:8080/health> says whether it can reach the database.
 3. Add what you need with profiles:
    - `make up COMPOSE_PROFILES=observability` (or `--profile observability` with `docker compose`): Prometheus on <http://127.0.0.1:9090> scraping every service, and Grafana on <http://127.0.0.1:3000> (user `admin`) reading it.
    - `COMPOSE_PROFILES=gpu` (or `--profile gpu`): Triton on `127.0.0.1:8000` (HTTP) and `8001` (gRPC), on every GPU.
      On a machine without one, run it on the CPU with `make up COMPOSE_FILE=compose.yaml:compose.no-gpu.yaml COMPOSE_PROFILES=gpu`.
    - `COMPOSE_PROFILES=dev` (or `--profile dev`): fake cameras, each looping a video into MediaMTX over RTSP as a real camera would publish it, so that everything can be developed without one.
      See "Fake cameras" below.
-4. Stop it with `make down`, which stops every service whatever its profile (Triton included) and keeps the data; `make down VOLUMES=1` deletes the database and metrics as well.
+4. To see the web app, run `npm --prefix web run dev` and open the address it prints: a page showing the Deployment's health, read from the api.
+5. Stop it with `make down`, which stops every service whatever its profile (Triton included) and keeps the data; `make down VOLUMES=1` deletes the database and metrics as well.
 
 ### Fake cameras
 
@@ -81,7 +82,7 @@ The variables every process reads are listed in [`CLAUDE.md`](CLAUDE.md#architec
 
 The database schema is applied with `visionquery-migrate`, which reads `VISIONQUERY_DATABASE__URL` (a `postgresql://` URL to a Postgres with TimescaleDB and pgvector) and is safe to run on every start: it applies only what is new, and refuses, naming the file, when the migrations and the database disagree.
 
-The memory's tests run against a real Postgres: they need Docker (each session starts and removes its own container) or `VISIONQUERY_TEST_DATABASE_URL` pointing at a superuser's `postgresql://` URL on a server with TimescaleDB and pgvector.
+The memory's and the api's tests run against a real Postgres: they need Docker (each session starts and removes its own container) or `VISIONQUERY_TEST_DATABASE_URL` pointing at a superuser's `postgresql://` URL on a server with TimescaleDB and pgvector.
 Without either they are skipped, saying why.
 
 ## Contributing

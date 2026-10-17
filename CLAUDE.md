@@ -129,7 +129,7 @@ Run everything from the repository root.
 
 | What | Command |
 |---|---|
-| Install everything from the lockfile | `uv sync --locked` (`make sync`) |
+| Install everything from the lockfiles: Python (`uv sync --locked`) and the web app (`npm --prefix web ci`) | `make sync` |
 | Lint | `uv run ruff check` |
 | Format check | `uv run ruff format --check` |
 | Format and autofix | `make format` |
@@ -138,9 +138,15 @@ Run everything from the repository root.
 | All tests | `uv run pytest` (`make test`) |
 | One package's tests | `uv run pytest packages/memory` |
 | A single test | `uv run pytest tests/test_import_contracts.py::test_the_workspace_keeps_every_contract` |
-| Every check CI runs | `make check` |
+| Every check CI runs, the web app's and the API types' included | `make check` |
 | Apply the database migrations | `VISIONQUERY_DATABASE__URL=postgresql://... uv run visionquery-migrate` |
-| Start the stack (Postgres, migrations, MediaMTX); rebuilds what changed first, and fails if the migrations fail | `make up` |
+| Run the api outside Compose (on port 8080; `VISIONQUERY_HTTP_PORT` moves it) | `VISIONQUERY_DATABASE__URL=postgresql://... uv run visionquery-api` |
+| Web app: lint, type check, tests | `make web` (`make web-lint`, `make web-typecheck`, `make web-test`) |
+| One web test file | `npm --prefix web test -- src/DeploymentHealth.test.tsx` |
+| Web app dev server, forwarding `/health` to the api on `VISIONQUERY_API_PORT` (8080) | `npm --prefix web run dev` |
+| Regenerate the web app's API types after changing the api, then commit both files | `make api-types` |
+| Check the API types are current (fails, changing nothing, when not) | `make api-types-check` |
+| Start the stack (Postgres, migrations, MediaMTX, the api); rebuilds what changed first, and fails if the migrations fail | `make up` |
 | ...with Prometheus and Grafana | `make up COMPOSE_PROFILES=observability` |
 | ...with Triton on the GPUs | `make up COMPOSE_PROFILES=gpu` |
 | ...with Triton on a machine without a GPU | `make up COMPOSE_FILE=compose.yaml:compose.no-gpu.yaml COMPOSE_PROFILES=gpu` |
@@ -155,6 +161,16 @@ Run everything from the repository root.
 `make lint` runs both ruff commands.
 After changing a dependency, run `uv lock` and commit `uv.lock` with the change.
 
+**The web app** (`web/`) is React, TypeScript in strict mode and Vite, linted by eslint with typescript-eslint's strict type-checked rules and tested by vitest with React Testing Library.
+It needs Node 24 (`web/.nvmrc`; npm refuses another through `engines` and `engine-strict`), and every dependency is pinned to an exact version (`save-exact`) and locked in `web/package-lock.json`: add one with `npm --prefix web install <name>@<version>` and commit both files.
+Its API types are generated, never written: `visionquery-openapi` writes the api's OpenAPI schema to `web/src/api/openapi.json`, openapi-typescript turns it into `web/src/api/schema.d.ts`, and code imports the types from there (see `web/src/api/health.ts`).
+`make check` fails while either file is not what `make api-types` would write.
+It is not part of the Compose stack yet; the api will serve it later.
+
+**The api** (`visionquery-api`) is FastAPI served by uvicorn with `log_config=None`, so its logs are the runtime's JSON lines, and with no access log (it would be mostly the healthcheck's).
+`GET /health` answers 200 when the database can be reached and 503 otherwise, naming the problem only by category (`visionquery.memory.connection.ConnectionProblem`), never with any part of the URL; the Compose healthcheck asks it.
+FastAPI's interactive docs are off, because they load their scripts from a CDN; the schema is served at `/openapi.json`.
+
 **The stack** is `compose.yaml` (Compose project `visionquery`), configured only through `.env`: copy `.env.example`, which documents every variable, and set the three passwords it leaves empty, or Compose refuses to start.
 Every published port listens on `VISIONQUERY_BIND_ADDRESS`, or MediaMTX's camera-facing ones (RTSP, WebRTC) on `VISIONQUERY_MEDIAMTX_BIND_ADDRESS` (both loopback by default) and has a variable of its own; Postgres is on host port 15432.
 Every VisionQuery process runs from the one image the root `Dockerfile` builds (ADR 0013; `<project>-app:dev`: image tags are global to the Docker daemon, so every built image is named for its Compose project, or two projects would fight over one tag), choosing its process by its Compose `command`; `migrate` is a one-shot service that runs `visionquery-migrate` once Postgres is healthy, with the password in `PGPASSWORD` rather than in the URL.
@@ -168,7 +184,7 @@ The stack tests in `tests/test_stack.py` bring each profile up under a throwaway
 The tests read the cameras with an ffprobe container on the project's network (`mediamtx:8554`), not `--network host`, so they do not depend on a Linux host.
 The `dev` profile's stack test uses test patterns and a clip it makes itself, so it needs no download; the real samples are tested only with `VISIONQUERY_TEST_SAMPLES=1`, which runs `make fetch-samples` first.
 
-The memory's tests run against a real Postgres with TimescaleDB and pgvector.
+The memory's and the api's tests run against a real Postgres with TimescaleDB and pgvector, from the fixtures in `packages/conftest.py`.
 By default the test session starts a disposable `timescale/timescaledb:2.30.1-pg18` container of its own (on an ephemeral loopback port, removed at the end), so Docker must be running; to use an existing server instead, set `VISIONQUERY_TEST_DATABASE_URL` to a superuser's `postgresql://` URL.
 Without either, those tests are skipped with the reason.
 
