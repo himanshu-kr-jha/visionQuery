@@ -3,7 +3,12 @@ name = "visionquery-recorder"
 version = "0.1.0"
 description = "Copy-only Footage recording in epoch-aligned segments with an NTP-anchored clock."
 requires-python = "==3.14.*"
-dependencies = []
+dependencies = [
+    "prometheus-client>=0.26.0",
+    "pydantic>=2.14",
+    "visionquery-memory",
+    "visionquery-runtime",
+]
 
 [build-system]
 requires = ["uv_build>=0.11.7,<0.12"]
