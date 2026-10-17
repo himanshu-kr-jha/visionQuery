@@ -4,6 +4,7 @@
 #   make up                           Postgres, migrations and MediaMTX; no GPU needed
 #   make up COMPOSE_PROFILES=observability     adds Prometheus and Grafana
 #   make up COMPOSE_PROFILES=gpu               adds Triton on the host's GPUs
+#   make up COMPOSE_PROFILES=dev               adds fake cameras (`make fetch-samples` first)
 #   make down                         stop everything, whatever its profile; the data stays
 #   make down VOLUMES=1               stop, and delete the data (database, metrics) too
 # `make up` builds the images (so changed code is what runs), brings the stack up and checks
@@ -17,7 +18,7 @@
 #   gpu            Triton, reserving every GPU. On a machine without one, add
 #                  `-f compose.yaml -f compose.no-gpu.yaml` to run it on the CPU.
 #   observability  Prometheus scraping every service's /metrics, and Grafana reading it.
-#   dev            the fake camera publisher (#6); until it lands, the same as no profile.
+#   dev            fake cameras looping sample videos into MediaMTX, for development.
 #
 # Every variable is documented in .env.example. Ports are published on
 # VISIONQUERY_BIND_ADDRESS (loopback unless set) and each has a variable of its own; only
@@ -245,6 +246,41 @@ services:
       start_period: 60s
       start_interval: 1s
 
+  # Development only: cameras that loop videos into MediaMTX over RTSP, one path each
+  # (docker/fake-cameras/fake_cameras.py). VISIONQUERY_FAKE_CAMERAS lists them as name=video;
+  # the videos are read from VISIONQUERY_FAKE_CAMERA_SAMPLES, where `make fetch-samples` puts
+  # the ones samples/manifest.toml lists, and `synthetic` is a test pattern needing no video.
+  # Each video is re-encoded once as a camera would send it and kept in the `fake-cameras`
+  # volume, then looped without transcoding. Each camera reconnects by itself when MediaMTX
+  # restarts. Not scraped by Prometheus: it is never part of a Deployment.
+  fake-cameras:
+    <<: *service
+    profiles: [dev]
+    # Named for the project, for the reason given at x-visionquery.
+    image: ${COMPOSE_PROJECT_NAME}-fake-cameras:dev
+    build: docker/fake-cameras
+    pull_policy: never
+    read_only: true
+    tmpfs: [/tmp]
+    environment:
+      FAKE_CAMERAS: ${VISIONQUERY_FAKE_CAMERAS:-gym-g299=meva-school-g299.avi,gym-g330=meva-school-g330.avi,stairs-g420=meva-school-g420.avi}
+      FAKE_CAMERAS_RTSP: rtsp://mediamtx:8554
+    volumes:
+      - ${VISIONQUERY_FAKE_CAMERA_SAMPLES:-./samples}:/samples:ro
+      - fake-cameras:/cache
+    depends_on:
+      mediamtx:
+        condition: service_healthy
+    healthcheck:
+      # Every camera's ffmpeg sent a frame in the last 5 s. A clip being prepared is replaced
+      # by the test pattern meanwhile, so the cameras are up within seconds even the first time.
+      test: ["CMD", "fake-cameras", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
   # Postgres's metrics for Prometheus; never published on the host.
   postgres-exporter:
     <<: *service
@@ -268,6 +304,7 @@ services:
 
 volumes:
   scrape-targets:
+  fake-cameras:
   postgres:
   prometheus:
   grafana:
