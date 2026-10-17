@@ -45,6 +45,7 @@ import psycopg
 import pytest
 from fake_cameras import parse_cameras, prepare_command
 from visionquery.memory.migrate import MIGRATIONS
+from visionquery.memory.roles import MONITORING, RUNTIME
 
 pytestmark = pytest.mark.stack
 
@@ -314,12 +315,17 @@ def _assert_healthy(stack: Stack, services: set[str]) -> None:
 
 #: Every character that breaks a URL, and a space, a quote and a backslash for good measure.
 AWKWARD_PASSWORD = "p@ss/w:rd#1?%&= '\"\\"
+#: The runtime role's, as awkward and different, since every long-running service uses it.
+RUNTIME_PASSWORD = "r" + AWKWARD_PASSWORD
 
 
 @pytest.fixture(scope="module")
 def default_stack() -> Iterator[Stack]:
     # A password full of special characters: the stack must not care what the password is.
-    environment = {"VISIONQUERY_POSTGRES_PASSWORD": AWKWARD_PASSWORD}
+    environment = {
+        "VISIONQUERY_POSTGRES_PASSWORD": AWKWARD_PASSWORD,
+        "VISIONQUERY_POSTGRES_RUNTIME_PASSWORD": RUNTIME_PASSWORD,
+    }
     with running_stack(environment=environment) as stack:
         yield stack
 
@@ -386,10 +392,17 @@ def test_migrate_ran_once_and_succeeded(default_stack: Stack) -> None:
     assert (migrate["State"], migrate["ExitCode"]) == ("exited", 0), default_stack.diagnostics()
 
 
-def _database_url(stack: Stack) -> str:
+def _database_url(
+    stack: Stack, role: str = "visionquery", variable: str = "VISIONQUERY_POSTGRES_PASSWORD"
+) -> str:
+    """The memory's URL from the host, as the superuser unless another role is named."""
     host, port = stack.address("postgres", 5432)
-    password = quote(stack.secret("VISIONQUERY_POSTGRES_PASSWORD"), safe="")
-    return f"postgresql://visionquery:{password}@{host}:{port}/visionquery"
+    password = quote(stack.secret(variable), safe="")
+    return f"postgresql://{role}:{password}@{host}:{port}/visionquery"
+
+
+def _runtime_url(stack: Stack) -> str:
+    return _database_url(stack, RUNTIME, "VISIONQUERY_POSTGRES_RUNTIME_PASSWORD")
 
 
 def test_the_memory_has_its_extensions_and_every_migration(default_stack: Stack) -> None:
@@ -461,6 +474,63 @@ def test_the_awkward_password_reached_both_postgres_and_the_migrations(
     assert default_stack.secret("VISIONQUERY_POSTGRES_PASSWORD") == AWKWARD_PASSWORD
     # The migrations connected with it, from another container, through PGPASSWORD.
     assert default_stack.containers()["migrate"]["ExitCode"] == 0
+
+
+def test_the_api_connects_as_the_runtime_role(default_stack: Stack) -> None:
+    # With the api's own environment, from inside its container: who it is to the database.
+    whoami = default_stack.compose(
+        "exec", "-T", "api", "python", "-c",
+        "import os, psycopg; print(psycopg.connect(os.environ['VISIONQUERY_DATABASE__URL'])"
+        ".execute('SELECT current_user').fetchone()[0])",
+    )  # fmt: skip
+    assert whoami.stdout.strip() == RUNTIME
+    environment = default_stack.compose("exec", "-T", "api", "env").stdout
+    assert AWKWARD_PASSWORD not in environment.replace(RUNTIME_PASSWORD, "")
+
+
+def test_migrate_owns_the_record_of_migrations(default_stack: Stack) -> None:
+    # The seal protects only a record the migrating role owns.
+    with psycopg.connect(_database_url(default_stack), connect_timeout=10) as connection:
+        owner = connection.execute(
+            "SELECT tableowner FROM pg_tables WHERE tablename = 'schema_migrations'"
+        ).fetchone()
+    assert owner == ("visionquery",)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "CREATE EXTENSION pgcrypto",
+        "ALTER TABLE schema_migrations ADD COLUMN x int",
+        "INSERT INTO schema_migrations (number, name, sha256) VALUES (99, 'x', sha256('x'))",
+        "DROP TABLE schema_migrations",
+        "CREATE TABLE mine (id int)",
+    ],
+)
+def test_the_runtime_role_of_the_stack_cannot(default_stack: Stack, statement: str) -> None:
+    with (
+        psycopg.connect(_runtime_url(default_stack), connect_timeout=10) as connection,
+        pytest.raises(psycopg.errors.InsufficientPrivilege),
+    ):
+        connection.execute(statement.encode())
+
+
+def test_a_changed_runtime_password_takes_effect_at_the_next_make_up(default_stack: Stack) -> None:
+    changed = replace(
+        default_stack,
+        env=default_stack.env | {"VISIONQUERY_POSTGRES_RUNTIME_PASSWORD": "changed-password"},
+    )
+    try:
+        up = changed.make("up")
+        assert up.returncode == 0, up.stdout + up.stderr + changed.diagnostics()
+        assert _health(changed)[0] == 200
+        with pytest.raises(psycopg.OperationalError):
+            psycopg.connect(_runtime_url(default_stack), connect_timeout=10)
+        psycopg.connect(_runtime_url(changed), connect_timeout=10).close()
+    finally:
+        up = default_stack.make("up")
+        assert up.returncode == 0, up.stdout + up.stderr + default_stack.diagnostics()
+    assert _health(default_stack)[0] == 200
 
 
 def _image_id(reference: str) -> str:
@@ -713,6 +783,30 @@ def test_prometheus_logs_no_failed_lookup_without_the_gpu_profile(observed_stack
     wait_for(refreshed, timeout=60)
     logs = observed_stack.compose("logs", "--no-color", "prometheus").stdout
     assert "triton" not in logs, logs
+
+
+def test_the_postgres_exporter_reads_postgres_as_the_monitoring_role(
+    observed_stack: Stack,
+) -> None:
+    url = observed_stack.url("prometheus", 9090, "/api/v1/query?query=pg_up")
+
+    def postgres_up() -> tuple[str | None, str]:
+        status, body = _get(url)
+        result: list[dict[str, Any]] = json.loads(body)["data"]["result"] if status == 200 else []
+        value: str | None = result[0]["value"][1] if result else None
+        return (value, "") if value == "1" else (None, f"pg_up is {value}")
+
+    wait_for(postgres_up, timeout=90)
+    with psycopg.connect(_database_url(observed_stack), connect_timeout=10) as connection:
+        users = {
+            row[0]
+            for row in connection.execute(
+                "SELECT usename FROM pg_stat_activity WHERE backend_type = 'client backend'"
+            )
+        }
+    assert MONITORING in users
+    logs = observed_stack.compose("logs", "--no-color", "postgres-exporter").stdout
+    assert "permission denied" not in logs, logs
 
 
 def test_grafana_reaches_prometheus_through_its_provisioned_datasource(
