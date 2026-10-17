@@ -35,7 +35,7 @@ Report exact failures with output; a red check is always a blocking finding.
 Run `make check` (it covers lint, format, type check, import contracts and the fast tests).
 The tester runs the full stack tests (`make test-stack`) on each PR head; run them yourself only when you suspect a defect there, and say which you ran.
 The tech lead tells you which fix round you are judging.
-From the third review of the same issue on (after two fix rounds), mark only security or correctness defects as blocking, and list every other finding as a follow-up issue.
+When the tech lead says two fix rounds are done, mark only security or correctness defects as blocking, and list every other finding as non-blocking for a follow-up issue.
 For a docs-only or config-only change there is no tester run: you are the only check, so read the change completely and run whatever commands it touches.
 
 Then check, and report each failure as a finding:

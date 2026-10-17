@@ -30,12 +30,13 @@ Several issues may be in flight at once.
 Go through every in-flight item, open PRs oldest first and then pushed issue branches without a PR, and apply the first matching rule to each:
 
 1. **An open PR:** read the comments on both the PR and its issue, count its fix rounds (the `developer` hand-backs), and decide by the latest activity on the PR head:
+   - the review verdict on the latest commit is "ready to merge", or two fix rounds are done and no security or correctness finding remains, and CI is green (or the pre-CI rule below is met): if two fix rounds are done, first file every open non-security, non-correctness finding (blocking or not) as one follow-up issue under the milestone, unless such an issue already exists for this PR; then merge;
    - a builder or `developer` hand-back newer than the last verdict: run `tester` then `pr-reviewer` if code changed, or `pr-reviewer` alone for a docs-only or config-only change;
    - a docs-only or config-only PR with no review verdict on its head: run `pr-reviewer`;
    - a `tester` verdict "ready for PR" for the latest commit but no review verdict: run `pr-reviewer`;
-   - the latest review verdict has blocking findings and no newer hand-back: if fewer than two fix rounds have happened, send them to `developer`; otherwise file every finding that is not a security or correctness defect as a follow-up issue, and send only the security or correctness defects on (or stop and report to the user if any remain after two rounds);
-   - the review verdict on the latest commit is "ready to merge", or two fix rounds are done and no security or correctness finding remains, and CI is green (or the pre-CI rule below is met): merge.
-2. **A pushed issue branch without a PR:** if a builder hand-back for its latest commit exists as a comment on the issue, continue from the tester stage (or open the PR straight away for a docs-only or config-only change); otherwise send it back to its builder to finish, chosen by the issue's label (`senior-developer` for `task` and `spike`, `developer` for `bug`).
+   - the latest review verdict has blocking findings and no newer hand-back: if fewer than two fix rounds have happened, send them to `developer`; otherwise stop and report to the user, because a security or correctness defect remains after two rounds.
+2. **A pushed issue branch whose hand-back names an unmerged parent branch:** while the parent's PR is open, leave it (the tester diffs it against the parent branch if it is tested early); once the parent's PR is merged, send it to `developer` to run `git rebase --onto origin/develop <parent head>` (the parent PR's final head from `gh pr view <parent> --json headRefOid`) and push, then treat it as below. If its builder is still running, wait for the hand-back.
+3. **A pushed issue branch without a PR:** if a builder hand-back for its latest commit exists as a comment on the issue, continue from the tester stage (or open the PR straight away for a docs-only or config-only change); otherwise send it back to its builder to finish, chosen by the issue's label (`senior-developer` for `task` and `spike`, `developer` for `bug`).
 
 Then, if no `senior-developer` is building, start the next issue (or `$ARGUMENTS`): the lowest-numbered open sub-issue of the earliest open milestone, preferring one that does not depend on unmerged work.
 
@@ -60,7 +61,7 @@ Keep the pipeline full: as soon as `senior-developer` hands an issue back, start
    The tech lead updates the GitHub wiki (a separate repo) directly when a milestone completes or setup changes.
 
 Post each builder hand-back, tester verdict and reviewer verdict as a comment on the PR if one exists, otherwise on the issue.
-After posting a builder hand-back, remove the builder's worktree once its branch is pushed, so `developer` can check the branch out.
+After posting a builder hand-back, unlocks and removes the builder's worktree (`git worktree unlock <path>; git worktree remove --force <path>`; agent worktrees are locked), after confirming the worktree has no uncommitted changes and `git rev-parse <branch>` equals `origin/<branch>`, so the branch is free for `developer`; do the same for stale builder worktrees found when resuming.
 Tell `tester` and `pr-reviewer` which fix round they are judging.
 Give each agent everything it needs in its prompt: the issue number, the branch, and the full report it must act on.
 

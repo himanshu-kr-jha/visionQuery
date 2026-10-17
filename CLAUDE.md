@@ -72,7 +72,7 @@ Lifecycle of one issue:
 
 1. **Tech lead** runs the session-start routine, picks the next issue, and assigns it: `senior-developer` for `task` and `spike` issues, `developer` for `bug` issues.
 2. **Builder** delivers a pushed branch and a criterion-by-criterion test map, and ends its run with that hand-back.
-   The tech lead posts each builder hand-back as a comment on the PR if one exists, otherwise on the issue, and then removes the builder's worktree (`git worktree remove --force <path>`, after confirming the branch is pushed) so the branch is free for `developer`.
+   The tech lead posts each builder hand-back as a comment on the PR if one exists, otherwise on the issue, and then unlocks and removes the builder's worktree (`git worktree unlock <path>; git worktree remove --force <path>`; agent worktrees are locked), after confirming the worktree has no uncommitted changes and `git rev-parse <branch>` equals `origin/<branch>`, so the branch is free for `developer`.
    The builder also updates the milestone's status marker in `docs/plan/v1.md` as part of the same PR: `[~]` in the first PR of a milestone, `[x]` in the PR that closes its last sub-issue.
 3. **`tester`** verifies the branch, and is the one agent that runs the full stack tests (`make test-stack`) on each PR head.
    If not ready, the report goes to `developer`, then back to `tester`.
@@ -88,7 +88,7 @@ Lifecycle of one issue:
 Rules for the loop:
 
 - At most two fix rounds per issue (a round is one `developer` pass on findings from `tester` or `pr-reviewer`, counted by the `developer` hand-back comments on the PR and its issue).
-  After the second round only security or correctness defects block; every other finding becomes a follow-up issue under the same milestone, and the PR merges.
+  After the second round only security or correctness defects block; before merging, the tech lead files every other open finding, blocking or not, as one follow-up issue under the same milestone (once), and the PR merges.
   The tech lead tells `tester` and `pr-reviewer` which round they are judging.
   If a security or correctness defect remains after two rounds, the tech lead stops and brings it to the user.
 - A "do not merge" verdict, or a finding that needs a design change, goes to the user.

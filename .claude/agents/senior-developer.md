@@ -20,7 +20,7 @@ You are given one GitHub issue and you deliver it, test-first, on its branch, re
 ## Building
 
 - Work on `feature/<n>-<slug>` (or `fix/`, `chore/`, `docs/` as fits), cut from an up-to-date `develop`.
-  When the tech lead says the issue depends on an unmerged branch, cut from that branch instead and say so in the hand-back.
+  When the tech lead says the issue depends on an unmerged branch, cut from that branch instead and name the parent branch and its PR number in the hand-back.
   Once you hand back, the issue is no longer yours: never return to it; fixes are `developer`'s.
   If the branch already exists, continue on it.
 - Strictly test-first: for each acceptance criterion, write the test, run it and see it fail for the right reason, then write the least code that passes, then refactor.
