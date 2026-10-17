@@ -1,18 +1,28 @@
 """The probe the api checks the database through: cached for a second, loud once per change."""
 
 import logging
+import socket
 import threading
 import time
 from collections.abc import Callable
+from functools import partial
 
 import pytest
 from fastapi.testclient import TestClient
 from visionquery.api.app import create_app
-from visionquery.api.probe import CACHE_SECONDS, CHECKING, STUCK_SECONDS, DatabaseProbe
-from visionquery.memory.health import DatabaseHealth
+from visionquery.api.probe import (
+    CACHE_SECONDS,
+    CHECKING,
+    DEADLINE_MARGIN_SECONDS,
+    DEADLINE_SECONDS,
+    DatabaseProbe,
+    DatabaseState,
+)
+from visionquery.memory.health import HEALTH_BUDGET_SECONDS, DatabaseHealth, check_database
 
 UP = DatabaseHealth(None)
 DOWN = DatabaseHealth("connection refused or host unreachable")
+TIMED_OUT = DatabaseHealth("timed out")
 
 
 class _Clock:
@@ -110,8 +120,8 @@ class _Slow:
         return self.answer
 
 
-def _ask_in_threads(probe: DatabaseProbe, count: int) -> list[DatabaseHealth]:
-    answers: list[DatabaseHealth] = []
+def _ask_in_threads(probe: DatabaseProbe, count: int) -> list[DatabaseState]:
+    answers: list[DatabaseState] = []
     threads = [
         threading.Thread(target=lambda: answers.append(probe()), daemon=True) for _ in range(count)
     ]
@@ -125,7 +135,7 @@ def _ask_in_threads(probe: DatabaseProbe, count: int) -> list[DatabaseHealth]:
 def test_waiters_do_not_block_on_a_slow_first_check_and_say_it_is_still_checking() -> None:
     slow, clock = _Slow(UP), _Clock()
     probe = _probe(slow, clock)
-    first: list[DatabaseHealth] = []
+    first: list[DatabaseState] = []
     leader = threading.Thread(target=lambda: first.append(probe()), daemon=True)
     leader.start()
     assert slow.started.wait(timeout=5)
@@ -164,7 +174,99 @@ def test_a_check_that_never_returns_is_reported_as_timed_out_not_as_the_old_answ
     leader = threading.Thread(target=probe, daemon=True)
     leader.start()
     assert slow.started.wait(timeout=5)
-    clock.now += STUCK_SECONDS + 0.01
-    assert probe() == DatabaseHealth("timed out")
+    clock.now += DEADLINE_SECONDS + 0.01
+    assert probe() == TIMED_OUT
     slow.finish.set()
     leader.join(timeout=5)
+
+
+def test_the_deadline_is_the_checks_budget_plus_a_margin() -> None:
+    # The check bounds itself (HEALTH_BUDGET_SECONDS); the probe gives it a little longer
+    # before it stops waiting, and every client of /health waits longer still.
+    assert DEADLINE_SECONDS == HEALTH_BUDGET_SECONDS + DEADLINE_MARGIN_SECONDS
+    assert DEADLINE_MARGIN_SECONDS > 0
+
+
+def _forever() -> DatabaseHealth:
+    threading.Event().wait()
+    raise AssertionError("unreachable")
+
+
+def test_the_request_that_runs_a_check_gives_up_at_the_deadline() -> None:
+    # A database that freezes mid-query must not hang the request that started the check.
+    probe = DatabaseProbe(_forever, deadline_seconds=0.3)
+    started = time.monotonic()
+    assert probe() == TIMED_OUT
+    assert 0.3 <= time.monotonic() - started < 1.5
+
+
+def test_a_request_over_http_is_bounded_by_the_deadline_too() -> None:
+    app = create_app(database_health=DatabaseProbe(_forever, deadline_seconds=0.3))
+    with TestClient(app) as client:
+        started = time.monotonic()
+        response = client.get("/health")
+    assert time.monotonic() - started < 1.5
+    assert response.status_code == 503
+    assert response.json()["database"] == {"status": "unreachable", "problem": "timed out"}
+
+
+def _eventually(condition: Callable[[], bool], timeout: float = 5) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_a_check_that_never_returns_is_logged_once_when_its_deadline_passes(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    slow = _Slow(UP)
+    probe = DatabaseProbe(slow, deadline_seconds=0.2)
+    with caplog.at_level(logging.INFO, logger="visionquery.api"):
+        assert probe() == TIMED_OUT  # the request that started it, at the deadline
+        assert [probe() for _ in range(5)] == [TIMED_OUT] * 5  # the rest, at once
+        assert _ask_in_threads(probe, 4) == [TIMED_OUT] * 4
+        assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
+            (logging.WARNING, "the database check has not returned within 0.2 s")
+        ]
+        assert slow.calls == 1  # one stuck check, not one per request
+
+        slow.finish.set()  # it comes back at last, with the database reachable
+        assert _eventually(lambda: probe() == UP)
+    assert [r.getMessage() for r in caplog.records][1:] == ["the database is reachable again"]
+
+
+def test_connect_timeout_zero_cannot_wedge_the_probe(caplog: pytest.LogCaptureFixture) -> None:
+    # libpq waits forever for a server that never answers when `connect_timeout` is 0; the
+    # check keeps its own limit, so it returns within its budget and the deadline never passes.
+    with socket.socket() as server, caplog.at_level(logging.INFO, logger="visionquery.api"):
+        server.bind(("127.0.0.1", 0))
+        server.listen(8)  # the kernel completes the handshake; nothing ever replies
+        url = f"postgresql://u:s@127.0.0.1:{server.getsockname()[1]}/db?connect_timeout=0"
+        probe = DatabaseProbe(partial(check_database, url))
+        started = time.monotonic()
+        assert probe() == TIMED_OUT
+    assert time.monotonic() - started < HEALTH_BUDGET_SECONDS
+    assert [r.getMessage() for r in caplog.records] == ["the database is unreachable: timed out"]
+
+
+def test_a_check_that_raises_is_another_failure_and_does_not_wedge_the_probe(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[int] = []
+
+    def broken() -> DatabaseHealth:
+        calls.append(1)
+        raise RuntimeError("postgresql://u:hunter2@db/x")
+
+    clock = _Clock()
+    probe = _probe(broken, clock)
+    with caplog.at_level(logging.INFO, logger="visionquery.api"):
+        assert probe() == DatabaseHealth("other connection failure")
+        clock.now += CACHE_SECONDS + 0.01
+        assert probe() == DatabaseHealth("other connection failure")
+    assert len(calls) == 2
+    assert "hunter2" not in caplog.text
+    assert "RuntimeError" in caplog.text

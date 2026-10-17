@@ -27,8 +27,6 @@ type ConnectionProblem = Literal[
     "timed out",
     "connection refused or host unreachable",
     "other connection failure",
-    # Not a failure: said while the first check has not finished, so a caller need not wait.
-    "still checking",
 ]
 
 

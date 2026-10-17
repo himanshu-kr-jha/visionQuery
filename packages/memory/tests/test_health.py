@@ -8,12 +8,12 @@ import socket
 import threading
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, get_args
 from urllib.parse import SplitResult, quote, urlsplit
 
 import psycopg
 import pytest
-from visionquery.memory.connection import connect
+from visionquery.memory.connection import ConnectionProblem, connect
 from visionquery.memory.health import (
     CONNECT_SECONDS,
     HEALTH_BUDGET_SECONDS,
@@ -133,3 +133,8 @@ def test_the_check_keeps_its_own_connect_limit_whatever_the_url_or_environment_s
         url = f"postgresql://u:s@127.0.0.1:{server.getsockname()[1]}/db{query}"
         health = _within(CONNECT_SECONDS + 1.5, lambda: check_database(url))
     assert health.problem == "timed out"
+
+
+def test_still_checking_is_not_a_reason_the_database_cannot_be_reached() -> None:
+    # Whether a check has finished is the caller's business (the api's probe), not the memory's.
+    assert "still checking" not in get_args(ConnectionProblem.__value__)
