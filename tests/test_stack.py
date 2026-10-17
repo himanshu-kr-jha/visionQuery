@@ -412,6 +412,18 @@ def test_migrate_is_safe_to_run_again(default_stack: Stack) -> None:
     assert rerun.returncode == 0, rerun.stdout + rerun.stderr
 
 
+def test_migrate_status_lists_every_migration_as_applied(default_stack: Stack) -> None:
+    # As CLAUDE.md tells an Operator to run it against the stack.
+    found = default_stack.compose(
+        "run", "--rm", "--no-deps", "migrate", "visionquery-migrate", "status", check=False
+    )
+    assert found.returncode == 0, found.stdout + found.stderr
+    lines = [json.loads(line) for line in found.stdout.splitlines() if line.startswith("{")]
+    (summary,) = [line for line in lines if line["message"].startswith("status:")]
+    assert sorted(summary["applied"]) == sorted(p.name for p in MIGRATIONS.glob("[0-9]*.sql"))
+    assert summary["pending"] == []
+
+
 def test_visionquery_processes_do_not_run_as_root(default_stack: Stack) -> None:
     whoami = default_stack.compose("run", "--rm", "--no-deps", "migrate", "id", "-u")
     assert whoami.stdout.strip() not in {"", "0"}

@@ -11,3 +11,5 @@ The memory's schema, applied by `visionquery-migrate` (ADR 0011, `visionquery.me
 - A runner that is killed mid-migration keeps holding the advisory lock until its server-side statement finishes.
   Postgres then releases the lock, because its session has ended, and the next runner proceeds.
 - A file runs as written, with no parameters, so `%` needs no escaping.
+- What a file leaves on its session (settings, a role, temporary tables, prepared statements, held cursors, `LISTEN`s) is reset before the next file, so files behave the same applied together or one run at a time.
+- `visionquery-migrate status` lists what is applied and pending, and what a run would refuse, without changing anything.
