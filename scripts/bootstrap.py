@@ -179,6 +179,7 @@ def bootstrap(root: Path) -> int:
     else:
         print(".env: exists, kept as it is.")
 
+    sys.stdout.flush()  # Before make's own output, which goes straight to the terminal.
     if subprocess.run(["make", "sync"], cwd=root, check=False).returncode != 0:
         print("make bootstrap: `make sync` failed, as it says above.", file=sys.stderr)
         return 1
