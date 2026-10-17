@@ -19,7 +19,6 @@ on:
     types: [opened, edited, synchronize, reopened]
   push:
     branches: [develop, main]
-  workflow_dispatch:
 
 permissions:
   contents: read

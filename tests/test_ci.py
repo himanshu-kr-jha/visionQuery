@@ -50,7 +50,7 @@ def _make_targets(job: dict[str, Any]) -> set[str]:
     return targets
 
 
-def test_it_runs_on_prs_and_pushes_to_develop_and_main_and_by_hand() -> None:
+def test_it_runs_on_prs_and_pushes_to_develop_and_main() -> None:
     # PyYAML reads the bare key `on` as True.
     triggers = _workflow()[True]
     assert triggers["pull_request"]["branches"] == ["develop", "main"]
@@ -58,7 +58,9 @@ def test_it_runs_on_prs_and_pushes_to_develop_and_main_and_by_hand() -> None:
     # the default types would leave a red check red after the edit that fixes it.
     assert triggers["pull_request"]["types"] == ["opened", "edited", "synchronize", "reopened"]
     assert triggers["push"]["branches"] == ["develop", "main"]
-    assert "workflow_dispatch" in triggers
+    # No manual trigger: a run started by hand would replace the result of a required check on
+    # the same SHA. A run is repeated with `gh run rerun`, which keeps its event.
+    assert set(triggers) == {"pull_request", "push"}
 
 
 def test_the_token_can_only_read() -> None:
@@ -164,6 +166,19 @@ def test_the_commits_job_checks_attribution_and_the_title_of_a_pr() -> None:
     environment = {k: v for step in job["steps"] for k, v in step.get("env", {}).items()}
     assert environment["PR_TITLE"] == "${{ github.event.pull_request.title }}"
     assert environment["PR_BODY"] == "${{ github.event.pull_request.body }}"
+
+
+def test_the_commits_job_checks_something_on_every_event_that_triggers_it() -> None:
+    # A step guarded by an event never runs on another, so an event none of the steps accepts
+    # would pass the (required) job having checked nothing.
+    job = _jobs()["commits"]
+    checks = [step for step in job["steps"][2:] if "run" in step]
+    assert checks
+    for event in _workflow()[True]:
+        guards = [step.get("if") for step in checks]
+        assert any(
+            guard is None or f"github.event_name == '{event}'" in guard for guard in guards
+        ), event
 
 
 def test_a_newer_push_to_a_pr_cancels_the_run_it_supersedes() -> None:
