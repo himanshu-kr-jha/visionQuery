@@ -55,3 +55,37 @@ def test_a_list_setting_that_does_not_parse_stops_the_process_naming_it(
     assert line["variables"] == ["VISIONQUERY_PORTS"]
     assert "VISIONQUERY_PORTS is invalid" in line["message"]
     assert "notjson" not in line["message"]
+
+
+def test_a_metrics_port_already_in_use_stops_the_process_naming_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    with socket.socket() as taken:
+        taken.bind(("127.0.0.1", 0))
+        taken.listen()
+        port = taken.getsockname()[1]
+        monkeypatch.setenv("VISIONQUERY_METRICS_HOST", "127.0.0.1")
+        monkeypatch.setenv("VISIONQUERY_METRICS_PORT", str(port))
+        with pytest.raises(SystemExit) as exited:
+            start("probe", Settings)
+    assert exited.value.code == 2
+    (line,) = _logged(capsys)
+    assert line["level"] == "CRITICAL"
+    assert line["variables"] == ["VISIONQUERY_METRICS_PORT"]
+    assert f"127.0.0.1:{port}" in line["message"]
+    assert "VISIONQUERY_METRICS_PORT" in line["message"]
+    assert "exception" not in line
+
+
+def test_a_metrics_host_that_is_not_this_machines_stops_the_process_naming_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # 192.0.2.0/24 is reserved for documentation, so no interface of this machine has it.
+    monkeypatch.setenv("VISIONQUERY_METRICS_HOST", "192.0.2.1")
+    monkeypatch.setenv("VISIONQUERY_METRICS_PORT", "0")
+    with pytest.raises(SystemExit) as exited:
+        start("probe", Settings)
+    assert exited.value.code == 2
+    (line,) = _logged(capsys)
+    assert line["variables"] == ["VISIONQUERY_METRICS_HOST"]
+    assert "exception" not in line

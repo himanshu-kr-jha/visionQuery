@@ -54,9 +54,9 @@ class Settings(BaseSettings):
     )
 
     log_level: Annotated[LogLevel, BeforeValidator(_upper)] = "INFO"
-    #: Where `/metrics` listens; every interface by default, so Prometheus can reach it
-    #: from another container.
-    metrics_host: str = "0.0.0.0"
+    #: Where `/metrics` listens; loopback by default, so a process run outside Compose exposes
+    #: nothing. compose.yaml sets 0.0.0.0, so Prometheus can reach it from its own container.
+    metrics_host: str = "127.0.0.1"
     #: 0 asks the operating system for a free port.
     metrics_port: Annotated[int, Field(ge=0, le=65535)] = 9100
 

@@ -30,10 +30,10 @@ def test_fields_are_read_from_prefixed_variables(monkeypatch: pytest.MonkeyPatch
     assert settings.segment_seconds == 10
 
 
-def test_every_process_has_a_log_level_and_a_metrics_port_by_default() -> None:
+def test_every_process_has_a_log_level_and_a_metrics_port_on_loopback_by_default() -> None:
     settings = Settings.load()
     assert settings.log_level == "INFO"
-    assert settings.metrics_host == "0.0.0.0"
+    assert settings.metrics_host == "127.0.0.1"
     assert settings.metrics_port == 9100
 
 
