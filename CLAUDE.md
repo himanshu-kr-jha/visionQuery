@@ -266,6 +266,7 @@ A package's tests live in `packages/<package>/tests/`; tests about the workspace
 | `perception` | Perception Workers: NVDEC decode, batched Triton calls via CUDA shared memory, per-camera tracking, Keyframes and embeddings (ADR 0007). |
 | `linker` | Continuous confident linking and query-time Following (ADR 0004). |
 | `recorder` | Copy-only Footage recording in epoch-aligned segments with an NTP-anchored clock. |
+| `reconciler` | Keeps MediaMTX's paths and publishers matching the camera registry (ADR 0015). |
 | `reasoner` | Pluggable LLM interface (local by default) and the Answer builder. |
 | `api` | FastAPI over `tools`. |
 | `runtime` | What every process starts with: env settings, JSON logs scrubbed of credentials, and a Prometheus `/metrics` endpoint (ADR 0012). |
@@ -296,7 +297,7 @@ Import contracts (enforced with import-linter from `.importlinter`, each proven 
 - The packages are layered `api | reasoner > tools > linker > memory > runtime`: a package may import any layer below its own and never one above it, and `api` and `reasoner` never import each other.
   Every chain counts, not only a direct import, so `tools -> api`, `linker -> tools` or `memory -> linker` through any number of modules is a violation.
   The layers are exhaustive: a new package is placed in a layer or beside them.
-- `perception` and `recorder` sit beside the layers: they import only `memory` and `runtime`, never each other, and nothing imports them.
+- `perception`, `recorder` and `reconciler` sit beside the layers: they import only `memory` and `runtime`, never each other, and nothing imports them.
 - Only `memory` imports the database driver.
 - `reasoner` reaches the memory only through `tools`.
 - `api` reaches the memory and the `linker` only through `tools` (ADR 0009), except for the health probe and settings it names (`ignore_imports` in `.importlinter`).

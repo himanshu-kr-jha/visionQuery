@@ -29,14 +29,18 @@ def _workspace_packages() -> tuple[str, ...]:
 
 PACKAGES = _workspace_packages()
 
-NO_REACHING_UP = "Perception and the recorder import only the memory and the runtime"
+NO_REACHING_UP = (
+    "Perception, the recorder and the reconciler import only the memory and the runtime"
+)
 ONLY_MEMORY_HOLDS_A_DRIVER = "Only memory imports a database driver"
 REASONER_THROUGH_TOOLS = "The reasoner reaches the memory only through tools"
 API_THROUGH_TOOLS = "The api reaches the memory only through tools, except its health probe"
 RUNTIME_IS_A_FOUNDATION = "The runtime imports no other VisionQuery package"
 LAYERS = "Each package imports only the layers below its own"
-BESIDE_THE_LAYERS = "Nothing imports perception or the recorder"
-PERCEPTION_AND_RECORDER_INDEPENDENT = "Perception and the recorder import neither other"
+BESIDE_THE_LAYERS = "Nothing imports perception, the recorder or the reconciler"
+PERCEPTION_AND_RECORDER_INDEPENDENT = (
+    "Perception, the recorder and the reconciler import none of the others"
+)
 NO_REACHING_UP_ID = "no-reaching-up"
 ONLY_MEMORY_HOLDS_A_DRIVER_ID = "only-memory-holds-a-driver"
 REASONER_THROUGH_TOOLS_ID = "reasoner-through-tools"
@@ -48,9 +52,9 @@ PERCEPTION_AND_RECORDER_INDEPENDENT_ID = "perception-and-recorder-independent"
 KEPT = "Contracts: 8 kept, 0 broken."
 
 # The layering CLAUDE.md states, highest first: a package may import the layers below its
-# own, never one above it nor its sibling. Perception and the recorder sit beside them.
+# own, never one above it nor its sibling. Perception, the recorder and the reconciler sit beside them.
 LAYERING = (("api", "reasoner"), ("tools",), ("linker",), ("memory",), ("runtime",))
-BESIDE = ("perception", "recorder")
+BESIDE = ("perception", "recorder", "reconciler")
 
 
 def _lint_imports(cwd: Path, pythonpath: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -108,10 +112,15 @@ def test_an_unchanged_copy_keeps_every_contract(tmp_path: Path) -> None:
         ],
         ("perception", "visionquery.recorder", {PERCEPTION_AND_RECORDER_INDEPENDENT}),
         ("recorder", "visionquery.perception", {PERCEPTION_AND_RECORDER_INDEPENDENT}),
+        ("reconciler", "visionquery.perception", {PERCEPTION_AND_RECORDER_INDEPENDENT}),
+        ("reconciler", "visionquery.recorder", {PERCEPTION_AND_RECORDER_INDEPENDENT}),
+        ("perception", "visionquery.reconciler", {PERCEPTION_AND_RECORDER_INDEPENDENT}),
+        ("recorder", "visionquery.reconciler", {PERCEPTION_AND_RECORDER_INDEPENDENT}),
         ("reasoner", "visionquery.memory", {REASONER_THROUGH_TOOLS}),
         ("reasoner", "visionquery.linker", {REASONER_THROUGH_TOOLS}),
         ("reasoner", "visionquery.perception", {REASONER_THROUGH_TOOLS, BESIDE_THE_LAYERS}),
         ("reasoner", "visionquery.recorder", {REASONER_THROUGH_TOOLS, BESIDE_THE_LAYERS}),
+        ("reasoner", "visionquery.reconciler", {REASONER_THROUGH_TOOLS, BESIDE_THE_LAYERS}),
         ("reasoner", "visionquery.api", {REASONER_THROUGH_TOOLS, LAYERS}),
         ("api", "visionquery.memory", {API_THROUGH_TOOLS}),
         ("api", "visionquery.memory.migrate", {API_THROUGH_TOOLS}),
@@ -425,16 +434,16 @@ def test_the_runtime_is_forbidden_every_other_package() -> None:
 
 
 def test_perception_and_recorder_contract_matches_claude_md() -> None:
-    # CLAUDE.md: perception and recorder import only the memory and the runtime.
+    # CLAUDE.md: perception, recorder and reconciler import only the memory and the runtime.
     sources = _modules(NO_REACHING_UP_ID, "source_modules")
     forbidden = _modules(NO_REACHING_UP_ID, "forbidden_modules")
     expected = set(PACKAGES) - set(BESIDE) - {"memory", "runtime"}
     assert sources == set(BESIDE), (
-        f"CLAUDE.md names only perception and recorder as sources of [{NO_REACHING_UP_ID}]; "
+        f"CLAUDE.md names only perception, recorder and reconciler as sources of [{NO_REACHING_UP_ID}]; "
         "changing that is a CLAUDE.md change."
     )
     assert forbidden == expected, (
-        "Perception and the recorder may import only the memory and the runtime. Add new "
+        "Perception, the recorder and the reconciler may import only the memory and the runtime. Add new "
         f"workspace packages to forbidden_modules of [{NO_REACHING_UP_ID}] in .importlinter "
         f"(missing: {sorted(expected - forbidden)}, unknown: {sorted(forbidden - expected)})."
     )

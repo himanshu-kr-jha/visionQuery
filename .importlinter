@@ -16,7 +16,7 @@ include_external_packages = True
 ; share the top layer and are independent of each other (`|`). Every chain counts, not
 ; only a direct import: the forbidden contracts below tolerate indirect imports, which
 ; alone would let tools -> api or linker -> tools through. Exhaustive: a new package must
-; be placed in a layer here, or beside the layers with perception and the recorder.
+; be placed in a layer here, or beside the layers with perception, the recorder and the reconciler.
 
 [importlinter:contract:layers]
 name = Each package imports only the layers below its own
@@ -33,28 +33,31 @@ exhaustive = True
 exhaustive_ignores =
     perception
     recorder
+    reconciler
 
-; Perception and recording run on every frame of every camera, beside the layers. They
-; write to the memory and start with the runtime, and depend on nothing else, so a slow
-; or broken tool, Reasoner or api can never stall what is being remembered.
+; Perception and recording run on every frame of every camera, and the reconciler keeps
+; every camera's video arriving; all three sit beside the layers. They use the memory and
+; start with the runtime, and depend on nothing else, so a slow or broken tool, Reasoner
+; or api can never stall what is being remembered.
 
 [importlinter:contract:no-reaching-up]
-name = Perception and the recorder import only the memory and the runtime
+name = Perception, the recorder and the reconciler import only the memory and the runtime
 type = forbidden
 source_modules =
     visionquery.perception
     visionquery.recorder
+    visionquery.reconciler
 forbidden_modules =
     visionquery.tools
     visionquery.linker
     visionquery.reasoner
     visionquery.api
 
-; Nothing depends on a Perception Worker or the recorder: what they produce is read from
+; Nothing depends on a Perception Worker, the recorder or the reconciler: what they produce is read from
 ; the memory.
 
 [importlinter:contract:nothing-imports-perception-or-the-recorder]
-name = Nothing imports perception or the recorder
+name = Nothing imports perception, the recorder or the reconciler
 type = forbidden
 source_modules =
     visionquery.runtime
@@ -66,13 +69,15 @@ source_modules =
 forbidden_modules =
     visionquery.perception
     visionquery.recorder
+    visionquery.reconciler
 
 [importlinter:contract:perception-and-recorder-independent]
-name = Perception and the recorder import neither other
+name = Perception, the recorder and the reconciler import none of the others
 type = independence
 modules =
     visionquery.perception
     visionquery.recorder
+    visionquery.reconciler
 
 ; ADR 0006 - one Postgres, and memory is the only code that talks to it. The common
 ; Postgres drivers and adapters are listed (a driver not listed here needs adding), so
@@ -89,6 +94,7 @@ source_modules =
     visionquery.perception
     visionquery.linker
     visionquery.recorder
+    visionquery.reconciler
     visionquery.reasoner
     visionquery.api
 forbidden_modules =
@@ -120,6 +126,7 @@ forbidden_modules =
     visionquery.linker
     visionquery.perception
     visionquery.recorder
+    visionquery.reconciler
     visionquery.api
 allow_indirect_imports = True
 
@@ -159,5 +166,6 @@ forbidden_modules =
     visionquery.perception
     visionquery.linker
     visionquery.recorder
+    visionquery.reconciler
     visionquery.reasoner
     visionquery.api

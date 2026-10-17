@@ -9,6 +9,7 @@ dependencies = [
     "visionquery-perception",
     "visionquery-linker",
     "visionquery-recorder",
+    "visionquery-reconciler",
     "visionquery-reasoner",
     "visionquery-api",
     "visionquery-runtime",
@@ -27,6 +28,7 @@ visionquery-tools = { workspace = true }
 visionquery-perception = { workspace = true }
 visionquery-linker = { workspace = true }
 visionquery-recorder = { workspace = true }
+visionquery-reconciler = { workspace = true }
 visionquery-reasoner = { workspace = true }
 visionquery-api = { workspace = true }
 visionquery-runtime = { workspace = true }
