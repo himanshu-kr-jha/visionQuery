@@ -156,6 +156,21 @@ def test_the_api_s_health_probe_may_import_the_memory_health_check(tmp_path: Pat
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("module", ["app", "routes"])
+@pytest.mark.parametrize("memory_module", ["connection", "health"])
+def test_only_the_probe_and_the_composition_root_import_the_memory(
+    tmp_path: Path, module: str, memory_module: str
+) -> None:
+    # The app takes its dependencies as arguments; it never opens a connection itself.
+    path = ROOT / "packages/api/src/visionquery/api" / f"{module}.py"
+    source = (
+        path.read_text() if path.exists() else ""
+    ) + f"\nimport visionquery.memory.{memory_module}\n"
+    result = _lint_with(tmp_path, {f"visionquery.api.{module}": source})
+    assert _broken(result) == {API_THROUGH_TOOLS}, result.stdout
+    assert f"visionquery.api.{module} -> visionquery.memory.{memory_module}" in result.stdout
+
+
 def test_another_api_module_importing_the_memory_health_check_is_reported(tmp_path: Path) -> None:
     # The exception names the modules that have it; a new route is not one of them.
     result = _lint_with(tmp_path, {"visionquery.api.routes": "import visionquery.memory.health\n"})
@@ -163,7 +178,7 @@ def test_another_api_module_importing_the_memory_health_check_is_reported(tmp_pa
     assert "visionquery.api.routes -> visionquery.memory.health" in result.stdout
 
 
-def test_the_api_s_exception_is_no_wider_than_the_probe_and_settings() -> None:
+def test_the_api_s_exception_is_no_wider_than_the_probe_and_the_composition_root() -> None:
     ignored = {
         line.strip()
         for line in _config()[f"importlinter:contract:{API_THROUGH_TOOLS_ID}"]["ignore_imports"]
@@ -171,8 +186,6 @@ def test_the_api_s_exception_is_no_wider_than_the_probe_and_settings() -> None:
         .splitlines()
     }
     assert ignored == {
-        "visionquery.api.app -> visionquery.memory.connection",
-        "visionquery.api.app -> visionquery.memory.health",
         "visionquery.api.probe -> visionquery.memory.health",
         "visionquery.api.serve -> visionquery.memory.health",
         "visionquery.api.serve -> visionquery.memory.settings",

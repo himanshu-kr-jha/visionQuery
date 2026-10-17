@@ -90,8 +90,6 @@ forbidden_modules =
     visionquery.linker
 allow_indirect_imports = True
 ignore_imports =
-    visionquery.api.app -> visionquery.memory.connection
-    visionquery.api.app -> visionquery.memory.health
     visionquery.api.probe -> visionquery.memory.health
     visionquery.api.serve -> visionquery.memory.health
     visionquery.api.serve -> visionquery.memory.settings
