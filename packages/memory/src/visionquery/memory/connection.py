@@ -155,7 +155,9 @@ def _statement_bounds(parameters: dict[str, Any], milliseconds: int) -> dict[str
         "keepalives_count": 3,
     }
     bounds = {k: v for k, v in bounds.items() if k not in parameters}
-    options = str(parameters.get("options", os.environ.get("PGOPTIONS", "")))
+    options = _without_dangling_backslash(
+        str(parameters.get("options", os.environ.get("PGOPTIONS", "")))
+    )
     if "statement_timeout" not in _settings_named(options):
         bound = f"-c statement_timeout={milliseconds}"
         bounds["options"] = f"{options} {bound}" if options.strip() else bound
@@ -178,13 +180,27 @@ def _settings_named(options: str) -> set[str]:
     return named
 
 
+#: What the server splits `options` at (`pg_split_opts` uses C's `isspace`): ASCII whitespace
+#: only, so U+00A0 and the control characters `str.isspace` also accepts are part of a word.
+_OPTION_SEPARATORS = " \t\n\v\f\r"
+
+
+def _without_dangling_backslash(options: str) -> str:
+    """`options` without a final backslash that escapes nothing, as the server drops it; kept,
+    it would escape the space of whatever is appended."""
+    escaped = False
+    for character in options:
+        escaped = not escaped and character == "\\"
+    return options[:-1] if escaped else options
+
+
 def _split_options(options: str) -> list[str]:
-    """`options` split into words as the server splits it: at whitespace, where a backslash
-    makes the character after it part of the word."""
+    """`options` split into words as the server splits it: at ASCII whitespace, where a
+    backslash makes the character after it part of the word."""
     words: list[str] = []
     word, in_word, escaped = "", False, False
     for character in options:
-        if not escaped and character.isspace():
+        if not escaped and character in _OPTION_SEPARATORS:
             if in_word:
                 words.append(word)
             word, in_word = "", False
