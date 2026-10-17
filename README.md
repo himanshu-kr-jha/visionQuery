@@ -89,7 +89,7 @@ The memory's and the api's tests run against a real Postgres: they need Docker (
 Without either they are skipped, saying why (in CI, where `CI` is set, a test skipped for a missing prerequisite fails instead).
 
 The stack tests (`make test-stack`) bring the stack up for real under a throwaway Compose project, and are left out of `make check`.
-`VISIONQUERY_TEST_SAMPLES=1 make test-stack` also runs the fake cameras on the real samples, downloading them first; it takes about 18 minutes, most of it the first download and preparing the samples, which every run does again in its own volume.
+`VISIONQUERY_TEST_SAMPLES=1 make test-stack` also runs the fake cameras on the real samples, downloading them first; it takes about 18 minutes the first time and about 13 after, most of it downloading the samples (once) and preparing them (every run, in a volume of its own).
 
 ## Contributing
 

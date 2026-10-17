@@ -155,7 +155,7 @@ Run everything from the repository root.
 | Stop the stack, every profile included; keeps the data (`make down VOLUMES=1` deletes it) | `make down` |
 | Rebuild after changing code: `make up` does it; a bare `docker compose up` builds only an absent image | `make up` |
 | Stack tests (bring the stack up for real) | `make test-stack` (`uv run pytest -m stack`) |
-| ...including the fake cameras on the real samples (downloads them first) | `VISIONQUERY_TEST_SAMPLES=1 make test-stack` |
+| ...including the fake cameras on the real samples (downloads them first; about 18 minutes, 13 once downloaded) | `VISIONQUERY_TEST_SAMPLES=1 make test-stack` |
 | Install the git hooks (opt-in; a `pre-commit` or `commit-msg` hook already in `.git/hooks` is kept as `<name>.legacy` and still runs first, unless `--overwrite`) | `uv run pre-commit install` |
 | Run the pre-commit hooks over every file | `uv run pre-commit run --all-files` |
 | Print the develop and main rulesets `make branch-rules` would send | `uv run scripts/branch_rules.py` |
