@@ -104,6 +104,28 @@ jobs:
       - run: docker version && docker compose version
       - run: make test-stack
 
+  # The README's setup, from a fresh clone to a healthy stack with fake cameras and back, run as
+  # written: every step below but the diagnostics is one command of README.md's "From a fresh
+  # clone", in order (tests/test_setup_guide.py), and the checkout is its clone. The runner gets
+  # only the prerequisites; `make bootstrap` installs the workspace and writes .env.
+  setup-guide:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          web: true
+          sync: false
+      - run: make bootstrap
+      - run: make up COMPOSE_PROFILES=dev
+      - run: curl --silent --show-error --fail-with-body http://127.0.0.1:8080/health
+      - run: docker compose --profile dev exec fake-cameras ffmpeg -v error -rtsp_transport tcp -i rtsp://mediamtx:8554/gym-g299 -frames:v 1 -f null -
+      - if: failure()
+        run: docker compose --profile '*' ps --all && docker compose --profile '*' logs --no-color --tail 100
+      - if: always()
+        run: make down VOLUMES=1
+
   # No agent attribution in any commit, nor in a PR's title or body (CLAUDE.md), and a PR
   # title that is a Conventional Commit, because it becomes the squash commit's subject.
   commits:

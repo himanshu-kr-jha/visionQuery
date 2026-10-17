@@ -1,6 +1,6 @@
 # The VisionQuery stack.
 #
-#   cp .env.example .env              then set the three passwords in it
+#   make bootstrap                    checks the prerequisites, writes .env, installs
 #   make up                           Postgres, migrations, MediaMTX and the api; no GPU
 #   make up COMPOSE_PROFILES=observability     adds Prometheus and Grafana
 #   make up COMPOSE_PROFILES=gpu               adds Triton on the host's GPUs

@@ -81,7 +81,9 @@ def test_every_ci_job_is_a_required_check_reported_by_github_actions(name: str) 
     required = _rules(_payloads()[name])["required_status_checks"]
     checks = required["required_status_checks"]
     assert {check["context"] for check in checks} == _checks()
-    assert {"lint", "typecheck", "contracts", "test", "web", "stack", "commits"} <= _checks()
+    assert {
+        "lint", "typecheck", "contracts", "test", "web", "stack", "setup-guide", "commits"
+    } <= _checks()  # fmt: skip
     assert all(check["integration_id"] == GITHUB_ACTIONS for check in checks)
     # A PR must have passed against the base it will be merged into (see CLAUDE.md).
     assert required["strict_required_status_checks_policy"] is True
