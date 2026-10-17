@@ -894,6 +894,9 @@ def _marker_offsets(stack: Stack, cameras: tuple[str, ...], seconds: float) -> d
             ["docker", "run", "--rm", "--network", f"{stack.project}_default",
              "--entrypoint", "/ffmpeg", FFMPEG_IMAGE,
              "-loglevel", "error", "-fflags", "nobuffer", "-rtsp_transport", "tcp",
+             # One decoding thread: with one per core, the decoder holds back a picture per
+             # thread, which would put every camera a machine-dependent second behind the clock.
+             "-threads", "1",
              "-i", f"rtsp://mediamtx:8554/{camera}", "-t", str(seconds), "-an",
              # One byte per frame: the brightness of the whole picture, as stored in the video.
              "-vf", "scale=1:1:flags=area,format=yuv420p,extractplanes=y",
@@ -942,14 +945,21 @@ def _marker_offsets(stack: Stack, cameras: tuple[str, ...], seconds: float) -> d
     return offsets
 
 
+#: How far a camera may be from the moment of its loop that the wall clock says: each ffmpeg
+#: sends its first half second at once (`-re`), and keeps that lead less its own start-up.
+WALL_CLOCK_WITHIN = 0.75
+
+
 def _assert_in_step(stack: Stack, cameras: tuple[str, ...], within: float = 1.0) -> None:
     """The cameras show the same moment of their loops, to within `within` seconds of each
-    other and of the moment the wall clock says."""
+    other, and to within WALL_CLOCK_WITHIN of the moment the wall clock says."""
     # Longer than a loop, so that the cameras start over while they are read.
     offsets = _marker_offsets(stack, cameras, seconds=MARKER_PERIOD + 8)
     print(f"seconds ahead of the wall clock: { {c: round(o, 2) for c, o in offsets.items()} }")
     for camera, offset in offsets.items():
-        assert abs(offset) <= within, f"{camera} is {offset:+.2f} s from the wall clock: {offsets}"
+        assert abs(offset) <= WALL_CLOCK_WITHIN, (
+            f"{camera} is {offset:+.2f} s from the wall clock: {offsets}"
+        )
     first = cameras[0]
     for camera in cameras[1:]:
         gap = (offsets[camera] - offsets[first] + MARKER_PERIOD / 2) % MARKER_PERIOD
