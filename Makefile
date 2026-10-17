@@ -1,6 +1,10 @@
 # The checks CI runs, one target each; `make check` runs them all.
 # Every target is a thin wrapper over a command listed in CLAUDE.md.
 
+# A recipe stops at its first failing command, and at a failing stage of a pipe.
+SHELL := bash
+.SHELLFLAGS := -euo pipefail -c
+
 .PHONY: sync lint format typecheck contracts test test-stack check up down
 
 sync:
@@ -41,7 +45,7 @@ check: lint typecheck contracts test
 #   make up COMPOSE_FILE=compose.yaml:compose.no-gpu.yaml COMPOSE_PROFILES=gpu
 # COMPOSE is the command to run, which the stack tests replace to target a project of their own.
 #
-# `up` builds first, so that changed code is what runs: Compose's `pull_policy: missing` (see
+# `up` builds first, so that changed code is what runs: Compose's `pull_policy: never` (see
 # compose.yaml) builds only an absent image, which would leave a stale one running after an
 # edit. Building is cheap on an unchanged tree because every layer is cached, and the image ID
 # stays the same only when BuildKit adds no attestation, whose timestamp would otherwise give
@@ -50,22 +54,27 @@ check: lint typecheck contracts test
 export BUILDX_NO_DEFAULT_ATTESTATIONS = 1
 COMPOSE ?= docker compose
 
-define LONG_RUNNING
-import json, sys
-services = json.load(sys.stdin)["services"]
-print(*sorted(n for n, s in services.items() if s.get("restart", "no") != "no"))
-endef
-export LONG_RUNNING
+# The one-shot jobs (restart: "no" in compose.yaml; tests/test_compose.py checks the list):
+# `up --wait` fails on a service that exited, so they are left out of it. Everything else
+# is started and waited for.
+ONE_SHOTS ?= migrate triton-scrape
+# Seconds `make up` gives the migrations to finish, and then every healthcheck.
+MIGRATE_TIMEOUT ?= 300
+WAIT_TIMEOUT ?= 300
 
 up:
 	$(COMPOSE) build
 	$(COMPOSE) up --detach migrate
-	@if ! $(COMPOSE) wait migrate >/dev/null 2>&1; then \
-		echo "make up: the database migrations failed. migrate said:" >&2; \
-		$(COMPOSE) logs --no-color --tail 20 migrate >&2; \
-		exit 1; \
-	fi
-	$(COMPOSE) up --detach --wait $$($(COMPOSE) config --format json | python3 -c "$$LONG_RUNNING")
+	timeout $(MIGRATE_TIMEOUT) $(COMPOSE) wait migrate >/dev/null || { status=$$?; \
+		if [ $$status -eq 124 ]; then echo "make up: the database migrations did not finish within $(MIGRATE_TIMEOUT) s (MIGRATE_TIMEOUT). migrate said:" >&2; \
+		else echo "make up: the database migrations failed ($(COMPOSE) wait migrate exited $$status, with the error above if it printed one). migrate said:" >&2; fi; \
+		$(COMPOSE) logs --no-color --tail 20 migrate >&2; exit 1; }
+	services="$$($(COMPOSE) config --services | grep --invert-match --line-regexp --fixed-strings $(addprefix --regexp ,$(ONE_SHOTS)) || true)"; \
+		[ -n "$$services" ] || { echo "make up: no long-running service in the project" >&2; exit 1; }; \
+		$(COMPOSE) up --detach --wait --wait-timeout $(WAIT_TIMEOUT) $$services
 
+# Stops every service of the project, including those of a profile that is not enabled now
+# (Triton, which would otherwise keep the GPU), and keeps its data; `make down VOLUMES=1`
+# deletes the data too (the database, the metrics).
 down:
-	$(COMPOSE) down
+	$(COMPOSE) --profile '*' down --remove-orphans $(if $(VOLUMES),--volumes)

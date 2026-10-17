@@ -98,8 +98,11 @@ def _compose(
     files: Iterable[Path] = (),
     env: Mapping[str, str | None] | None = None,
     env_file: Path = ENV_EXAMPLE,
+    project: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = ["docker", "compose", "--project-directory", str(ROOT), "-f", str(COMPOSE)]
+    if project is not None:
+        command += ["--project-name", project]
     for file in files:
         command += ["-f", str(file)]
     command += ["--env-file", str(env_file)]
@@ -120,8 +123,11 @@ def _config(
     profiles: Iterable[str] = PROFILES,
     files: Iterable[Path] = (),
     env: Mapping[str, str | None] | None = None,
+    project: str | None = None,
 ) -> dict[str, Any]:
-    result = _compose("config", "--format", "json", profiles=profiles, files=files, env=env)
+    result = _compose(
+        "config", "--format", "json", profiles=profiles, files=files, env=env, project=project
+    )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -191,7 +197,9 @@ def test_the_secrets_are_the_passwords() -> None:
 
 
 def test_env_example_documents_exactly_the_variables_compose_reads() -> None:
+    # COMPOSE_PROJECT_NAME is Compose's own, set from the file's `name:` or `--project-name`.
     read = {m["name"] for file in (COMPOSE, NO_GPU) for m in VARIABLE.finditer(file.read_text())}
+    read -= {"COMPOSE_PROJECT_NAME"}
     documented = set(_example())
     assert read - documented == set(), "read by Compose but missing from .env.example"
     assert documented - read == set(), "documented in .env.example but never read"
@@ -237,8 +245,8 @@ def test_every_image_is_pinned_to_a_version_and_its_digest() -> None:
     for name, service in _services(_config()).items():
         if "build" in service:
             images += _dockerfile_bases(service)
-            # A built image is named for this project, so it is never pulled from a registry.
-            assert service.get("pull_policy") == "missing", name
+            # A built image exists only on this host, so it is never pulled from a registry.
+            assert service.get("pull_policy") == "never", name
         else:
             images.append(service["image"])
     assert images
@@ -246,16 +254,70 @@ def test_every_image_is_pinned_to_a_version_and_its_digest() -> None:
     assert unpinned == []
 
 
-def test_up_builds_an_image_only_when_it_is_missing() -> None:
-    # A rebuild gives a new image ID even when no layer changed, and Compose recreates a
-    # container whose image ID changed, which drops live streams. So a bare `up` must not
-    # rebuild; `make up` builds first, without attestations, which keeps the ID stable
-    # (the next test, and tests/test_stack.py, which checks that `make up` recreates nothing).
+def test_up_never_pulls_a_built_image_and_never_rebuilds_it() -> None:
+    # `never` builds an image that is absent (Compose builds rather than fails), never pulls
+    # it, and does not rebuild one that is present. A rebuild gives a new image ID even when no
+    # layer changed, and Compose recreates a container whose image ID changed, which drops
+    # live streams; so a bare `up` must not rebuild, and `make up` builds first, without
+    # attestations, which keeps the ID stable (tests/test_stack.py checks that `make up`
+    # recreates nothing).
     built = {n: s for n, s in _services(_config()).items() if "build" in s}
     assert set(built) >= {"migrate", "mediamtx"}
     assert {name: s.get("pull_policy") for name, s in built.items()} == dict.fromkeys(
-        built, "missing"
+        built, "never"
     )
+
+
+def test_built_images_are_named_for_their_project() -> None:
+    # Image tags are global to the Docker daemon, while Compose stamps the project's name into
+    # the labels of every image it builds. A fixed tag shared by two projects (two clones, a
+    # stack test beside a developer's stack) would therefore point at a different image ID
+    # after each project's build, and each project's next `make up` would recreate its
+    # containers and drop live streams.
+    first = _services(_config(project="vqtest-first"))
+    second = _services(_config(project="vqtest-second"))
+    built = [name for name, service in first.items() if "build" in service]
+    assert built
+    for name in built:
+        assert first[name]["image"].startswith("vqtest-first"), name
+        assert second[name]["image"].startswith("vqtest-second"), name
+    default = _services(_config())
+    assert all(default[name]["image"].startswith("visionquery") for name in built)
+
+
+def test_every_visionquery_process_runs_the_one_image() -> None:
+    # One build and one set of layers per project: every service built from the root
+    # Dockerfile has the same image name.
+    services = _services(_config())
+    images = {s["image"] for s in services.values() if _is_visionquery_process(s)}
+    assert len(images) == 1, images
+
+
+def test_dockerfiles_pin_the_frontend_that_copy_parents_needs() -> None:
+    # `COPY --parents` arrived in Dockerfile frontend 1.20, and the frontend is whatever the
+    # build resolves unless the first line says which, so the line is required and pinned.
+    dockerfiles = [ROOT / "Dockerfile", *(ROOT / "docker").glob("*/Dockerfile")]
+    needing = [d for d in dockerfiles if "--parents" in d.read_text()]
+    assert ROOT / "Dockerfile" in needing
+    for dockerfile in needing:
+        first = dockerfile.read_text().splitlines()[0]
+        found = re.fullmatch(
+            r"# syntax=docker/dockerfile:1\.(\d+)(?:\.\d+)?@sha256:[0-9a-f]{64}", first
+        )
+        assert found, f"{dockerfile}: {first!r}"
+        assert int(found[1]) >= 20, f"{dockerfile}: {first!r}"
+
+
+def test_the_runtime_image_has_certificates_and_zone_data_and_no_phantom_home() -> None:
+    # The remote Reasoner is reached over TLS (ADR 0002); the root filesystem is read-only
+    # and no home exists, so the working directory must be one that does.
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    runtime = dockerfile[dockerfile.index("AS runtime") :]
+    assert "ca-certificates" in runtime
+    assert "tzdata" in runtime
+    assert "/nonexistent" not in dockerfile
+    assert re.search(r"^USER visionquery", runtime, re.M)
+    assert re.search(r"^WORKDIR /$", runtime, re.M)
 
 
 def test_every_service_built_from_our_image_waits_for_the_migrations_to_succeed() -> None:
@@ -422,19 +484,64 @@ def test_mediamtx_serves_its_api_and_metrics_and_records_nothing() -> None:
     assert [config[p] for p in ("rtmp", "srt", "hls", "moq", "pprof")] == [False] * 5
 
 
-def test_make_up_builds_first_with_attestations_off() -> None:
-    # `pull_policy: missing` alone would leave a stale image running after an edit. `make up`
-    # therefore builds first; BuildKit's attestations are off for every Compose call, because
-    # they carry a timestamp that gives each build a new image ID and so recreates containers.
-    makefile = (ROOT / "Makefile").read_text()
-    assert re.search(r"^export BUILDX_NO_DEFAULT_ATTESTATIONS\s*[:?]?=\s*1\s*$", makefile, re.M)
-    dry_run = subprocess.run(
-        ["make", "--dry-run", "--no-print-directory", "up", "COMPOSE=compose-under-test"],
+def _make_dry_run(*arguments: str) -> list[str]:
+    return subprocess.run(
+        ["make", "--dry-run", "--no-print-directory", *arguments, "COMPOSE=compose-under-test"],
         cwd=ROOT,
         capture_output=True,
         text=True,
         check=True,
     ).stdout.splitlines()
-    commands = [line for line in dry_run if line.startswith("compose-under-test ")]
+
+
+def test_make_up_builds_first_with_attestations_off() -> None:
+    # `pull_policy: never` alone would leave a stale image running after an edit. `make up`
+    # therefore builds first; BuildKit's attestations are off for every Compose call, because
+    # they carry a timestamp that gives each build a new image ID and so recreates containers.
+    makefile = (ROOT / "Makefile").read_text()
+    assert re.search(r"^export BUILDX_NO_DEFAULT_ATTESTATIONS\s*[:?]?=\s*1\s*$", makefile, re.M)
+    commands = [line for line in _make_dry_run("up") if "compose-under-test " in line]
     assert commands[0] == "compose-under-test build"
     assert commands[1].startswith("compose-under-test up --detach migrate")
+
+
+def test_make_recipes_stop_at_the_first_failure_and_need_no_host_python() -> None:
+    makefile = (ROOT / "Makefile").read_text()
+    assert re.search(
+        r"^SHELL\s*:?=\s*/usr/bin/env bash\s*$|^SHELL\s*:?=\s*bash\s*$", makefile, re.M
+    )
+    assert re.search(r"^\.SHELLFLAGS\s*:?=\s*-euo pipefail -c\s*$", makefile, re.M)
+    assert "python" not in makefile
+
+
+def test_make_up_starts_exactly_the_long_running_services() -> None:
+    # The one-shot jobs are left out of `up --wait`, which would otherwise fail on them. The
+    # Makefile lists them, and this checks the list against compose.yaml.
+    config = _config()
+    one_shots = {n for n, s in _services(config).items() if s.get("restart", "no") == "no"}
+    makefile = (ROOT / "Makefile").read_text()
+    listed = re.search(r"^ONE_SHOTS\s*\??=\s*(.*)$", makefile, re.M)
+    assert listed
+    assert set(listed[1].split()) == one_shots
+
+
+def test_make_up_bounds_every_wait() -> None:
+    commands = _make_dry_run("up")
+    wait = next(c for c in commands if " wait migrate" in c)
+    assert wait.startswith("timeout "), wait
+    up = next(c for c in commands if "--wait" in c)
+    assert "--wait-timeout" in up, up
+    commands = _make_dry_run("up", "WAIT_TIMEOUT=7", "MIGRATE_TIMEOUT=3")
+    assert any(c.startswith("timeout 3 ") for c in commands)
+    assert any("--wait-timeout 7" in c for c in commands)
+
+
+def test_make_down_stops_profile_services_and_keeps_data_unless_told() -> None:
+    # Without `--profile '*'`, `down` leaves a service whose profile is not enabled running
+    # (Triton, holding the GPU).
+    (down,) = [c for c in _make_dry_run("down") if "compose-under-test" in c]
+    assert "--profile '*' down" in down
+    assert "--volumes" not in down
+    (wiped,) = [c for c in _make_dry_run("down", "VOLUMES=1") if "compose-under-test" in c]
+    assert "--profile '*' down" in wiped
+    assert "--volumes" in wiped

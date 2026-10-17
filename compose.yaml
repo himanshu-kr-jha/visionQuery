@@ -4,12 +4,14 @@
 #   make up                           Postgres, migrations and MediaMTX; no GPU needed
 #   make up COMPOSE_PROFILES=observability     adds Prometheus and Grafana
 #   make up COMPOSE_PROFILES=gpu               adds Triton on the host's GPUs
-#   make down                         stop; `docker compose down --volumes` deletes the data too
+#   make down                         stop everything, whatever its profile; the data stays
+#   make down VOLUMES=1               stop, and delete the data (database, metrics) too
 # `make up` builds the images (so changed code is what runs), brings the stack up and checks
 # that `migrate` exited 0, which `docker compose up --wait` does not: it returns while a
-# migration is still running. A bare `docker compose up` builds only a missing image, so after
+# migration is still running. A bare `docker compose up` builds only an absent image, so after
 # changing code or a Dockerfile use `make up`, or run
 # `BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose build` first.
+# Needs Docker Engine 25 or newer and Compose 2.30 or newer (`compose wait`).
 #
 # Profiles:
 #   gpu            Triton, reserving every GPU. On a machine without one, add
@@ -32,16 +34,23 @@ x-service: &service
 # What every VisionQuery process shares: the one image (Dockerfile) and the runtime's settings.
 x-visionquery: &visionquery
   <<: *service
-  image: visionquery:dev
+  # Named for the project, never `visionquery:dev`: image tags are global to the Docker daemon,
+  # and Compose stamps the project's name into the labels of every image it builds, so two
+  # projects (two clones, a stack test beside a developer's stack) building the same tag would
+  # give it a different image ID each time, and each one's next `make up` would recreate its
+  # containers and drop live streams. One name for every VisionQuery service means one build and
+  # one set of layers per project.
+  image: ${COMPOSE_PROJECT_NAME}-app:dev
   build: .
-  # Built when the image is missing, never rebuilt by a bare `docker compose up`, which so
-  # leaves running streams alone. `make up` builds first, with BuildKit's attestations off
+  # Never pulled (it exists only on this host) and never rebuilt by a bare `docker compose up`,
+  # which so leaves running streams alone; Compose still builds it when it is absent. `make up`
+  # builds first, with BuildKit's attestations off
   # (BUILDX_NO_DEFAULT_ATTESTATIONS=1, which Compose 5.1 cannot be told in this file): an
   # attestation carries a timestamp, so every build would give a new image ID even when no
   # layer changed, and Compose recreates a container whose image ID changed, which would drop
   # live streams on every `make up`. Without attestations an unchanged tree gives the same ID,
   # so only the service whose code changed is recreated.
-  pull_policy: missing
+  pull_policy: never
   read_only: true
   tmpfs: [/tmp]
 
@@ -96,9 +105,10 @@ services:
 
   mediamtx:
     <<: *service
-    image: visionquery-mediamtx:1.21.1
+    # Named for the project, for the reason given at x-visionquery.
+    image: ${COMPOSE_PROJECT_NAME}-mediamtx:1.21.1
     build: docker/mediamtx
-    pull_policy: missing
+    pull_policy: never
     read_only: true
     environment:
       MTX_AUTHINTERNALUSERS_3_PASS: ${VISIONQUERY_MEDIAMTX_API_PASSWORD:?set VISIONQUERY_MEDIAMTX_API_PASSWORD in .env (see .env.example)}
@@ -158,7 +168,11 @@ services:
   # Prometheus reads (file_sd), so that without the profile there is no target and no lookup
   # of a name that does not resolve, which Prometheus would log as an error every 15 s.
   # The file stays in the volume once written, so a stack that ran Triton and then stopped it
-  # shows the target as down until `docker compose down --volumes`.
+  # shows the target as down until the volume alone is removed, with the stack down:
+  # `docker volume rm visionquery_scrape-targets` (`<project>_scrape-targets`). Not
+  # `down --volumes`, which deletes the database too. The volume is shared between two
+  # containers, so it cannot be a tmpfs, and it must outlive `down` for the metrics of a
+  # stack that is only restarted.
   triton-scrape:
     <<: *service
     profiles: [gpu]

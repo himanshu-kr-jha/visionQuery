@@ -6,7 +6,13 @@ them. They need a running Docker daemon with the Compose plugin, and are skipped
 Each stack is a Compose project named `vqtest-<random>` with fresh secrets and every host
 port ephemeral on loopback, so it never touches a stack a developer is running or anything
 else on the host. Taking it down removes its containers, network and volumes. A session
-starts by taking down `vqtest-` projects over an hour old, which a killed session left behind.
+starts by taking down `vqtest-` projects older than twice the build timeout, which a killed
+session left behind (a younger one may be another session's, running concurrently).
+
+Images are built only through `make up`, which turns BuildKit's attestations off (see the
+Makefile); an image built any other way gets a new ID on every build, and the tests that check
+that nothing is recreated would then fail. Every image is named for its project, so concurrent
+sessions never touch one another's.
 
 Triton's image is about 25 GB on disk, so its test runs only when
 `VISIONQUERY_TEST_TRITON` says how: `gpu` reserves the host's GPUs as a Deployment does, `cpu`
@@ -25,8 +31,9 @@ import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Callable, Generator, Iterable, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -43,11 +50,12 @@ COMPOSE = ROOT / "compose.yaml"
 NO_GPU = ROOT / "compose.no-gpu.yaml"
 ENV_EXAMPLE = ROOT / ".env.example"
 PREFIX = "vqtest-"
-STALE_AFTER = 3600
 #: Building the image, and pulling every other one the first time, is the slow part.
 BUILD_TIMEOUT = 3600
 #: How long `up --wait` gives every healthcheck once the images are present.
 WAIT_TIMEOUT = 300
+#: A session younger than this may still be building, so it is not swept as stale.
+STALE_AFTER = 2 * (BUILD_TIMEOUT + WAIT_TIMEOUT)
 TRITON_MODE_VARIABLE = "VISIONQUERY_TEST_TRITON"
 TRITON_MODE = os.environ.get(TRITON_MODE_VARIABLE, "")
 
@@ -137,10 +145,23 @@ class Stack:
             command += ["--profile", profile]
         return command
 
-    def make(self, target: str, timeout: float = 600) -> subprocess.CompletedProcess[str]:
+    def image(self, name: str) -> str:
+        """The image Compose builds for `app` (every VisionQuery process) or `mediamtx`."""
+        tag = {"app": "dev", "mediamtx": "1.21.1"}[name]
+        return f"{self.project}-{name}:{tag}"
+
+    def make(
+        self, target: str, *variables: str, timeout: float = 600
+    ) -> subprocess.CompletedProcess[str]:
         """A target of the Makefile, run against this project."""
         return subprocess.run(
-            ["make", "--no-print-directory", target, f"COMPOSE={shlex.join(self.command())}"],
+            [
+                "make",
+                "--no-print-directory",
+                target,
+                f"COMPOSE={shlex.join(self.command())}",
+                *variables,
+            ],
             cwd=self.root,
             env=self.env,
             capture_output=True,
@@ -220,14 +241,14 @@ def running_stack(
     files: Iterable[Path] = (),
     environment: Mapping[str, str] | None = None,
 ) -> Generator[Stack]:
-    """Bring the stack up with `make up`, which waits for every healthcheck and for `migrate`
-    to succeed, then take it down."""
+    """Bring the stack up with `make up`, which builds, waits for every healthcheck and for
+    `migrate` to succeed, then take it down."""
     stack = _new_stack(profiles, files, environment)
     try:
-        stack.compose("build", timeout=BUILD_TIMEOUT)
         stack.compose("pull", "--ignore-buildable", "--quiet", timeout=BUILD_TIMEOUT)
         started = time.monotonic()
-        up = stack.make("up", timeout=WAIT_TIMEOUT + 60)
+        # `make up` builds first, so the image is built once, with the attestations off.
+        up = stack.make("up", timeout=BUILD_TIMEOUT + WAIT_TIMEOUT)
         if up.returncode != 0:
             raise AssertionError(
                 f"`make up` failed:\n{up.stdout}\n{up.stderr}\n{stack.diagnostics()}"
@@ -235,7 +256,7 @@ def running_stack(
         print(f"{stack.project} {stack.profiles} healthy in {time.monotonic() - started:.1f} s")
         yield stack
     finally:
-        stack.compose("down", "--volumes", "--remove-orphans", timeout=300, check=False)
+        _remove(stack)
 
 
 def wait_for[T](probe: Callable[[], tuple[T | None, str]], timeout: float) -> T:
@@ -365,11 +386,11 @@ def test_up_on_an_unchanged_tree_recreates_nothing(default_stack: Stack) -> None
     def identifiers() -> dict[str, str]:
         return {name: c["ID"] for name, c in default_stack.containers().items()}
 
-    before, image = identifiers(), _image_id("visionquery:dev")
+    before, image = identifiers(), _image_id(default_stack.image("app"))
     for _ in range(2):
         up = default_stack.make("up")
         assert up.returncode == 0, up.stdout + up.stderr
-        assert _image_id("visionquery:dev") == image
+        assert _image_id(default_stack.image("app")) == image
         assert identifiers() == before
     default_stack.compose("up", "--detach")
     assert identifiers() == before
@@ -377,21 +398,18 @@ def test_up_on_an_unchanged_tree_recreates_nothing(default_stack: Stack) -> None
 
 
 def test_make_up_runs_changed_code_and_recreates_only_what_changed(tmp_path: Path) -> None:
-    # A copy of what the build uses, never the repository itself, under an image name of its
-    # own so that no other project's `visionquery:dev` is rebuilt under it.
+    # A copy of what the build uses, never the repository itself.
     root = tmp_path / "tree"
     root.mkdir()
-    for name in ("Makefile", "Dockerfile", "pyproject.toml", "uv.lock", ".python-version"):
+    for name in ("Makefile", "Dockerfile", "compose.yaml", "pyproject.toml", "uv.lock"):
         shutil.copy(ROOT / name, root / name)
+    shutil.copy(ROOT / ".python-version", root / ".python-version")
     shutil.copy(ROOT / ".dockerignore", root / ".dockerignore")
     ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
     shutil.copytree(ROOT / "packages", root / "packages", ignore=ignore)
     shutil.copytree(ROOT / "docker" / "mediamtx", root / "docker" / "mediamtx")
-    image = f"{PREFIX}image-{uuid.uuid4().hex[:10]}:dev"
-    compose = (ROOT / "compose.yaml").read_text()
-    assert "image: visionquery:dev" in compose
-    (root / "compose.yaml").write_text(compose.replace("image: visionquery:dev", f"image: {image}"))
     stack = _new_stack(root=root)
+    image = stack.image("app")
     try:
         up = stack.make("up", timeout=BUILD_TIMEOUT)
         assert up.returncode == 0, up.stdout + up.stderr + stack.diagnostics()
@@ -414,8 +432,7 @@ def test_make_up_runs_changed_code_and_recreates_only_what_changed(tmp_path: Pat
         assert after["mediamtx"] == before["mediamtx"]
         assert after["postgres"] == before["postgres"]
     finally:
-        stack.compose("down", "--volumes", "--remove-orphans", timeout=300, check=False)
-        subprocess.run(["docker", "image", "rm", image], capture_output=True, check=False)
+        _remove(stack)
 
 
 def test_make_up_fails_visibly_when_the_migrations_fail(tmp_path: Path) -> None:
@@ -426,14 +443,126 @@ def test_make_up_fails_visibly_when_the_migrations_fail(tmp_path: Path) -> None:
     )
     stack = _new_stack(files=[broken])
     try:
-        stack.compose("build", timeout=BUILD_TIMEOUT)
         stack.compose("pull", "--ignore-buildable", "--quiet", timeout=BUILD_TIMEOUT)
-        up = stack.make("up", timeout=WAIT_TIMEOUT + 60)
+        up = stack.make("up", timeout=BUILD_TIMEOUT + WAIT_TIMEOUT)
         assert up.returncode != 0, up.stdout + up.stderr
         assert "migrations failed" in up.stderr, up.stdout + up.stderr
         assert stack.containers()["migrate"]["ExitCode"] != 0
     finally:
-        stack.compose("down", "--volumes", "--remove-orphans", timeout=300, check=False)
+        _remove(stack)
+
+
+def test_make_up_gives_up_on_migrations_that_never_finish(tmp_path: Path) -> None:
+    slow = tmp_path / "compose.slow-migrate.yaml"
+    slow.write_text('services:\n  migrate:\n    command: ["sleep", "600"]\n')
+    stack = _new_stack(files=[slow])
+    try:
+        stack.compose("pull", "--ignore-buildable", "--quiet", timeout=BUILD_TIMEOUT)
+        started = time.monotonic()
+        up = stack.make("up", "MIGRATE_TIMEOUT=5", timeout=BUILD_TIMEOUT + WAIT_TIMEOUT)
+        assert up.returncode != 0, up.stdout + up.stderr
+        assert "did not finish within 5 s" in up.stderr, up.stdout + up.stderr
+        assert time.monotonic() - started < 300
+    finally:
+        _remove(stack)
+
+
+def _remove(stack: Stack) -> None:
+    """Take a project down whatever its profiles, and delete its data."""
+    stack.compose(
+        "--profile", "*", "down", "--volumes", "--remove-orphans", timeout=300, check=False
+    )
+    for image in (stack.image("app"), stack.image("mediamtx")):
+        subprocess.run(["docker", "image", "rm", image], capture_output=True, check=False)
+
+
+def _leftovers(stack: Stack) -> dict[str, list[str]]:
+    """Every container, network and volume Docker still holds for the project."""
+    label = f"label=com.docker.compose.project={stack.project}"
+    found: dict[str, list[str]] = {}
+    for kind, command, field_name in (
+        ("containers", ["ps", "--all"], "Names"),
+        ("networks", ["network", "ls"], "Name"),
+        ("volumes", ["volume", "ls"], "Name"),
+    ):
+        found[kind] = subprocess.run(
+            ["docker", *command, "--filter", label, "--format", f"{{{{.{field_name}}}}}"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.split()
+    return found
+
+
+def test_make_down_stops_profile_services_and_keeps_the_data_unless_told() -> None:
+    # Triton's profile (gpu, on the CPU here when VISIONQUERY_TEST_TRITON=cpu) is not enabled
+    # for `down` by anything but `--profile '*'`; a plain `down` would leave it holding the GPU.
+    profiles = ["observability"]
+    files: list[Path] = []
+    if TRITON_MODE in {"gpu", "cpu"}:
+        profiles.append("gpu")
+        files = [NO_GPU] if TRITON_MODE == "cpu" else []
+    stack = _new_stack(profiles=profiles, files=files)
+    try:
+        stack.compose("pull", "--ignore-buildable", "--quiet", timeout=BUILD_TIMEOUT)
+        up = stack.make("up", timeout=BUILD_TIMEOUT + WAIT_TIMEOUT)
+        assert up.returncode == 0, up.stdout + up.stderr + stack.diagnostics()
+        assert _leftovers(stack)["containers"]
+
+        # Without the profiles on the command line, as a developer who `up`ed with
+        # COMPOSE_PROFILES in `.env` and later lost it from their shell would run it.
+        bare = replace(stack, profiles=())
+        down = bare.make("down", timeout=300)
+        assert down.returncode == 0, down.stdout + down.stderr
+        left = _leftovers(stack)
+        assert left["containers"] == []
+        assert left["networks"] == []
+        assert left["volumes"], "make down must keep the data"
+
+        wiped = bare.make("down", "VOLUMES=1", timeout=300)
+        assert wiped.returncode == 0, wiped.stdout + wiped.stderr
+        assert _leftovers(stack) == {"containers": [], "networks": [], "volumes": []}
+    finally:
+        _remove(stack)
+
+
+def test_concurrent_projects_do_not_touch_each_others_images_or_containers() -> None:
+    # Image tags are global to the daemon and Compose stamps the project into every image it
+    # builds, so projects sharing a tag would each give it a new ID, and each one's next
+    # `make up` would recreate its containers. Two projects build and come up at once, then go
+    # up again at once, then one goes down while the other keeps running.
+    first, second = _new_stack(), _new_stack()
+    stacks = (first, second)
+    try:
+        for stack in stacks:
+            stack.compose("pull", "--ignore-buildable", "--quiet", timeout=BUILD_TIMEOUT)
+
+        def up(stack: Stack) -> subprocess.CompletedProcess[str]:
+            return stack.make("up", timeout=BUILD_TIMEOUT + WAIT_TIMEOUT)
+
+        def state(stack: Stack) -> tuple[dict[str, str], dict[str, str]]:
+            containers = {name: c["ID"] for name, c in stack.containers().items()}
+            images = {n: _image_id(stack.image(n)) for n in ("app", "mediamtx")}
+            return containers, images
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            for result in pool.map(up, stacks):
+                assert result.returncode == 0, result.stdout + result.stderr
+            before = [state(stack) for stack in stacks]
+            for result in pool.map(up, stacks):
+                assert result.returncode == 0, result.stdout + result.stderr
+        assert [state(stack) for stack in stacks] == before
+        # Each project has images of its own, not one tag between them.
+        assert first.image("app") != second.image("app")
+
+        down = first.make("down", "VOLUMES=1", timeout=300)
+        assert down.returncode == 0, down.stdout + down.stderr
+        assert _leftovers(first)["containers"] == []
+        assert state(second) == before[1]
+        _assert_healthy(second, {"postgres", "mediamtx"})
+    finally:
+        for stack in stacks:
+            _remove(stack)
 
 
 # --- The observability profile --------------------------------------------------------------
@@ -470,7 +599,25 @@ def test_prometheus_sees_every_target_up(observed_stack: Stack) -> None:
 
 def test_prometheus_logs_no_failed_lookup_without_the_gpu_profile(observed_stack: Stack) -> None:
     # A job looking up `triton` without Triton would log a DNS error every 15 s.
-    time.sleep(20)  # longer than a refresh
+    # Wait until Prometheus has looked every DNS job up again, which is a refresh.
+    url = observed_stack.url(
+        "prometheus", 9090, "/api/v1/query?query=sum(prometheus_sd_dns_lookups_total)"
+    )
+
+    def lookups() -> float:
+        status, body = _get(url)
+        assert status == 200, body
+        result = json.loads(body)["data"]["result"]
+        return float(result[0]["value"][1]) if result else 0.0
+
+    first = lookups()
+    jobs = len(OBSERVED_JOBS)  # each is looked up in DNS once per refresh
+
+    def refreshed() -> tuple[float | None, str]:
+        now = lookups()
+        return (now, "") if now >= first + jobs else (None, f"lookups still at {now}")
+
+    wait_for(refreshed, timeout=60)
     logs = observed_stack.compose("logs", "--no-color", "prometheus").stdout
     assert "triton" not in logs, logs
 
