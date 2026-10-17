@@ -62,21 +62,23 @@ jobs:
         image: timescale/timescaledb:2.30.1-pg18
         env:
           POSTGRES_PASSWORD: visionquery-test
+        # An ephemeral host port, read back below.
         ports:
-          - 127.0.0.1::5432
+          - 5432
         options: >-
           --health-cmd "pg_isready --host 127.0.0.1 --username postgres"
           --health-interval 2s
           --health-timeout 5s
           --health-retries 60
-    env:
-      VISIONQUERY_TEST_DATABASE_URL: postgresql://postgres:visionquery-test@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/setup
         with:
           web: true
       - run: make test
+        # The `job` context, which holds the service's port, exists only at the step level.
+        env:
+          VISIONQUERY_TEST_DATABASE_URL: postgresql://postgres:visionquery-test@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
 
   web:
     runs-on: ubuntu-24.04

@@ -131,7 +131,7 @@ def test_the_python_tests_run_against_a_postgres_service_of_the_tests_own_image(
     assert service["env"]["POSTGRES_PASSWORD"] == password.group(1)
     # Ready only once it listens on TCP: the image first initialises on a socket alone.
     assert "pg_isready --host 127.0.0.1" in service["options"]
-    url = job["env"]["VISIONQUERY_TEST_DATABASE_URL"]
+    (url,) = (s["env"]["VISIONQUERY_TEST_DATABASE_URL"] for s in job["steps"] if "env" in s)
     assert url.startswith(f"postgresql://postgres:{password.group(1)}@127.0.0.1:")
     assert "job.services.postgres.ports['5432']" in url
 
