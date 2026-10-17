@@ -61,6 +61,12 @@ By default these are three cameras of the [MEVA](https://mevadata.org/) dataset'
    A camera whose video is not in `samples/` shows the test pattern instead, with a warning in `docker compose logs fake-cameras`, so the profile works before anything is downloaded; restart the service (`docker compose restart fake-cameras`) once the video is there.
 3. Watch a camera: `ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/gym-g299` (or the same URL in VLC), or open <http://127.0.0.1:8889/gym-g299> in a browser for MediaMTX's WebRTC player.
 
+All the cameras play their videos in step.
+Each video is cut to the same five minutes (`VISIONQUERY_FAKE_CAMERA_DURATION`, in seconds; MEVA's recordings are 300.0 to 300.3 s long and would otherwise drift apart), and every camera shows the second of its video that the wall clock says, counted from the Unix epoch.
+A camera that starts late, is still being prepared, or restarts rejoins that timeline at once, so the cameras that recorded the same minutes show the same people at the same moment, to within a fraction of a second, however long the stack has been up.
+The five minutes then repeat for ever, beginning at every five minutes of the hour (UTC): the same people walk by again every five minutes, so expect the same Visits, Tracks and Links to recur when developing perception and the linker against these cameras.
+(The test pattern, and a camera on it while its video is prepared, are not part of the timeline.)
+
 Any number of cameras can be listed, several may loop the same video, `synthetic` is a test pattern that needs no video, and any video file in `VISIONQUERY_FAKE_CAMERA_SAMPLES` (`samples/` by default) can be used.
 Each camera reconnects by itself whenever MediaMTX restarts.
 

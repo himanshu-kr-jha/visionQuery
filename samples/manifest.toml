@@ -6,6 +6,11 @@
 # (2018-03-11 11:20-11:25): two views of one gym from opposite sides, which overlap and are
 # busy with people walking, and the stairwell by an entrance, which people pass through. They
 # are what VisionQuery is for: the same people seen by several cameras at once and in turn.
+# The fake cameras play them in step: each is cut to exactly five minutes (the recordings are
+# 300.0 s to 300.3 s long) and every camera shows the same second of its video as every other,
+# by the wall clock, so that the same people are on several cameras at the same moment.
+# The five minutes then repeat for ever, starting at every five minutes of the hour (UTC), so
+# the same people come back every five minutes.
 # MEVA's cameras record H.264 with B-frames in AVI; the fake cameras re-encode each sample once,
 # locally, as a camera sends video, and nothing is redistributed.
 #
