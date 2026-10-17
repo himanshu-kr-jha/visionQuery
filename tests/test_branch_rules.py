@@ -108,10 +108,15 @@ elif "/check-runs" in path:
 
 #: A parameter GitHub has that the script does not manage, as the live rulesets have it.
 EXTRA = "require_extra_approval_for_unattributed_changes"
+#: A bypass actor and a rule type of the live ruleset that the script does not manage either.
+BYPASS = {"actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always"}
 LIVE = {
     "id": "__ID__",
+    "bypass_actors": [BYPASS],
     "rules": [
-        {"type": "pull_request", "parameters": {EXTRA: True, "required_approving_review_count": 3}}
+        {"type": "pull_request", "parameters": {EXTRA: True, "required_approving_review_count": 3}},
+        {"type": "required_signatures"},
+        {"type": "deletion"},
     ],
 }
 
@@ -161,6 +166,8 @@ def test_applying_replaces_both_rulesets_once_every_check_has_passed_on_develop(
         # Ours, plus what the live ruleset has that the script does not manage.
         expected = json.loads(json.dumps(payloads[name]))
         _rules(expected)["pull_request"][EXTRA] = True
+        expected["bypass_actors"] = [BYPASS]
+        expected["rules"].append({"type": "required_signatures"})
         assert sent == expected
         assert _rules(sent)["pull_request"]["required_approving_review_count"] == 0
         assert put["arguments"][put["arguments"].index("--input") + 1] == "-"

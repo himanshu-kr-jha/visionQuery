@@ -7,8 +7,11 @@ The required checks are the jobs of .github/workflows/ci.yml, so a job added the
 as soon as this is applied again. GitHub can only require a check it has seen, and a required
 check that never reports blocks every merge, so `--apply` refuses, changing nothing, unless
 each check has passed on develop's latest commit. It replaces each ruleset, through the `gh`
-CLI of whoever runs it (which needs admin rights on the repository), keeping the pull_request
-parameters it does not set itself, such as `require_extra_approval_for_unattributed_changes`.
+CLI of whoever runs it (which needs admin rights on the repository). What it manages (the
+`deletion`, `non_fast_forward`, `pull_request` and `required_status_checks` rules, with the
+parameters it sets) it resets to the values here; what it does not manage it keeps as it is
+live: the other `pull_request` parameters, such as
+`require_extra_approval_for_unattributed_changes`, the bypass actors, and any other rule type.
 """
 
 import argparse
@@ -93,14 +96,17 @@ def _not_passed_on_develop(checks: list[str]) -> list[str]:
 
 
 def _keeping_live_parameters(payload: dict[str, Any], live: dict[str, Any]) -> dict[str, Any]:
-    """The payload, with the live pull_request parameters it does not set kept as they are."""
+    """The payload, with what the live ruleset has that it does not manage kept as it is."""
     kept: dict[str, Any] = {}
     for rule in live["rules"]:
         if rule["type"] == "pull_request":
             kept = rule.get("parameters", {})
+    managed = {rule["type"] for rule in payload["rules"]}
     for rule in payload["rules"]:
         if rule["type"] == "pull_request":
             rule["parameters"] = kept | rule["parameters"]
+    payload["rules"] += [rule for rule in live["rules"] if rule["type"] not in managed]
+    payload["bypass_actors"] = live.get("bypass_actors", payload["bypass_actors"])
     return payload
 
 
