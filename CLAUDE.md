@@ -159,7 +159,7 @@ Run everything from the repository root.
 | ...including the fake cameras on the real samples (downloads them first) | `VISIONQUERY_TEST_SAMPLES=1 make test-stack` |
 | Install the git hooks (opt-in; a `pre-commit` or `commit-msg` hook already in `.git/hooks` is kept as `<name>.legacy` and still runs first, unless `--overwrite`) | `uv run pre-commit install` |
 | Run the pre-commit hooks over every file | `uv run pre-commit run --all-files` |
-| Print the develop and main rulesets `make branch-rules` would send | `uv run python scripts/branch_rules.py` |
+| Print the develop and main rulesets `make branch-rules` would send | `uv run scripts/branch_rules.py` |
 | Make develop and main require a PR and every CI check (a repository admin, once the workflow has passed on develop) | `make branch-rules` |
 
 `make lint` runs both ruff commands and actionlint over `.github/workflows/`.

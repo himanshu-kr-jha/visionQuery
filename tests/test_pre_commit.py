@@ -52,7 +52,12 @@ def test_every_hook_runs_the_locked_tools_through_uv() -> None:
 def _commit_message(tmp_path: Path, text: str) -> subprocess.CompletedProcess[str]:
     message = tmp_path / "COMMIT_EDITMSG"
     message.write_text(text)
-    return _pre_commit("--hook-stage", "commit-msg", "--commit-msg-filename", str(message))
+    # Naming the file keeps pre-commit from stashing this working tree's unstaged changes, as
+    # it does when run bare, and from refusing while its configuration is being edited.
+    return _pre_commit(
+        "--hook-stage", "commit-msg", "--commit-msg-filename", str(message),
+        "--files", str(message),
+    )  # fmt: skip
 
 
 def test_a_conventional_message_without_attribution_is_accepted(tmp_path: Path) -> None:

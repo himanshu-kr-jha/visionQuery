@@ -166,4 +166,4 @@ def test_make_branch_rules_applies_them() -> None:
         text=True,
         check=False,
     )
-    assert dry.stdout.splitlines() == ["uv run python scripts/branch_rules.py --apply"]
+    assert dry.stdout.splitlines() == ["uv run scripts/branch_rules.py --apply"]

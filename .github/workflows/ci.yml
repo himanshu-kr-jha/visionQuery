@@ -116,15 +116,15 @@ jobs:
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
           HEAD: ${{ github.event.pull_request.head.sha }}
-        run: uv run --frozen python scripts/check_attribution.py --commits "$BASE..$HEAD"
+        run: uv run --frozen scripts/check_attribution.py --commits "$BASE..$HEAD"
       - name: The PR's title and body carry no attribution, and the title is a Conventional Commit
         if: github.event_name == 'pull_request'
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          uv run --frozen python scripts/check_attribution.py --env PR_TITLE --env PR_BODY
-          uv run --frozen python scripts/check_commit_message.py --env PR_TITLE
+          uv run --frozen scripts/check_attribution.py --env PR_TITLE --env PR_BODY
+          uv run --frozen scripts/check_commit_message.py --env PR_TITLE
       - name: Pushed commits carry no attribution
         if: github.event_name == 'push'
         env:
@@ -133,4 +133,4 @@ jobs:
         # A push that created the branch has no previous commit: check the pushed one alone.
         run: |
           if [ "$BEFORE" = 0000000000000000000000000000000000000000 ]; then range="$AFTER^!"; else range="$BEFORE..$AFTER"; fi
-          uv run --frozen python scripts/check_attribution.py --commits "$range"
+          uv run --frozen scripts/check_attribution.py --commits "$range"

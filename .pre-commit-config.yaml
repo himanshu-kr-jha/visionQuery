@@ -29,11 +29,11 @@ repos:
         require_serial: true
       - id: conventional-commit
         name: Conventional Commit message
-        entry: uv run --frozen python scripts/check_commit_message.py
+        entry: uv run --frozen scripts/check_commit_message.py
         language: unsupported
         stages: [commit-msg]
       - id: no-attribution
         name: no agent attribution in the message
-        entry: uv run --frozen python scripts/check_attribution.py
+        entry: uv run --frozen scripts/check_attribution.py
         language: unsupported
         stages: [commit-msg]

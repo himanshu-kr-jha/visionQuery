@@ -71,9 +71,9 @@ check: lint typecheck contracts test web api-types-check
 
 # Makes the develop and main rulesets require a PR and every job of .github/workflows/ci.yml,
 # through the gh CLI of a repository admin. It refuses until each job has passed on develop;
-# `uv run python scripts/branch_rules.py` prints what it would send.
+# `uv run scripts/branch_rules.py` prints what it would send.
 branch-rules:
-	uv run python scripts/branch_rules.py --apply
+	uv run scripts/branch_rules.py --apply
 
 # Starts the stack, and fails when the migrations did not succeed. `docker compose up --wait`
 # returns while `migrate` is still running, so a failed migration would go unnoticed, and on

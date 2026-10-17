@@ -1,7 +1,7 @@
 """The develop and main rulesets: a PR, every CI check, no force pushes and no deletion.
 
-    uv run python scripts/branch_rules.py            print the rulesets it would send
-    uv run python scripts/branch_rules.py --apply    send them (`make branch-rules`)
+    uv run scripts/branch_rules.py            print the rulesets it would send
+    uv run scripts/branch_rules.py --apply    send them (`make branch-rules`)
 
 The required checks are the jobs of .github/workflows/ci.yml, so a job added there is required
 as soon as this is applied again. GitHub can only require a check it has seen, and a required
