@@ -9,7 +9,7 @@ that does not verify is downloaded again. Uses the standard library only.
     uv run scripts/fetch_samples.py [--manifest PATH] [--directory PATH]
 
 Exits 0 when every clip is present, 1 when one could not be fetched (the others still are),
-and 2 when the manifest is malformed.
+and 2 when the manifest is malformed. The clips are downloaded in parallel.
 """
 
 import argparse
@@ -18,10 +18,12 @@ import hashlib
 import http.client
 import re
 import sys
+import threading
 import tomllib
 import urllib.error
 import urllib.request
 from collections.abc import Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import BinaryIO, cast
@@ -29,6 +31,8 @@ from typing import BinaryIO, cast
 SAMPLES = Path(__file__).resolve().parents[1] / "samples"
 MANIFEST = SAMPLES / "manifest.toml"
 
+#: Clips downloaded at once.
+PARALLEL = 4
 _CHUNK = 1 << 20
 _FILE = re.compile(r"[a-z0-9][a-z0-9._-]*")
 _SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -92,29 +96,39 @@ def _digest(path: Path) -> str:
         return hashlib.file_digest(file, "sha256").hexdigest()
 
 
-def _copy(response: BinaryIO, into: BinaryIO) -> str:
+class _CancelledError(Exception):
+    pass
+
+
+def _copy(response: BinaryIO, into: BinaryIO, cancelled: threading.Event) -> str:
     """Copy the response, returning the SHA-256 of what was copied."""
     digest = hashlib.sha256()
-    while chunk := response.read(_CHUNK):
+    while not cancelled.is_set() and (chunk := response.read(_CHUNK)):
         digest.update(chunk)
         into.write(chunk)
+    if cancelled.is_set():
+        raise _CancelledError
     return digest.hexdigest()
 
 
-def fetch(clip: Clip, directory: Path) -> Outcome:
-    """Make `directory/clip.file` the clip the manifest describes, downloading it if needed."""
+def fetch(clip: Clip, directory: Path, cancelled: threading.Event | None = None) -> Outcome:
+    """Make `directory/clip.file` the clip the manifest describes, downloading it if needed.
+    Setting `cancelled` stops the download, which then fails."""
     target = directory / clip.file
     if target.is_file() and _digest(target) == clip.sha256:
         return Outcome.PRESENT
     part = target.with_name(f"{target.name}.part")
     try:
         with urllib.request.urlopen(clip.url, timeout=60) as response, part.open("wb") as file:
-            digest = _copy(response, file)
+            digest = _copy(response, file, cancelled or threading.Event())
         if digest != clip.sha256:
             raise FetchError(
                 f"{clip.file}: the download's SHA-256 is {digest}, the manifest says "
                 f"{clip.sha256} ({part.stat().st_size} of {clip.size} bytes arrived)"
             )
+    except _CancelledError:
+        part.unlink(missing_ok=True)
+        raise FetchError(f"{clip.file}: cancelled") from None
     except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
         part.unlink(missing_ok=True)
         raise FetchError(f"{clip.file}: could not download {clip.url}: {error}") from error
@@ -138,17 +152,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ValueError, TypeError, tomllib.TOMLDecodeError) as error:
         print(f"fetch-samples: {arguments.manifest} is malformed: {error}", file=sys.stderr)
         return 2
+    total = sum(clip.size for clip in clips)
+    print(
+        f"Fetching {len(clips)} clips ({total / 1e6:.0f} MB) into {arguments.directory}", flush=True
+    )
     failed = 0
-    for clip in clips:
-        print(f"{clip.file} ({clip.size / 1e6:.0f} MB, {clip.license}): ", end="", flush=True)
+    # In parallel: one download from a dataset's bucket can be slow, several are faster.
+    cancelled = threading.Event()
+    with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
+        downloads = {
+            pool.submit(fetch, clip, arguments.directory, cancelled): clip for clip in clips
+        }
         try:
-            outcome = fetch(clip, arguments.directory)
-        except FetchError as error:
-            print("failed")
-            print(f"fetch-samples: {error}", file=sys.stderr)
-            failed += 1
-            continue
-        print(outcome.value)
+            for download in as_completed(downloads):
+                clip = downloads[download]
+                try:
+                    outcome = download.result()
+                except FetchError as error:
+                    print(f"fetch-samples: {error}", file=sys.stderr, flush=True)
+                    failed += 1
+                    continue
+                print(
+                    f"{clip.file} ({clip.size / 1e6:.0f} MB, {clip.license}): {outcome.value}",
+                    flush=True,
+                )
+        except KeyboardInterrupt:
+            # Every download stops and removes its partial file before the pool is left.
+            cancelled.set()
+            raise
     if failed:
         print(f"fetch-samples: {failed} of {len(clips)} clips failed", file=sys.stderr)
         return 1
@@ -157,4 +188,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("fetch-samples: interrupted; no partial file is left", file=sys.stderr)
+        sys.exit(130)

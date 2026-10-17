@@ -101,6 +101,8 @@ class Server:
     requests: list[str] = field(default_factory=list[str])
     #: Close the connection after this many bytes of the body, to imitate a dropped download.
     cut_after: int | None = None
+    #: Answer only once this many requests are waiting, to tell parallel downloads apart.
+    together: threading.Barrier | None = None
     port: int = 0
 
     def url(self, name: str) -> str:
@@ -115,6 +117,12 @@ def server() -> Iterator[Server]:
         def do_GET(self) -> None:
             name = self.path.lstrip("/")
             state.requests.append(name)
+            if state.together is not None:
+                try:
+                    state.together.wait(timeout=5)
+                except threading.BrokenBarrierError:
+                    self.send_error(503, "the downloads did not run in parallel")
+                    return
             body = state.files.get(name)
             if body is None:
                 self.send_error(404)
@@ -224,6 +232,16 @@ def test_a_partial_file_left_by_a_killed_run_is_replaced(server: Server, tmp_pat
     assert _leftovers(tmp_path) == ["walk.mp4"]
 
 
+def test_a_cancelled_download_stops_and_leaves_nothing(server: Server, tmp_path: Path) -> None:
+    # What Ctrl-C does to every download in progress.
+    server.files["walk.mp4"] = VIDEO
+    cancelled = threading.Event()
+    cancelled.set()
+    with pytest.raises(FetchError, match=r"walk\.mp4.*cancelled"):
+        fetch(_clip(server.url("walk.mp4")), tmp_path, cancelled)
+    assert _leftovers(tmp_path) == []
+
+
 def test_a_missing_url_fails_naming_the_clip(server: Server, tmp_path: Path) -> None:
     with pytest.raises(FetchError, match=r"walk\.mp4.*404"):
         fetch(_clip(server.url("walk.mp4")), tmp_path)
@@ -331,3 +349,20 @@ def test_a_clip_that_could_write_outside_the_directory_or_never_verify_is_refuse
 
 def test_the_real_manifest_parses_as_toml() -> None:
     assert tomllib.loads(MANIFEST.read_text())["clip"]
+
+
+def test_the_clips_are_downloaded_in_parallel(server: Server, tmp_path: Path) -> None:
+    # A single download from the dataset's bucket can be slow; several at once are faster.
+    others = [VIDEO[::-1], VIDEO[1:]]
+    server.files |= {"a.mp4": VIDEO, "b.mp4": others[0], "c.mp4": others[1]}
+    server.together = threading.Barrier(3)
+    manifest = tmp_path / "manifest.toml"
+    _write_manifest(
+        manifest,
+        [
+            _clip(server.url("a.mp4"), file="a.mp4"),
+            _clip(server.url("b.mp4"), others[0], "b.mp4"),
+            _clip(server.url("c.mp4"), others[1], "c.mp4"),
+        ],
+    )
+    assert main(["--manifest", str(manifest), "--directory", str(tmp_path)]) == 0
