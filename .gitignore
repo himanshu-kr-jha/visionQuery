@@ -21,6 +21,10 @@ web/dist/
 *.env
 !*.env.example
 
+# Sample videos for the fake cameras: fetched by `make fetch-samples`, never committed.
+/samples/*
+!/samples/manifest.toml
+
 # Runtime data
 /data/
 /footage/

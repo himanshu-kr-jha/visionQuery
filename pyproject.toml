@@ -47,6 +47,8 @@ testpaths = ["tests", "packages"]
 # The stack tests bring the whole Compose stack up, so they run only when asked for, with
 # `make test-stack` (`-m stack` on the command line replaces this `-m`).
 addopts = ["--import-mode=importlib", "--strict-markers", "--strict-config", "-m", "not stack"]
+# The development tools that are not packages: `make fetch-samples` and the fake cameras.
+pythonpath = ["scripts", "docker/fake-cameras"]
 markers = [
     "stack: brings the Docker Compose stack up for real; run with `make test-stack`",
 ]
@@ -75,6 +77,7 @@ select = [
 [tool.pyright]
 typeCheckingMode = "strict"
 pythonVersion = "3.14"
-include = ["packages", "tests"]
+include = ["packages", "tests", "scripts", "docker/fake-cameras"]
+extraPaths = ["scripts", "docker/fake-cameras"]
 venvPath = "."
 venv = ".venv"

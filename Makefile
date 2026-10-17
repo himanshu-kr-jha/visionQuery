@@ -5,7 +5,7 @@
 SHELL := bash
 .SHELLFLAGS := -euo pipefail -c
 
-.PHONY: sync lint format typecheck contracts test test-stack check up down
+.PHONY: sync lint format typecheck contracts test test-stack check up down fetch-samples
 
 sync:
 	uv sync --locked
@@ -78,3 +78,8 @@ up:
 # deletes the data too (the database, the metrics).
 down:
 	$(COMPOSE) --profile '*' down --remove-orphans $(if $(VOLUMES),--volumes)
+
+# Downloads the sample videos samples/manifest.toml lists into samples/ (git ignores them),
+# verifying each against its SHA-256 and skipping those already present. About 300 MB.
+fetch-samples:
+	uv run scripts/fetch_samples.py
