@@ -45,6 +45,18 @@ class _Check:
         return self.answer
 
 
+def _workers_finished() -> None:
+    """Waits for every check thread to end, after it has logged what it found.
+
+    A worker publishes its answer before it logs the change, so a caller that has the answer
+    may read the log first.
+    """
+    for thread in threading.enumerate():
+        if thread.name == "database-check":
+            thread.join(timeout=10)
+            assert not thread.is_alive(), "a database check did not end"
+
+
 def _probe(check: Callable[[], DatabaseHealth], clock: _Clock) -> DatabaseProbe:
     return DatabaseProbe(check, clock=clock)
 
@@ -77,11 +89,13 @@ def test_turning_unreachable_logs_one_warning_with_the_category_only(
     probe = _probe(check, clock)
     with caplog.at_level(logging.INFO, logger="visionquery.api"):
         probe()
+        _workers_finished()
         assert caplog.records == []  # reachable from the start is not news
         check.answer = DOWN
         for _ in range(5):
             clock.now += CACHE_SECONDS + 0.01
             probe()
+            _workers_finished()
     [record] = caplog.records
     assert record.levelno == logging.WARNING
     assert record.getMessage() == (
@@ -94,14 +108,19 @@ def test_recovering_logs_one_info(caplog: pytest.LogCaptureFixture) -> None:
     probe = _probe(check, clock)
     with caplog.at_level(logging.INFO, logger="visionquery.api"):
         probe()  # unreachable from the start is a change from "unknown"
+        _workers_finished()
         check.answer = UP
         for _ in range(5):
             clock.now += CACHE_SECONDS + 0.01
             probe()
+            _workers_finished()
     assert [(r.levelno, r.getMessage()) for r in caplog.records] == [
         (logging.WARNING, "the database is unreachable: connection refused or host unreachable"),
         (logging.INFO, "the database is reachable again"),
     ]
+
+
+_SLOW_CHECKS: list[_Slow] = []
 
 
 class _Slow:
@@ -112,6 +131,7 @@ class _Slow:
         self.calls = 0
         self.started = threading.Event()
         self.finish = threading.Event()
+        _SLOW_CHECKS.append(self)
 
     def __call__(self) -> DatabaseHealth:
         self.calls += 1
@@ -192,10 +212,26 @@ _RELEASE_FOREVER = threading.Event()
 
 @pytest.fixture(autouse=True)
 def _release_stuck_checks() -> Iterator[None]:
-    """Lets the threads `_forever` holds finish when a test ends, so none outlives it."""
+    """Ends every check thread a test started before the next test begins.
+
+    A worker that finishes late logs "reachable again" into whichever test is running then, so
+    the checks are released and every `database-check` thread is joined, failing loudly if one
+    does not end.
+    """
     _RELEASE_FOREVER.clear()
+    _SLOW_CHECKS.clear()
     yield
     _RELEASE_FOREVER.set()
+    for slow in _SLOW_CHECKS:
+        slow.finish.set()
+    _SLOW_CHECKS.clear()
+    stuck: list[str] = []
+    for thread in threading.enumerate():
+        if thread.name == "database-check":
+            thread.join(timeout=10)
+            if thread.is_alive():
+                stuck.append(thread.name)
+    assert not stuck, f"database-check threads outlived their test: {stuck}"
 
 
 def _forever() -> DatabaseHealth:
@@ -266,6 +302,7 @@ def test_a_check_that_never_returns_is_logged_once_when_its_deadline_passes(
 
         slow.finish.set()  # it comes back at last, with the database reachable
         assert _eventually(lambda: probe() == UP)
+        _workers_finished()
     assert [r.getMessage() for r in caplog.records][1:] == ["the database is reachable again"]
 
 
@@ -279,7 +316,11 @@ def test_connect_timeout_zero_cannot_wedge_the_probe(caplog: pytest.LogCaptureFi
         probe = DatabaseProbe(partial(check_database, url))
         started = time.monotonic()
         assert probe() == TIMED_OUT
-    assert time.monotonic() - started < HEALTH_BUDGET_SECONDS
+        elapsed = time.monotonic() - started
+        _workers_finished()
+    # The check answers by itself; had it wedged, the probe would have waited out its deadline
+    # and logged that instead, so the log line below is what proves the check returned.
+    assert elapsed < DEADLINE_SECONDS
     assert [r.getMessage() for r in caplog.records] == ["the database is unreachable: timed out"]
 
 
@@ -296,8 +337,10 @@ def test_a_check_that_raises_is_another_failure_and_does_not_wedge_the_probe(
     probe = _probe(broken, clock)
     with caplog.at_level(logging.INFO, logger="visionquery.api"):
         assert probe() == DatabaseHealth("other connection failure")
+        _workers_finished()
         clock.now += CACHE_SECONDS + 0.01
         assert probe() == DatabaseHealth("other connection failure")
+        _workers_finished()
     assert len(calls) == 2
     assert "hunter2" not in caplog.text
     assert "RuntimeError" in caplog.text
