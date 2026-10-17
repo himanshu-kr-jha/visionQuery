@@ -279,7 +279,7 @@ def _seal(connection: psycopg.Connection) -> None:
         # A privilege this runner does not know of is taken back with everything else.
         held.setdefault(grantee, set()).add(_PRIVILEGES.get(privilege, "ALL"))
     for grantee, privileges in held.items():
-        keywords = ["ALL"] if "ALL" in privileges else sorted(privileges)
+        keywords: list[LiteralString] = ["ALL"] if "ALL" in privileges else sorted(privileges)
         connection.execute(
             sql.SQL("REVOKE {} ON TABLE public.schema_migrations FROM {}").format(
                 sql.SQL(", ").join(sql.SQL(keyword) for keyword in keywords),
