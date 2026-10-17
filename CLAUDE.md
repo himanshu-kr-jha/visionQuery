@@ -239,7 +239,9 @@ The role it connects as must be able to create the `timescaledb` and `vector` ex
 
 **Roles** (ADR 0016): migration `0003_roles.sql` makes `visionquery_runtime`, which every long-running service connects as and which may only read and write the rows of the memory's tables (those later migrations create included, by default privileges: a migration never grants for it, unless it adds a schema, on which it grants `USAGE`), and `visionquery_monitoring` (`pg_monitor`, no rows) for the Postgres exporter.
 Neither can log in until `visionquery-migrate` gives it a login after a run, with `VISIONQUERY_RUNTIME_PASSWORD` and `VISIONQUERY_MONITORING_PASSWORD` when set (`visionquery.memory.roles.enable_logins`, which sends a SCRAM verifier, never the password); `status` never does.
-Roles belong to the server, so every database migrated on one server, the tests' included, shares them.
+Roles belong to the server, so every database migrated on one server, the tests' included, shares them: one Postgres server holds one memory in a Deployment (two would share the runtime role and overwrite each other's passwords, and concurrent `0003` runs can fail with "tuple concurrently updated"; rerunning is safe).
+`0003` strips a role of that name that already exists of its login, password, connection limit, settings and direct grants on the database and `public`.
+An empty `VISIONQUERY_RUNTIME_PASSWORD` or `VISIONQUERY_MONITORING_PASSWORD` counts as unset and never clears a verifier.
 
 Connecting gives up after the URL's `connect_timeout`, else libpq's `PGCONNECT_TIMEOUT` (empty is unset, `0` waits forever as in libpq, and anything but a whole number is a settings error, exit 2, naming it), else `VISIONQUERY_CONNECT_TIMEOUT` (10 s).
 Validating `VISIONQUERY_DATABASE__URL` (`visionquery.memory.settings`) is best effort: it turns the values libpq would quote back into exit 2 before anything connects, and accepts libpq's multi-host forms (`h1,h2`, `h1:5432,h2:5433`, `?port=,5433`) and IPv6 zones, but not a non-ASCII host name (write its `xn--` form).

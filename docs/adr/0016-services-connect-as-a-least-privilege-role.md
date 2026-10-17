@@ -6,7 +6,9 @@ The Postgres exporter connects as `visionquery_monitoring`, a member of `pg_moni
 
 The roles are made by a migration (`0003_roles.sql`), so an existing Deployment gets them at its next `make up` like any other schema change.
 The migration grants the runtime role the rows of every table there is and, through default privileges, of every table and sequence the migrating role creates later, so a later migration never grants anything for it, unless it adds a schema, on which it grants `USAGE`.
-Roles belong to the server rather than to one database, so the migration makes each one only when missing, and strips one that existed of every attribute and membership but those it gives.
+Roles belong to the server rather than to one database, so the migration makes each one only when missing, and strips one that existed of every attribute, membership, login, password, connection limit, setting and direct grant on this database or its `public` schema but those it gives.
+For the same reason one Postgres server holds one memory: two memories on a server would share the runtime role, so it would read and write both, and each `visionquery-migrate` would overwrite the other's password.
+Two runs of `0003` at the same moment against databases of one server can also fail with "tuple concurrently updated"; rerunning is safe.
 
 A migration is shipped and checksummed, so it holds no password: both roles are made unable to log in.
 After every run, `visionquery-migrate` gives each its login with the password it is configured with (`VISIONQUERY_RUNTIME_PASSWORD`, `VISIONQUERY_MONITORING_PASSWORD`, which Compose fills from `.env`), sending the server a SCRAM verifier made on the client, never the password.

@@ -276,6 +276,21 @@ def test_a_missing_database_url_is_named() -> None:
     assert line["variables"] == ["VISIONQUERY_DATABASE__URL"]
 
 
+@pytest.mark.parametrize("variable", ["runtime_password", "monitoring_password"])
+def test_an_empty_role_password_is_unset_and_clears_nothing(database: str, variable: str) -> None:
+    role = "visionquery_" + variable.removesuffix("_password")
+    status, _, _ = _run(database__url=database, **{variable: "first-password"})
+    assert status == 0
+    status, _, _ = _run(database__url=database, **{variable: ""})
+    assert status == 0
+    with psycopg.connect(database) as connection:
+        stored = connection.execute(
+            "SELECT rolpassword FROM pg_authid WHERE rolname = %s", (role,)
+        ).fetchone()
+    assert stored is not None
+    assert str(stored[0]).startswith("SCRAM-SHA-256$")
+
+
 def test_an_unreachable_database_is_reported_without_its_password(database: str) -> None:
     # A port nothing listens on, with a password that must not appear anywhere.
     parts = urlsplit(database)

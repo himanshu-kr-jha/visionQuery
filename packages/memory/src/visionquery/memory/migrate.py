@@ -233,16 +233,21 @@ def migrate(
         if problems:
             raise MigrationRefusedError(problems)
         applied: list[str] = []
+        failed = True
         try:
             for migration in pending:
                 _apply(connection, migration, lock_timeout)
                 applied.append(migration.name)
                 connection.execute(_RESET)
+            failed = False
         finally:
             # A migration may have granted on the record too (`ON ALL TABLES IN SCHEMA`), and
             # what it did stays even when a later one fails.
             if applied and not connection.broken:
-                _seal(connection)
+                if failed:
+                    _seal_after_failure(connection)
+                else:
+                    _seal(connection)
         return tuple(applied)
 
 
@@ -285,6 +290,21 @@ _PRIVILEGES: dict[str, LiteralString] = {
     "TRIGGER": "TRIGGER",
     "MAINTAIN": "MAINTAIN",
 }
+
+
+def _seal_after_failure(connection: psycopg.Connection) -> None:
+    """Seal while an error propagates, which must reach the caller with the failing file's name.
+
+    A seal that fails here is logged by its category only (libpq's text may name the server)
+    and the original error carries on.
+    """
+    try:
+        _seal(connection)
+    except psycopg.Error as error:
+        _log.warning(
+            "could not seal the record after a failed migration",
+            extra={"error": type(error).__name__},
+        )
 
 
 def _seal(connection: psycopg.Connection) -> None:
@@ -609,6 +629,8 @@ class MigrateSettings(Settings):
     #: The passwords the runtime and monitoring roles log in with, given to them after every
     #: run that migrated or found nothing to do; a role whose password is not set is left as
     #: it is (unable to log in, unless an earlier run gave it a password).
+    #: An empty variable counts as unset, like every setting (`env_ignore_empty`), so it never
+    #: clears a verifier.
     runtime_password: SecretStr | None = None
     monitoring_password: SecretStr | None = None
 

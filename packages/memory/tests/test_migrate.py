@@ -535,6 +535,34 @@ def test_waiting_for_the_advisory_lock_is_logged_until_it_is_free(
     assert len(waits) >= 2
 
 
+def test_a_seal_that_fails_after_a_failed_migration_does_not_hide_the_failing_file(
+    database: str,
+    migrations: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _write(migrations, "0001_first.sql", "CREATE TABLE first (id int);")
+    _write(migrations, "0002_broken.sql", "SELECT 1 / 0;")
+    seal = runner._seal  # pyright: ignore[reportPrivateUsage]
+    calls: list[int] = []
+
+    def failing_seal(connection: psycopg.Connection) -> None:
+        calls.append(1)
+        if len(calls) > 1:
+            raise psycopg.OperationalError("libpq says hunter2")
+        seal(connection)
+
+    monkeypatch.setattr(runner, "_seal", failing_seal)
+    with caplog.at_level(logging.WARNING), pytest.raises(MigrationFailedError) as failed:
+        migrate(database, migrations)
+
+    assert failed.value.file == "0002_broken.sql"
+    assert len(calls) == 2
+    (record,) = [r for r in caplog.records if "seal" in r.getMessage()]
+    assert getattr(record, "error", None) == "OperationalError"
+    assert "hunter2" not in caplog.text
+
+
 # --- what a run cannot be sure of ---------------------------------------------------------------
 
 

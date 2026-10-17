@@ -9,6 +9,7 @@ migrated there shares them.
 """
 
 import shutil
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from urllib.parse import quote, urlsplit
@@ -102,6 +103,62 @@ def test_a_role_made_beforehand_with_powers_loses_them(database: str, postgres: 
         assert member == (False,)
 
 
+def test_a_role_made_beforehand_loses_every_other_leftover_too(
+    database: str, postgres: str
+) -> None:
+    name = urlsplit(database).path.lstrip("/")
+    with psycopg.connect(postgres, autocommit=True) as admin:
+        for role in (RUNTIME, MONITORING):
+            ident = sql.Identifier(role)
+            admin.execute(
+                sql.SQL(
+                    "DO $$ BEGIN CREATE ROLE {} LOGIN; EXCEPTION WHEN duplicate_object THEN"
+                    " NULL; END $$"
+                ).format(ident)
+            )
+            admin.execute(
+                sql.SQL(
+                    "ALTER ROLE {} LOGIN PASSWORD 'old-password' CONNECTION LIMIT 3"
+                    " VALID UNTIL '2999-01-01'"
+                ).format(ident)
+            )
+            admin.execute(sql.SQL("ALTER ROLE {} SET work_mem = '1GB'").format(ident))
+            admin.execute(
+                sql.SQL("ALTER ROLE {} IN DATABASE {} SET statement_timeout = '1s'").format(
+                    ident, sql.Identifier(name)
+                )
+            )
+            admin.execute(
+                sql.SQL("GRANT CREATE, TEMPORARY ON DATABASE {} TO {}").format(
+                    sql.Identifier(name), ident
+                )
+            )
+    with psycopg.connect(database, autocommit=True) as admin:
+        for role in (RUNTIME, MONITORING):
+            admin.execute(
+                sql.SQL("GRANT CREATE ON SCHEMA public TO {}").format(sql.Identifier(role))
+            )
+
+    migrate(database)
+
+    with psycopg.connect(database) as connection:
+        for role in (RUNTIME, MONITORING):
+            row = connection.execute(
+                "SELECT rolcanlogin, rolconnlimit,"
+                " (rolvaliduntil IS NULL OR rolvaliduntil = 'infinity'), rolpassword IS NULL,"
+                " has_database_privilege(%(r)s, current_database(), 'CREATE'),"
+                " has_database_privilege(%(r)s, current_database(), 'TEMPORARY'),"
+                " has_schema_privilege(%(r)s, 'public', 'CREATE'),"
+                " (SELECT count(*) FROM pg_db_role_setting s WHERE s.setrole = a.oid)"
+                " FROM pg_authid a WHERE rolname = %(r)s",
+                {"r": role},
+            ).fetchone()
+            assert row == (False, -1, True, True, False, False, False, 0), role
+    # The login comes back with the next run, with the password it is configured with.
+    enable_logins(database, {RUNTIME: RUNTIME_PASSWORD})
+    psycopg.connect(_as(database, RUNTIME, RUNTIME_PASSWORD), connect_timeout=5).close()
+
+
 def test_two_databases_on_one_server_both_migrate(database: str, postgres: str) -> None:
     migrate(database)
     other = urlsplit(postgres)._replace(path="/roles_second").geturl()
@@ -146,6 +203,42 @@ def test_a_password_is_stored_only_as_a_verifier_and_can_be_changed(database: st
     assert RUNTIME_PASSWORD not in str(stored[0])
     with pytest.raises(psycopg.OperationalError):
         psycopg.connect(_as(database, RUNTIME, "first"), connect_timeout=5)
+    psycopg.connect(_as(database, RUNTIME, RUNTIME_PASSWORD), connect_timeout=5).close()
+
+
+def test_a_verifier_is_scram_whatever_the_server_hashes_passwords_with(
+    database: str, postgres: str
+) -> None:
+    migrate(database)
+    with psycopg.connect(postgres, autocommit=True) as admin:
+        admin.execute("ALTER SYSTEM SET password_encryption = 'md5'")
+        admin.execute("SELECT pg_reload_conf()")
+    try:
+        for _ in range(50):
+            with psycopg.connect(database) as probe:
+                if probe.execute("SHOW password_encryption").fetchone() == ("md5",):
+                    break
+            time.sleep(0.1)
+        else:
+            pytest.fail("the server did not take password_encryption = md5")
+        enable_logins(database, {RUNTIME: RUNTIME_PASSWORD})
+        with psycopg.connect(database) as connection:
+            stored = connection.execute(
+                "SELECT rolpassword FROM pg_authid WHERE rolname = %s", (RUNTIME,)
+            ).fetchone()
+        assert stored is not None
+        assert str(stored[0]).startswith("SCRAM-SHA-256$")
+    finally:
+        with psycopg.connect(postgres, autocommit=True) as admin:
+            admin.execute("ALTER SYSTEM RESET password_encryption")
+            admin.execute("SELECT pg_reload_conf()")
+
+
+def test_an_empty_password_is_refused_rather_than_clearing_the_verifier(database: str) -> None:
+    migrate(database)
+    enable_logins(database, {RUNTIME: RUNTIME_PASSWORD})
+    with pytest.raises(ValueError, match=RUNTIME):
+        enable_logins(database, {RUNTIME: ""})
     psycopg.connect(_as(database, RUNTIME, RUNTIME_PASSWORD), connect_timeout=5).close()
 
 
@@ -222,6 +315,20 @@ def test_the_runtime_role_keeps_none_of_its_privileges_on_schema_migrations_but_
             (RUNTIME,),
         ).fetchall()
     assert held == [("SELECT",)]
+
+
+def test_the_runtime_role_holds_exactly_the_row_privileges_on_a_table_there_was_before_it(
+    database: str, later: Path
+) -> None:
+    migrate(database, later)
+    with psycopg.connect(database) as connection:
+        held = connection.execute(
+            "SELECT p FROM unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE',"
+            "'REFERENCES','TRIGGER']) AS p"
+            " WHERE has_table_privilege(%s, 'cameras', p) ORDER BY p",
+            (RUNTIME,),
+        ).fetchall()
+        assert held == [("DELETE",), ("INSERT",), ("SELECT",), ("UPDATE",)]
 
 
 # --- What the monitoring role may do ---------------------------------------------------------

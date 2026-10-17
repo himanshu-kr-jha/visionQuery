@@ -10,8 +10,8 @@
 --
 -- Roles belong to the server, not to one database, so either may exist already (another
 -- database on the server was migrated first, or someone made it): each is made only when
--- missing, and stripped of any power and membership it has but those given here. Both are made
--- unable to log in and without a password: visionquery-migrate gives each its login, with the
+-- missing, and stripped of any power, membership, login, password, limit, setting and direct grant on this
+-- database it has but those given here. Both are made unable to log in and without a password: visionquery-migrate gives each its login, with the
 -- password it is configured with (visionquery.memory.roles), because a migration is shipped
 -- and must hold no secret.
 DO $$
@@ -26,9 +26,14 @@ BEGIN
             NULL;  -- made already, perhaps just now by a run against another database
         END;
         EXECUTE format(
-            'ALTER ROLE %I NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT',
+            'ALTER ROLE %I NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT'
+            ' NOLOGIN PASSWORD NULL CONNECTION LIMIT -1 VALID UNTIL ''infinity''',
             role_name
         );
+        EXECUTE format('ALTER ROLE %I RESET ALL', role_name);
+        EXECUTE format('ALTER ROLE %I IN DATABASE %I RESET ALL', role_name, current_database());
+        EXECUTE format('REVOKE ALL ON DATABASE %I FROM %I', current_database(), role_name);
+        EXECUTE format('REVOKE ALL ON SCHEMA public FROM %I', role_name);
         FOR membership IN
             SELECT g.rolname AS granted, b.rolname AS grantor
             FROM pg_auth_members m

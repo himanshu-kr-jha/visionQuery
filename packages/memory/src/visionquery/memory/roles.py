@@ -32,13 +32,18 @@ def enable_logins(url: str, passwords: Mapping[str, str], *, connect_timeout: in
     """Let each of the Deployment's roles in `passwords` log in, with its password.
 
     Run as a role that may alter them (the superuser that migrates). A role's previous password
-    stops working. Raises `ValueError`, changing nothing, when asked about any other role.
+    stops working. Raises `ValueError`, changing nothing, when asked about any other role or for an empty
+    password (which would leave the role without one).
     """
     if unknown := sorted(set(passwords) - set(ROLES)):
         raise ValueError(f"only {', '.join(ROLES)} are given logins, not {', '.join(unknown)}")
+    if empty := sorted(role for role, password in passwords.items() if not password):
+        raise ValueError(f"the password of {', '.join(empty)} is empty")
     with connect(url, connect_timeout) as connection:
         for role, password in passwords.items():
-            verifier = connection.pgconn.encrypt_password(password.encode(), role.encode())
+            verifier = connection.pgconn.encrypt_password(
+                password.encode(), role.encode(), algorithm=b"scram-sha-256"
+            )
             connection.execute(
                 sql.SQL("ALTER ROLE {} WITH LOGIN PASSWORD {}").format(
                     sql.Identifier(role), sql.Literal(verifier.decode())
