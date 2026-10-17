@@ -29,9 +29,7 @@ def _workspace_packages() -> tuple[str, ...]:
 
 PACKAGES = _workspace_packages()
 
-NO_REACHING_UP = (
-    "Perception, the recorder and the reconciler import only the memory and the runtime"
-)
+NO_REACHING_UP = "Perception, recorder and reconciler import only memory and runtime"
 ONLY_MEMORY_HOLDS_A_DRIVER = "Only memory imports a database driver"
 REASONER_THROUGH_TOOLS = "The reasoner reaches the memory only through tools"
 API_THROUGH_TOOLS = "The api reaches the memory only through tools, except its health probe"
@@ -52,7 +50,8 @@ PERCEPTION_AND_RECORDER_INDEPENDENT_ID = "perception-and-recorder-independent"
 KEPT = "Contracts: 8 kept, 0 broken."
 
 # The layering CLAUDE.md states, highest first: a package may import the layers below its
-# own, never one above it nor its sibling. Perception, the recorder and the reconciler sit beside them.
+# own, never one above it nor its sibling. Perception, the recorder and the reconciler sit
+# beside them.
 LAYERING = (("api", "reasoner"), ("tools",), ("linker",), ("memory",), ("runtime",))
 BESIDE = ("perception", "recorder", "reconciler")
 
@@ -439,12 +438,13 @@ def test_perception_and_recorder_contract_matches_claude_md() -> None:
     forbidden = _modules(NO_REACHING_UP_ID, "forbidden_modules")
     expected = set(PACKAGES) - set(BESIDE) - {"memory", "runtime"}
     assert sources == set(BESIDE), (
-        f"CLAUDE.md names only perception, recorder and reconciler as sources of [{NO_REACHING_UP_ID}]; "
-        "changing that is a CLAUDE.md change."
+        "CLAUDE.md names only perception, recorder and reconciler as sources of "
+        f"[{NO_REACHING_UP_ID}]; changing that is a CLAUDE.md change."
     )
     assert forbidden == expected, (
-        "Perception, the recorder and the reconciler may import only the memory and the runtime. Add new "
-        f"workspace packages to forbidden_modules of [{NO_REACHING_UP_ID}] in .importlinter "
+        "Perception, the recorder and the reconciler may import only the memory and the runtime. "
+        f"Add new workspace packages to forbidden_modules of [{NO_REACHING_UP_ID}] in "
+        ".importlinter "
         f"(missing: {sorted(expected - forbidden)}, unknown: {sorted(forbidden - expected)})."
     )
 

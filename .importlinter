@@ -41,7 +41,7 @@ exhaustive_ignores =
 ; or api can never stall what is being remembered.
 
 [importlinter:contract:no-reaching-up]
-name = Perception, the recorder and the reconciler import only the memory and the runtime
+name = Perception, recorder and reconciler import only memory and runtime
 type = forbidden
 source_modules =
     visionquery.perception
