@@ -25,6 +25,7 @@ import math
 import re
 import sys
 import threading
+import weakref
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from types import TracebackType
@@ -45,9 +46,9 @@ _STANDARD_ATTRIBUTES = frozenset(
 _SURROGATES = re.compile("[\ud800-\udfff]")
 _UNPRINTABLE = "<unprintable>"
 
-#: Marks a record factory or `makeRecord` as the runtime's scrubbing wrapper, so that
-#: configuring again finds it in place and does not wrap it a second time.
-_SCRUBS = "_visionquery_scrubs"
+#: The wrappers this module made, recognised by identity: a marker attribute would be copied
+#: by `functools.wraps` onto a library's own wrapper around ours, which would then be skipped.
+_OURS: weakref.WeakSet[Callable[..., Any]] = weakref.WeakSet()
 
 _exceptions = logging.Formatter()
 
@@ -66,11 +67,11 @@ def configure_logging(service: str, level: LogLevel, *, stream: TextIO | None = 
     root.handlers[:] = [handler]
     root.setLevel(level)
     factory = logging.getLogRecordFactory()
-    if not _scrubs(factory):
+    if factory not in _OURS:
         logging.setLogRecordFactory(_scrubbing_factory(factory))
     # Replaced on the class, process-wide, which covers loggers that already exist (ADR 0012).
     make_record = logging.Logger.makeRecord
-    if not _scrubs(make_record):
+    if make_record not in _OURS:
         logging.Logger.makeRecord = _scrubbing_make_record(make_record)
     logging.captureWarnings(True)
     sys.excepthook = _log_uncaught
@@ -151,15 +152,19 @@ def _rendered(record: logging.LogRecord) -> tuple[str, bool]:
         return f"{_text(record.msg)} {_UNPRINTABLE}", False
 
 
-def _scrubs(hook: object) -> bool:
-    """Whether `hook` is one of the runtime's scrubbing wrappers."""
-    return getattr(hook, _SCRUBS, False) is True
+def _scrub_extras(record: logging.LogRecord) -> None:
+    """Scrub every field on `record` that is not a standard attribute, whoever added it."""
+    for key in [key for key in record.__dict__ if key not in _STANDARD_ATTRIBUTES]:
+        try:
+            record.__dict__[key] = _kept_scrubbed(key, record.__dict__[key])
+        except Exception:  # logging must never raise into the caller
+            record.__dict__[key] = _UNPRINTABLE
 
 
 def _scrubbing_make_record(
     make_record: Callable[..., logging.LogRecord],
 ) -> Callable[..., logging.LogRecord]:
-    """`make_record`, then the `extra=` fields it attached, scrubbed."""
+    """`make_record`, then every non-standard field on the record it made, scrubbed."""
 
     def make_scrubbed_record(
         self: logging.Logger,
@@ -175,14 +180,10 @@ def _scrubbing_make_record(
         sinfo: str | None = None,
     ) -> logging.LogRecord:
         record = make_record(self, name, level, fn, lno, msg, args, exc_info, func, extra, sinfo)
-        for key in extra or ():
-            try:
-                record.__dict__[key] = _kept_scrubbed(key, record.__dict__[key])
-            except Exception:  # logging must never raise into the caller
-                record.__dict__[key] = _UNPRINTABLE
+        _scrub_extras(record)
         return record
 
-    setattr(make_scrubbed_record, _SCRUBS, True)
+    _OURS.add(make_scrubbed_record)
     return make_scrubbed_record
 
 
@@ -229,12 +230,23 @@ def _same(kept: object, original: object) -> bool:
 
 def _rebuilt(original: object, members: list[object]) -> object:
     """A container of `original`'s type holding `members`, or a plain tuple or list."""
-    kind = cast(type[Any], type(original))
-    make = getattr(kind, "_make", None)  # a namedtuple takes its fields one by one
-    try:
-        return make(members) if callable(make) else kind(members)
-    except Exception:
-        return tuple(members) if isinstance(original, tuple) else members
+    kind = cast(Callable[..., object], type(original))
+    make = cast(Callable[[list[object]], object] | None, getattr(kind, "_make", None))
+    # A namedtuple takes its fields one by one through `_make`; another tuple subclass may take
+    # its members one by one (`_Pair(url, name)`), or as one iterable.
+    attempts: list[Callable[[], object]] = []
+    if callable(make):
+        attempts.append(lambda: make(members))
+    else:
+        if isinstance(original, tuple) and kind is not tuple:
+            attempts.append(lambda: kind(*members))
+        attempts.append(lambda: kind(members))
+    for attempt in attempts:
+        try:
+            return attempt()
+        except Exception:
+            continue
+    return tuple(members) if isinstance(original, tuple) else members
 
 
 def _scrubbed_args(args: object) -> tuple[object, ...] | Mapping[str, object] | None:
@@ -259,9 +271,11 @@ def _scrubbing_factory(
     """A record factory making each record with `factory`, then scrubbing it."""
 
     def scrubbed_record(*args: Any, **kwargs: Any) -> logging.LogRecord:
-        return _scrub_record(factory(*args, **kwargs))
+        record = _scrub_record(factory(*args, **kwargs))
+        _scrub_extras(record)
+        return record
 
-    setattr(scrubbed_record, _SCRUBS, True)
+    _OURS.add(scrubbed_record)
     return scrubbed_record
 
 

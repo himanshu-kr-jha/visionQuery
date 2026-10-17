@@ -18,8 +18,10 @@ The record layer is two process-wide hooks, installed by `configure_logging`.
 The record factory (`logging.setLogRecordFactory`) scrubs the message, its arguments, the exception text and the stack.
 `Logger.makeRecord` is replaced on the class itself, for every logger in the process including those that already exist, to scrub the `extra=` fields, because the standard library attaches them only after the factory has run.
 Both wrap whatever factory and `makeRecord` are in place when `configure_logging` is called, rather than replacing them, so a library that installed its own first (OpenTelemetry's logging instrumentor adds trace ids this way) keeps the fields it adds.
-Both wrappers are marked as the runtime's, so configuring again does not wrap them a second time.
-That holds only while a wrapper of ours is the one in place: a library that wrapped ours on top keeps ours underneath, but one that saved the hook it found before ours and later restores it (OpenTelemetry's uninstrument does) removes ours with it, and the next `configure_logging` installs it again.
+The runtime remembers the wrapper functions it made and recognises them by identity, not by a marker attribute, because `functools.wraps` copies a marker onto a library's own wrapper around ours.
+Configuring again with one of ours in place does not wrap it a second time.
+Any other hook in place is wrapped, including a library's wrapper around ours: whatever that library adds after calling ours is then scrubbed too, and a library that saved the hook it found before ours and later restores it (OpenTelemetry's uninstrument does) has removed ours, so the next `configure_logging` installs it again.
+After every chained hook has run, the wrappers scrub every field on the record that is not a standard `LogRecord` attribute, so fields a chained factory or `makeRecord` adds outside `extra=` (a `record.request_url`, say) are scrubbed as `extra=` fields are.
 A container in `extra=` is left as it is when there is nothing to remove.
 When something in it has to be scrubbed, a namedtuple, list, tuple or set keeps its type if it can be rebuilt, and a mapping becomes a dict.
 

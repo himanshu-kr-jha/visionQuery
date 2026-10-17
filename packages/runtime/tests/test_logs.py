@@ -1,5 +1,6 @@
 """Logs are one JSON object per line, with the service and level, and never hold a credential."""
 
+import functools
 import io
 import json
 import logging
@@ -564,8 +565,102 @@ def test_a_tuple_subclass_with_nothing_to_scrub_is_left_as_it_is(output: io.Stri
 
 def test_a_tuple_subclass_that_cannot_be_rebuilt_is_still_a_tuple(output: io.StringIO) -> None:
     pair = _field("pair", _Pair(URL, "gate-3"))
-    assert isinstance(pair, tuple)
+    assert type(pair) is _Pair
     assert pair == (SCRUBBED, "gate-3")
+
+
+class _Opaque(tuple[str, ...]):
+    """A tuple subclass that cannot be rebuilt from members at all."""
+
+    def __new__(cls) -> _Opaque:
+        return super().__new__(cls, (URL,))
+
+
+def test_a_tuple_subclass_that_cannot_be_rebuilt_falls_back_to_a_plain_tuple(
+    output: io.StringIO,
+) -> None:
+    opaque = _field("opaque", _Opaque())
+    assert type(opaque) is tuple
+    assert opaque == (SCRUBBED,)
+
+
+def _read_by_foreign_handler(fmt: str, name: str = "some.library") -> str:
+    stream, library, handler = _foreign_logger(name, fmt)
+    try:
+        library.info("opening")
+    finally:
+        library.removeHandler(handler)
+        library.propagate = True
+    return stream.getvalue()
+
+
+def test_a_field_a_chained_factory_adds_outside_extra_is_scrubbed() -> None:
+    previous = logging.getLogRecordFactory()
+
+    def adding(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = previous(*args, **kwargs)
+        record.request_url = URL
+        record.password = "hunter2"
+        record.attempt = 3
+        return record
+
+    logging.setLogRecordFactory(adding)
+    configure_logging("recorder", "INFO", stream=io.StringIO())
+    assert _read_by_foreign_handler("%(request_url)s %(password)s %(attempt)d") == (
+        f"{SCRUBBED} *** 3\n"
+    )
+
+
+def test_a_field_a_chained_make_record_adds_outside_extra_is_scrubbed() -> None:
+    standard = logging.Logger.makeRecord
+
+    def make_record(self: logging.Logger, *args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = standard(self, *args, **kwargs)
+        record.request_url = URL
+        record.password = "hunter2"
+        return record
+
+    logging.Logger.makeRecord = make_record
+    configure_logging("recorder", "INFO", stream=io.StringIO())
+    assert _read_by_foreign_handler("%(request_url)s %(password)s") == f"{SCRUBBED} ***\n"
+
+
+def test_a_library_wrapping_our_factory_with_wraps_is_wrapped_again_on_configure() -> None:
+    configure_logging("recorder", "INFO", stream=io.StringIO())
+    ours = logging.getLogRecordFactory()
+
+    @functools.wraps(ours)
+    def outer(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = ours(*args, **kwargs)
+        record.request_url = URL
+        return record
+
+    logging.setLogRecordFactory(outer)
+    configure_logging("recorder", "INFO", stream=io.StringIO())
+    assert logging.getLogRecordFactory() is not outer
+    assert _read_by_foreign_handler("%(request_url)s") == f"{SCRUBBED}\n"
+    wrapped = logging.getLogRecordFactory()
+    configure_logging("recorder", "INFO", stream=io.StringIO())
+    assert logging.getLogRecordFactory() is wrapped
+
+
+def test_a_library_wrapping_our_make_record_with_wraps_is_wrapped_again_on_configure() -> None:
+    configure_logging("recorder", "INFO", stream=io.StringIO())
+    ours = logging.Logger.makeRecord
+
+    @functools.wraps(ours)
+    def outer(self: logging.Logger, *args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = ours(self, *args, **kwargs)
+        record.request_url = URL
+        return record
+
+    logging.Logger.makeRecord = outer
+    configure_logging("recorder", "INFO", stream=io.StringIO())
+    assert logging.Logger.makeRecord is not outer
+    assert _read_by_foreign_handler("%(request_url)s") == f"{SCRUBBED}\n"
+    wrapped = logging.Logger.makeRecord
+    configure_logging("recorder", "INFO", stream=io.StringIO())
+    assert logging.Logger.makeRecord is wrapped
 
 
 def test_a_field_a_filter_adds_on_the_runtimes_handler_is_scrubbed(output: io.StringIO) -> None:
