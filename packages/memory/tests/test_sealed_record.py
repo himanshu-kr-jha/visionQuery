@@ -78,3 +78,79 @@ def test_grants_made_on_an_existing_record_are_taken_back_by_the_next_run(
         )
     assert migrate(database, migrations) == ()
     _cannot_write(database, service)
+
+
+def _role(database: str, *names: str) -> None:
+    with psycopg.connect(database, autocommit=True) as admin:
+        for name in names:
+            admin.execute(sql.SQL("CREATE ROLE {}").format(sql.Identifier(name)))
+
+
+def _drop_roles(database: str, *names: str) -> None:
+    with psycopg.connect(database, autocommit=True) as admin:
+        for name in names:
+            admin.execute(sql.SQL("DROP OWNED BY {}").format(sql.Identifier(name)))
+            admin.execute(sql.SQL("DROP ROLE {}").format(sql.Identifier(name)))
+
+
+def test_a_grant_passed_on_with_grant_option_is_taken_back_down_the_chain(
+    database: str, migrations: Path
+) -> None:
+    first, second = f"chain_a_{uuid.uuid4().hex[:8]}", f"chain_b_{uuid.uuid4().hex[:8]}"
+    _role(database, first, second)
+    try:
+        migrate(database, migrations)
+        with psycopg.connect(database, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("GRANT INSERT ON schema_migrations TO {} WITH GRANT OPTION").format(
+                    sql.Identifier(first)
+                )
+            )
+            admin.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(first)))
+            admin.execute(
+                sql.SQL("GRANT INSERT ON schema_migrations TO {}").format(sql.Identifier(second))
+            )
+        # The next run must succeed, not fail on the dependent grant, and must take both back.
+        assert migrate(database, migrations) == ()
+        for role in (first, second):
+            with psycopg.connect(database, autocommit=True) as connection:
+                connection.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(role)))
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    connection.execute(WRITES[0].encode())
+    finally:
+        _drop_roles(database, first, second)
+
+
+@pytest.mark.parametrize("privilege", ["UPDATE", "INSERT"])
+def test_a_column_level_grant_is_taken_back(
+    database: str, migrations: Path, privilege: str
+) -> None:
+    role = f"column_{uuid.uuid4().hex[:8]}"
+    _role(database, role)
+    try:
+        migrate(database, migrations)
+        with psycopg.connect(database, autocommit=True) as admin:
+            admin.execute(
+                sql.SQL("GRANT {} (sha256) ON schema_migrations TO {}").format(
+                    sql.SQL(privilege), sql.Identifier(role)
+                )
+            )
+        assert migrate(database, migrations) == ()
+        with psycopg.connect(database, autocommit=True) as connection:
+            connection.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(role)))
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                connection.execute(b"UPDATE schema_migrations SET sha256 = sha256('x')")
+            with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                connection.execute(
+                    b"INSERT INTO schema_migrations (number, name, sha256)"
+                    b" VALUES (98, 'y', sha256('y'))"
+                )
+        with psycopg.connect(database, autocommit=True) as connection:
+            row = connection.execute(
+                "SELECT count(*) FROM information_schema.column_privileges"
+                " WHERE table_name = 'schema_migrations' AND grantee = %s",
+                (role,),
+            ).fetchone()
+            assert row == (0,)
+    finally:
+        _drop_roles(database, role)

@@ -241,12 +241,18 @@ CREATE TABLE IF NOT EXISTS public.schema_migrations (
 """
 
 
-#: Every privilege on the record held by a role other than its owner, except `SELECT`; the
-#: grantee 0 is PUBLIC.
+#: Every privilege on the record, or on any of its columns, held by a role other than its
+#: owner, except `SELECT`; the grantee 0 is PUBLIC. A column's privilege is collected with the
+#: table's, and revoking the table's one takes the column's with it.
 _GRANTS = b"""
-SELECT r.rolname, a.privilege_type
+SELECT DISTINCT r.rolname, a.privilege_type
 FROM pg_catalog.pg_class c
-CROSS JOIN LATERAL aclexplode(c.relacl) a
+CROSS JOIN LATERAL (
+    SELECT acl FROM (VALUES (c.relacl)) AS t(acl)
+    UNION ALL
+    SELECT attacl FROM pg_catalog.pg_attribute WHERE attrelid = c.oid AND NOT attisdropped
+) AS l(acl)
+CROSS JOIN LATERAL aclexplode(l.acl) a
 LEFT JOIN pg_catalog.pg_roles r ON r.oid = a.grantee
 WHERE c.oid = 'public.schema_migrations'::regclass
   AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT'
@@ -281,7 +287,7 @@ def _seal(connection: psycopg.Connection) -> None:
     for grantee, privileges in held.items():
         keywords: list[LiteralString] = ["ALL"] if "ALL" in privileges else sorted(privileges)
         connection.execute(
-            sql.SQL("REVOKE {} ON TABLE public.schema_migrations FROM {}").format(
+            sql.SQL("REVOKE {} ON TABLE public.schema_migrations FROM {} CASCADE").format(
                 sql.SQL(", ").join(sql.SQL(keyword) for keyword in keywords),
                 sql.SQL("PUBLIC") if grantee is None else sql.Identifier(grantee),
             )
