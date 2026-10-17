@@ -37,8 +37,8 @@ A GPU is needed only for Triton (the `gpu` profile), and then with NVIDIA's cont
    Copy `.env.example` to `.env` (git ignores it) and set the three passwords it leaves empty, for example each to the output of `openssl rand -hex 24`.
    Every other variable has a working default, and `.env.example` explains each.
 2. Start it: `make up`.
-   It is `docker compose up -d --wait` followed by a check that the database migrations succeeded, which `--wait` alone does not make: a failed migration then stops `make up` with an error and the migration's log.
-   This builds the VisionQuery image, starts Postgres (TimescaleDB and pgvector) and MediaMTX, applies the database migrations, and returns once every service is healthy.
+   It builds the images (rebuilding only what changed, so edited code is what runs; a bare `docker compose up` builds only an image that is missing and never rebuilds), runs `docker compose up -d --wait`, and then checks that the database migrations succeeded, which `--wait` alone does not make: a failed migration stops `make up` with an error and the migration's log.
+   It starts Postgres (TimescaleDB and pgvector) and MediaMTX, applies the database migrations, and returns once every service is healthy.
    Postgres listens on `127.0.0.1:15432` (user and database `visionquery`), MediaMTX on `127.0.0.1:8554` (RTSP) and `127.0.0.1:9997` (API, user `visionquery`).
 3. Add what you need with profiles:
    - `make up COMPOSE_PROFILES=observability` (or `--profile observability` with `docker compose`): Prometheus on <http://127.0.0.1:9090> scraping every service, and Grafana on <http://127.0.0.1:3000> (user `admin`) reading it.

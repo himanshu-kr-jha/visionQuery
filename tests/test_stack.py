@@ -120,13 +120,15 @@ class Stack:
     files: tuple[Path, ...]
     profiles: tuple[str, ...]
     env: dict[str, str] = field(repr=False)
+    #: The tree the project is built from, which is the repository unless a test copied it.
+    root: Path = ROOT
 
     def secret(self, name: str) -> str:
         return self.env[name]
 
     def command(self) -> list[str]:
         """`docker compose` aimed at this project, its files and its profiles."""
-        command = ["docker", "compose", "-p", self.project, "--project-directory", str(ROOT)]
+        command = ["docker", "compose", "-p", self.project, "--project-directory", str(self.root)]
         for file in self.files:
             command += ["-f", str(file)]
         # Never a developer's `.env`: every value comes from `.env.example` or `env`.
@@ -139,7 +141,7 @@ class Stack:
         """A target of the Makefile, run against this project."""
         return subprocess.run(
             ["make", "--no-print-directory", target, f"COMPOSE={shlex.join(self.command())}"],
-            cwd=ROOT,
+            cwd=self.root,
             env=self.env,
             capture_output=True,
             text=True,
@@ -152,7 +154,7 @@ class Stack:
     ) -> subprocess.CompletedProcess[str]:
         result = subprocess.run(
             [*self.command(), *args],
-            cwd=ROOT,
+            cwd=self.root,
             env=self.env,
             capture_output=True,
             text=True,
@@ -193,6 +195,7 @@ def _new_stack(
     profiles: Iterable[str] = (),
     files: Iterable[Path] = (),
     environment: Mapping[str, str] | None = None,
+    root: Path = ROOT,
 ) -> Stack:
     """A project of its own, with fresh secrets and every host port ephemeral."""
     env = {k: v for k, v in os.environ.items() if not k.startswith(("VISIONQUERY_", "COMPOSE_"))}
@@ -204,9 +207,10 @@ def _new_stack(
     env |= environment or {}
     return Stack(
         project=f"{PREFIX}{uuid.uuid4().hex[:10]}",
-        files=(COMPOSE, *files),
+        files=(root / "compose.yaml", *files),
         profiles=tuple(profiles),
         env=env,
+        root=root,
     )
 
 
@@ -345,20 +349,73 @@ def test_the_awkward_password_reached_both_postgres_and_the_migrations(
     assert default_stack.containers()["migrate"]["ExitCode"] == 0
 
 
+def _image_id(reference: str) -> str:
+    return subprocess.run(
+        ["docker", "image", "inspect", "--format", "{{.Id}}", reference],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+
 def test_up_on_an_unchanged_tree_recreates_nothing(default_stack: Stack) -> None:
-    # `up` must not rebuild, or the image ID changes and mediamtx and migrate are recreated,
-    # which drops live streams. `make up` also runs migrate again, which is safe.
+    # `make up` builds first, and the build must give the same image ID when nothing changed
+    # (no attestation, whose timestamp would change it), or Compose recreates migrate and
+    # mediamtx, which drops live streams. `make up` also runs migrate again, which is safe.
     def identifiers() -> dict[str, str]:
         return {name: c["ID"] for name, c in default_stack.containers().items()}
 
-    before = identifiers()
+    before, image = identifiers(), _image_id("visionquery:dev")
     for _ in range(2):
         up = default_stack.make("up")
         assert up.returncode == 0, up.stdout + up.stderr
+        assert _image_id("visionquery:dev") == image
         assert identifiers() == before
     default_stack.compose("up", "--detach")
     assert identifiers() == before
     assert default_stack.containers()["migrate"]["ExitCode"] == 0
+
+
+def test_make_up_runs_changed_code_and_recreates_only_what_changed(tmp_path: Path) -> None:
+    # A copy of what the build uses, never the repository itself, under an image name of its
+    # own so that no other project's `visionquery:dev` is rebuilt under it.
+    root = tmp_path / "tree"
+    root.mkdir()
+    for name in ("Makefile", "Dockerfile", "pyproject.toml", "uv.lock", ".python-version"):
+        shutil.copy(ROOT / name, root / name)
+    shutil.copy(ROOT / ".dockerignore", root / ".dockerignore")
+    ignore = shutil.ignore_patterns("__pycache__", "*.pyc")
+    shutil.copytree(ROOT / "packages", root / "packages", ignore=ignore)
+    shutil.copytree(ROOT / "docker" / "mediamtx", root / "docker" / "mediamtx")
+    image = f"{PREFIX}image-{uuid.uuid4().hex[:10]}:dev"
+    compose = (ROOT / "compose.yaml").read_text()
+    assert "image: visionquery:dev" in compose
+    (root / "compose.yaml").write_text(compose.replace("image: visionquery:dev", f"image: {image}"))
+    stack = _new_stack(root=root)
+    try:
+        up = stack.make("up", timeout=BUILD_TIMEOUT)
+        assert up.returncode == 0, up.stdout + up.stderr + stack.diagnostics()
+        before = {name: c["ID"] for name, c in stack.containers().items()}
+        first_image = _image_id(image)
+        marker = "migrated-after-the-edit"
+        assert marker not in stack.compose("logs", "migrate").stdout
+
+        source = root / "packages/memory/src/visionquery/memory/migrate.py"
+        edited = source.read_text().replace('"migrated: %d applied"', f'"{marker}: %d applied"')
+        assert edited != source.read_text()
+        source.write_text(edited)
+        up = stack.make("up", timeout=BUILD_TIMEOUT)
+        assert up.returncode == 0, up.stdout + up.stderr + stack.diagnostics()
+
+        assert _image_id(image) != first_image
+        assert marker in stack.compose("logs", "migrate").stdout
+        after = {name: c["ID"] for name, c in stack.containers().items()}
+        assert after["migrate"] != before["migrate"]
+        assert after["mediamtx"] == before["mediamtx"]
+        assert after["postgres"] == before["postgres"]
+    finally:
+        stack.compose("down", "--volumes", "--remove-orphans", timeout=300, check=False)
+        subprocess.run(["docker", "image", "rm", image], capture_output=True, check=False)
 
 
 def test_make_up_fails_visibly_when_the_migrations_fail(tmp_path: Path) -> None:

@@ -248,8 +248,9 @@ def test_every_image_is_pinned_to_a_version_and_its_digest() -> None:
 
 def test_up_builds_an_image_only_when_it_is_missing() -> None:
     # A rebuild gives a new image ID even when no layer changed, and Compose recreates a
-    # container whose image ID changed, which drops live streams. So `up` must not rebuild;
-    # `up --build` is the explicit way. (tests/test_stack.py checks that `up` recreates nothing.)
+    # container whose image ID changed, which drops live streams. So a bare `up` must not
+    # rebuild; `make up` builds first, without attestations, which keeps the ID stable
+    # (the next test, and tests/test_stack.py, which checks that `make up` recreates nothing).
     built = {n: s for n, s in _services(_config()).items() if "build" in s}
     assert set(built) >= {"migrate", "mediamtx"}
     assert {name: s.get("pull_policy") for name, s in built.items()} == dict.fromkeys(
@@ -419,3 +420,21 @@ def test_mediamtx_serves_its_api_and_metrics_and_records_nothing() -> None:
     assert config["playback"] is False
     # Only what cameras and the live view use is open.
     assert [config[p] for p in ("rtmp", "srt", "hls", "moq", "pprof")] == [False] * 5
+
+
+def test_make_up_builds_first_with_attestations_off() -> None:
+    # `pull_policy: missing` alone would leave a stale image running after an edit. `make up`
+    # therefore builds first; BuildKit's attestations are off for every Compose call, because
+    # they carry a timestamp that gives each build a new image ID and so recreates containers.
+    makefile = (ROOT / "Makefile").read_text()
+    assert re.search(r"^export BUILDX_NO_DEFAULT_ATTESTATIONS\s*[:?]?=\s*1\s*$", makefile, re.M)
+    dry_run = subprocess.run(
+        ["make", "--dry-run", "--no-print-directory", "up", "COMPOSE=compose-under-test"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.splitlines()
+    commands = [line for line in dry_run if line.startswith("compose-under-test ")]
+    assert commands[0] == "compose-under-test build"
+    assert commands[1].startswith("compose-under-test up --detach migrate")

@@ -5,9 +5,11 @@
 #   make up COMPOSE_PROFILES=observability     adds Prometheus and Grafana
 #   make up COMPOSE_PROFILES=gpu               adds Triton on the host's GPUs
 #   make down                         stop; `docker compose down --volumes` deletes the data too
-# `make up` is `docker compose up -d --wait` and then checks that `migrate` exited 0, which
-# `--wait` does not: it returns while a migration is still running. Images are built when
-# missing only: after changing code or a Dockerfile, run `docker compose up --build`.
+# `make up` builds the images (so changed code is what runs), brings the stack up and checks
+# that `migrate` exited 0, which `docker compose up --wait` does not: it returns while a
+# migration is still running. A bare `docker compose up` builds only a missing image, so after
+# changing code or a Dockerfile use `make up`, or run
+# `BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose build` first.
 #
 # Profiles:
 #   gpu            Triton, reserving every GPU. On a machine without one, add
@@ -32,11 +34,13 @@ x-visionquery: &visionquery
   <<: *service
   image: visionquery:dev
   build: .
-  # Built when the image is missing, never rebuilt by a plain `up`. A rebuild gives a new
-  # image ID even when no layer changed (BuildKit's provenance attestation carries a
-  # timestamp, and Compose 5.1 ignores `provenance: false` in this file), and Compose recreates
-  # a container whose image ID changed, so every `up` would recreate migrate and mediamtx and
-  # drop live streams. Rebuild on purpose: `docker compose up --build`, or `docker compose build`.
+  # Built when the image is missing, never rebuilt by a bare `docker compose up`, which so
+  # leaves running streams alone. `make up` builds first, with BuildKit's attestations off
+  # (BUILDX_NO_DEFAULT_ATTESTATIONS=1, which Compose 5.1 cannot be told in this file): an
+  # attestation carries a timestamp, so every build would give a new image ID even when no
+  # layer changed, and Compose recreates a container whose image ID changed, which would drop
+  # live streams on every `make up`. Without attestations an unchanged tree gives the same ID,
+  # so only the service whose code changed is recreated.
   pull_policy: missing
   read_only: true
   tmpfs: [/tmp]
@@ -71,11 +75,11 @@ services:
       start_interval: 1s
 
   # Brings the schema up to date, then exits; safe to run on every start (ADR 0011).
-# `up --wait` returns while this still runs, so start the stack with `make up`, which also
-# fails when it did not exit 0.
-# EVERY long-running service built from the VisionQuery image (recorder, linker, api...) must
-# declare `depends_on: { migrate: { condition: service_completed_successfully } }`;
-# tests/test_compose.py fails until it does.
+  # `up --wait` returns while this still runs, so start the stack with `make up`, which also
+  # fails when it did not exit 0.
+  # EVERY long-running service built from the VisionQuery image (recorder, linker, api...) must
+  # declare `depends_on: { migrate: { condition: service_completed_successfully } }`;
+  # tests/test_compose.py fails until it does.
   migrate:
     <<: *visionquery
     restart: "no"

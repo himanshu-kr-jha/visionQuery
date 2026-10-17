@@ -40,6 +40,14 @@ check: lint typecheck contracts test
 #   make up COMPOSE_PROFILES=observability
 #   make up COMPOSE_FILE=compose.yaml:compose.no-gpu.yaml COMPOSE_PROFILES=gpu
 # COMPOSE is the command to run, which the stack tests replace to target a project of their own.
+#
+# `up` builds first, so that changed code is what runs: Compose's `pull_policy: missing` (see
+# compose.yaml) builds only an absent image, which would leave a stale one running after an
+# edit. Building is cheap on an unchanged tree because every layer is cached, and the image ID
+# stays the same only when BuildKit adds no attestation, whose timestamp would otherwise give
+# a new ID on every build and have Compose recreate migrate and mediamtx on every `up`.
+# The variable is exported for every Compose call, including a `docker compose build` run by hand.
+export BUILDX_NO_DEFAULT_ATTESTATIONS = 1
 COMPOSE ?= docker compose
 
 define LONG_RUNNING
@@ -50,6 +58,7 @@ endef
 export LONG_RUNNING
 
 up:
+	$(COMPOSE) build
 	$(COMPOSE) up --detach migrate
 	@if ! $(COMPOSE) wait migrate >/dev/null 2>&1; then \
 		echo "make up: the database migrations failed. migrate said:" >&2; \

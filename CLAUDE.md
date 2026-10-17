@@ -123,12 +123,12 @@ Run everything from the repository root.
 | A single test | `uv run pytest tests/test_import_contracts.py::test_the_workspace_keeps_every_contract` |
 | Every check CI runs | `make check` |
 | Apply the database migrations | `VISIONQUERY_DATABASE__URL=postgresql://... uv run visionquery-migrate` |
-| Start the stack (Postgres, migrations, MediaMTX); fails if the migrations fail | `make up` |
+| Start the stack (Postgres, migrations, MediaMTX); rebuilds what changed first, and fails if the migrations fail | `make up` |
 | ...with Prometheus and Grafana | `make up COMPOSE_PROFILES=observability` |
 | ...with Triton on the GPUs | `make up COMPOSE_PROFILES=gpu` |
 | ...with Triton on a machine without a GPU | `make up COMPOSE_FILE=compose.yaml:compose.no-gpu.yaml COMPOSE_PROFILES=gpu` |
 | Stop the stack (`docker compose down --volumes` deletes its data) | `make down` |
-| Build the VisionQuery image after changing code (`up` builds only a missing image) | `docker compose build` or `docker compose up --build` |
+| Rebuild after changing code: `make up` does it; a bare `docker compose up` builds only a missing image | `make up` |
 | Stack tests (bring the stack up for real) | `make test-stack` (`uv run pytest -m stack`) |
 
 `make lint` runs both ruff commands.
