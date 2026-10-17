@@ -176,8 +176,8 @@ def test_removing_a_pushed_camera_forgets_its_publish_credentials(
     "statement",
     [
         # A pulled camera publishes nothing.
-        "INSERT INTO cameras (name, pull_url, publish_user, publish_password_hash) "
-        "VALUES ('Gate 2', 'rtsp://10.0.0.7/s', 'gate', '$argon2id$x')",
+        "INSERT INTO cameras (name, pull_url, pull_target, publish_user, "
+        "publish_password_hash) VALUES ('Gate 2', 'rtsp://10.0.0.7', '/s', 'gate', '$argon2id$x')",
         # A user without a password, or a password without a user.
         "INSERT INTO cameras (name, push_path, publish_user) VALUES ('Dock', 'dock', 'dock')",
         "INSERT INTO cameras (name, push_path, publish_password_hash) "
@@ -218,13 +218,22 @@ def test_a_pulled_cameras_url_is_changed(registry: CameraRegistry, migrated: str
     # The path MediaMTX pulls it into is its id's, whatever the URL.
     assert (changed.id, changed.name, changed.path) == (camera.id, camera.name, camera.path)
     assert registry.get(camera.id) == changed
-    # And to one without credentials, which are then forgotten.
-    registry.change_pull_url(camera.id, CameraUrl("rtsp://10.0.0.9/s"))
+    # And to one without credentials, which are then forgotten, with the path and query kept
+    # apart from the public part.
+    registry.change_pull_url(camera.id, CameraUrl("rtsp://10.0.0.9/s?token=t0k3n"))
     with psycopg.connect(migrated) as connection:
         row = connection.execute(
-            "SELECT pull_url, pull_credentials FROM cameras WHERE id = %s", (camera.id,)
+            "SELECT pull_url, pull_credentials, pull_target FROM cameras WHERE id = %s",
+            (camera.id,),
         ).fetchone()
-    assert row == ("rtsp://10.0.0.9/s", None)
+    assert row == ("rtsp://10.0.0.9", None, "/s?token=t0k3n")
+    # A URL with no path or query is stored with an empty target, which the database requires.
+    registry.change_pull_url(camera.id, CameraUrl("rtsp://10.0.0.9"))
+    with psycopg.connect(migrated) as connection:
+        row = connection.execute(
+            "SELECT pull_url, pull_target FROM cameras WHERE id = %s", (camera.id,)
+        ).fetchone()
+    assert row == ("rtsp://10.0.0.9", "")
 
 
 def test_an_invalid_new_url_is_refused_and_the_old_one_kept(registry: CameraRegistry) -> None:

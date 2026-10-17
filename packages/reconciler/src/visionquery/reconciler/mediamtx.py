@@ -1,12 +1,14 @@
 """MediaMTX's control API (v3), as much of it as the reconciler needs.
 
 Only path configuration and the internal users are touched. A failure is a `MediaMTXError` whose
-message names what was asked and why it failed, scrubbed of URL credentials: MediaMTX's own
-error text may quote a path's source, which is a camera's URL with its password.
+message names what was asked and why it failed, with every URL in it replaced by `***`:
+MediaMTX's own error text may quote a path's source, which is a camera's URL, and a camera's
+URL is secret in its path and query as well as its password (ADR 0014).
 """
 
 import base64
 import json
+import re
 import urllib.error
 import urllib.request
 from typing import Any, cast
@@ -21,6 +23,7 @@ __all__ = ["REDACTED", "Json", "MediaMTXClient", "MediaMTXError"]
 REDACTED = "<redacted>"
 #: Paths listed per page; MediaMTX's own default is 100.
 _PAGE = 1000
+_URL = re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://\S*")
 
 type Json = dict[str, Any]
 
@@ -105,7 +108,7 @@ class MediaMTXClient:
         except ValueError:
             failed = f"MediaMTX answered {asked} with something that is not JSON"
         # Raised outside the `except`, so no traceback carries the request or its body.
-        raise MediaMTXError(scrub(failed))
+        raise MediaMTXError(scrub(_URL.sub("***", failed)))
 
 
 def _quoted(name: str) -> str:
