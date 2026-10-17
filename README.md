@@ -28,13 +28,50 @@ Everything lives in one PostgreSQL database (TimescaleDB for time partitioning, 
 
 ## Setup
 
-The project is being scaffolded (milestone M0): the stack runs, with fake cameras for development, but nothing watches them yet.
+The scaffold is in place (milestone M0): the stack runs, with fake cameras for development, but nothing watches them yet.
 
-You need Docker Engine 25 or newer with the Compose plugin v2.30 or newer (`docker compose wait`; the Dockerfile frontend that `COPY --parents` needs is pinned in the Dockerfile and fetched by BuildKit) and, to work on the code, [uv](https://docs.astral.sh/uv/) and Node.js 24 with npm (`web/.nvmrc`; `make sync` installs the Python packages and the web app's from their lockfiles).
-A GPU is needed only for Triton (the `gpu` profile), and then with NVIDIA's container toolkit.
+### Prerequisites
 
-1. Configure the stack.
-   Copy `.env.example` to `.env` (git ignores it) and set the three passwords it leaves empty, for example each to the output of `openssl rand -hex 24`.
+CI runs the setup below on Ubuntu 24.04 (x86_64); any Linux with these should do.
+
+- git, GNU Make, Bash and curl.
+- Docker Engine 25.0 or newer ([install](https://docs.docker.com/engine/install/)), with its Compose plugin 2.30 or newer (`make up` uses `docker compose wait`) and its buildx plugin 0.17 or newer (Compose builds through it), which Docker's packages install as `docker-compose-plugin` and `docker-buildx-plugin`.
+  The Dockerfile frontend that `COPY --parents` needs is pinned in the Dockerfile and fetched by BuildKit.
+  Your user must be able to run `docker` without sudo ([post-installation steps](https://docs.docker.com/engine/install/linux-postinstall/)).
+- [uv](https://docs.astral.sh/uv/): `curl -LsSf https://astral.sh/uv/install.sh | sh`.
+  It installs the Python that `.python-version` pins by itself.
+- Node.js 24 with npm, the major `web/.nvmrc` pins (npm refuses any other), for example with [nvm](https://github.com/nvm-sh/nvm): `nvm install 24`.
+- Only for Triton (the `gpu` profile) on a GPU: an NVIDIA GPU with an NVIDIA driver recent enough for the Triton release `compose.yaml` pins (26.09, built on CUDA 13: driver 580 or newer), and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) set up for Docker (`sudo nvidia-ctk runtime configure --runtime=docker`, then restart Docker).
+  Without a GPU, Triton runs on the CPU (see the profiles below), and nothing else needs one.
+
+`make bootstrap` checks that uv, git and curl are installed, the Docker Engine, Compose and buildx versions and that the Docker daemon is reachable, and Node.js's major and npm.
+It does not check GNU Make and Bash (they ran it), uv's version, or the GPU's, and it names any problem with how to fix it, before changing anything.
+
+### From a fresh clone
+
+```sh
+git clone https://github.com/himanshu-kr-jha/visionQuery.git
+cd visionQuery
+make bootstrap
+make up COMPOSE_PROFILES=dev
+curl --silent --show-error --fail-with-body --max-time 10 http://127.0.0.1:8080/health
+docker compose --profile dev exec fake-cameras ffmpeg -v error -rtsp_transport tcp -timeout 30000000 -i rtsp://mediamtx:8554/gym-g299 -frames:v 1 -f null -
+make down VOLUMES=1
+```
+
+1. `make bootstrap` checks the prerequisites, writes `.env` from `.env.example` with a generated password for each of the three secrets it leaves empty (an `.env` that exists is never changed, only checked to set them), and installs the Python packages and the web app's from their lockfiles (`make sync`).
+   Running it again is safe.
+2. `make up COMPOSE_PROFILES=dev` builds the images and starts the stack with fake cameras, returning once every service is healthy (the first build takes a few minutes).
+3. The api answers `{"status":"healthy", ...}` once it reaches the database, and the last check reads one frame from a fake camera through MediaMTX, from inside the stack, so it needs nothing more on the machine.
+   Before `make fetch-samples` has downloaded the videos, the cameras show a test pattern.
+4. `make down VOLUMES=1` stops the stack and deletes its data; `make down` keeps the data.
+
+CI's `setup-guide` job runs exactly these commands on a clean runner (its checkout is the clone), so they cannot rot.
+
+### Running the stack
+
+1. Configure the stack, which `make bootstrap` does for you.
+   It is `.env` (git ignores it), a copy of `.env.example` with the three passwords it leaves empty set, for example each to the output of `openssl rand -hex 24`.
    Every other variable has a working default, and `.env.example` explains each.
 2. Start it: `make up`.
    It builds the images (rebuilding only what changed, so edited code is what runs; a bare `docker compose up` builds only an image that is absent and never rebuilds), then starts Postgres and runs the database migrations and waits for them to succeed (`MIGRATE_TIMEOUT`, 300 s), and only then starts the long-running services and waits for their healthchecks (`WAIT_TIMEOUT`, 300 s).
@@ -98,7 +135,7 @@ Branches follow git-flow (`main`, `develop`, `feature/<issue>-<slug>`, `release/
 The details are in [`CLAUDE.md`](CLAUDE.md), which serves as the working guide for both people and coding agents.
 
 `make check` runs locally what CI runs on every PR, except the stack tests (`make test-stack`).
-CI (`.github/workflows/ci.yml`) runs lint (ruff, ruff format, actionlint), the type check, the import contracts, the Python tests against Postgres, the web app's lint, type check and tests with its API types check, the Compose stack tests, and a check that no commit, PR title or PR body carries agent attribution and that the PR title is a Conventional Commit.
+CI (`.github/workflows/ci.yml`) runs lint (ruff, ruff format, actionlint), the type check, the import contracts, the Python tests against Postgres, the web app's lint, type check and tests with its API types check, the Compose stack tests, the setup above from a fresh clone, and a check that no commit, PR title or PR body carries agent attribution and that the PR title is a Conventional Commit.
 `develop` and `main` accept changes only through a PR on which every one of those checks passed.
 
 To have git run the fast checks for you, opt in to the pre-commit hooks:

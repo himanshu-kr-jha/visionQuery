@@ -5,11 +5,18 @@
 SHELL := bash
 .SHELLFLAGS := -euo pipefail -c
 
-.PHONY: sync lint format typecheck contracts test test-stack check branch-rules up down fetch-samples
+.PHONY: bootstrap build sync lint format typecheck contracts test test-stack check branch-rules up down fetch-samples
 .PHONY: web web-lint web-typecheck web-test api-types api-types-check
 
 # The web app (web/) needs Node 24 (web/.nvmrc) and installs from its lockfile.
 WEB := npm --prefix web
+
+# From a fresh clone to a development environment: checks the prerequisites (naming each that
+# is missing or too old), writes .env from .env.example with generated passwords unless .env
+# exists, and runs `make sync`. Without the project, so nothing is synced before the checks.
+bootstrap:
+	@command -v uv >/dev/null || { echo "make bootstrap: uv is not installed: install it (https://docs.astral.sh/uv/getting-started/installation/), open a new shell, and run make bootstrap again" >&2; exit 1; }
+	uv run --no-project scripts/bootstrap.py
 
 sync:
 	uv sync --locked
@@ -102,8 +109,11 @@ ONE_SHOTS ?= migrate triton-scrape
 MIGRATE_TIMEOUT ?= 300
 WAIT_TIMEOUT ?= 300
 
-up:
+# Builds the images of the enabled profiles, as `make up` does before starting anything.
+build:
 	$(COMPOSE) build
+
+up: build
 	$(COMPOSE) up --detach migrate
 	timeout $(MIGRATE_TIMEOUT) $(COMPOSE) wait migrate >/dev/null || { status=$$?; \
 		if [ $$status -eq 124 ]; then echo "make up: the database migrations did not finish within $(MIGRATE_TIMEOUT) s (MIGRATE_TIMEOUT). migrate said:" >&2; \

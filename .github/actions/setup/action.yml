@@ -2,12 +2,17 @@ name: Set up the workspace
 description: >-
   Installs uv (which installs the Python .python-version pins) and the workspace from uv.lock,
   and with `web: true` Node from web/.nvmrc and the web app from its lockfile too, as
-  `make sync` does on a developer's machine. uv's and npm's downloads are cached.
+  `make sync` does on a developer's machine. uv's and npm's downloads are cached. With
+  `sync: false` it installs only the tools, as the README's prerequisites have a developer do,
+  and leaves installing the workspace to the job.
 
 inputs:
   web:
     description: Also install Node and the web app's dependencies.
     default: "false"
+  sync:
+    description: Install the workspace (and with `web`, the web app) from the lockfiles.
+    default: "true"
 
 runs:
   using: composite
@@ -29,9 +34,9 @@ runs:
         node-version-file: web/.nvmrc
         cache: npm
         cache-dependency-path: web/package-lock.json
-    - if: inputs.web == 'true'
+    - if: inputs.sync == 'true' && inputs.web == 'true'
       shell: bash
       run: make sync
-    - if: inputs.web != 'true'
+    - if: inputs.sync == 'true' && inputs.web != 'true'
       shell: bash
       run: uv sync --locked

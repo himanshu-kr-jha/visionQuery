@@ -29,6 +29,9 @@ Always verify in a detached scratch worktree of the pushed head, never in the ch
    A `uv sync --locked` failure (lockfile out of date) is a blocking finding.
    Use a separate test database or compose project; never touch the developer's dev database.
    Run the test suite twice when it exists; anything that passes once and fails once is a flaky test and a blocking finding.
+   Stack tests: run the full set (`make test-stack`) once per PR, on the head you pass as ready for PR, once everything else has passed there.
+   A verification that finds the branch not ready, and a re-verification after an intermediate fix round, runs `make check` plus only the stack tests the change touches (`uv run pytest -m stack tests/test_stack.py::<test>`).
+   Once CI runs on the PR, its `stack` job is the stack-test run for every later head: a local stack run is then optional, and the tech lead tells you when it applies.
 3. For each acceptance criterion, find the test that covers it and judge whether it really does.
    Missing tests for the acceptance criteria of an issue that changes behaviour are a blocking finding.
    For a docs-only or config-only change, judge each criterion by re-reading the changed files instead.
