@@ -21,7 +21,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 __all__ = ["ClockState", "Reading", "TimeBase", "read_kernel_clock"]
@@ -110,19 +110,25 @@ class TimeBase:
         self._source = source
         self._anchor: _Anchor | None = None
 
-    def anchor(self) -> None:
-        """Read the wall, the monotonic clock and the time source together.
+    def anchor(self) -> timedelta:
+        """Read the wall, the monotonic clock and the time source together; how far that moved
+        the time (nothing the first time).
 
         Called when a Segment opens. A synchronised source replaces the anchor; an
         unsynchronised one keeps the last good anchor, or, with none, falls back to the wall
         clock and marks it unverified.
         """
+        before = self._anchor
         reading = self._source()
         wall, mono = self._wall(), self._mono()
         if reading.synchronised:
             self._anchor = _Anchor(wall, mono, reading, verified=True)
         elif self._anchor is None or not self._anchor.verified:
             self._anchor = _Anchor(wall, mono, Reading("wall", False), verified=False)
+        if before is None:
+            return timedelta(0)
+        after = self._anchor
+        return timedelta(seconds=(after.wall - after.mono) - (before.wall - before.mono))
 
     def now(self) -> datetime:
         """The time now, on this timebase; anchors first when nothing has."""

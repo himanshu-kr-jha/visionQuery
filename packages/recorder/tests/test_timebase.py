@@ -6,28 +6,11 @@ forward by a clock nobody can step. Each Segment says whether that reading was N
 """
 
 import sys
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
-from visionquery.recorder.timebase import Reading, TimeBase, read_kernel_clock
-
-T0 = datetime(2026, 10, 6, 10, 0, tzinfo=UTC).timestamp()
-
-
-class Clocks:
-    """A wall clock, a monotonic clock and a time source, each moved by hand."""
-
-    def __init__(self, *, synchronised: bool = True) -> None:
-        self.wall = T0
-        self.mono = 1000.0
-        self.reading = Reading(source="ntp", synchronised=synchronised, est_error_us=250)
-
-    def tick(self, seconds: float) -> None:
-        self.wall += seconds
-        self.mono += seconds
-
-    def timebase(self) -> TimeBase:
-        return TimeBase(wall=lambda: self.wall, mono=lambda: self.mono, source=lambda: self.reading)
+from clocks import T0, Clocks
+from visionquery.recorder.timebase import Reading, read_kernel_clock
 
 
 def test_time_is_the_anchor_carried_forward_by_the_monotonic_clock() -> None:
@@ -126,3 +109,19 @@ def test_the_kernel_says_whether_ntp_disciplines_its_clock() -> None:
     assert isinstance(reading.synchronised, bool)
     assert reading.max_error_us is not None
     assert reading.max_error_us >= 0
+
+
+def test_an_anchor_says_how_far_it_moved_the_time() -> None:
+    """An arrival measured just before a Segment opens is put on the new anchor by this much."""
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    timebase.anchor()
+    clocks.tick(30)
+    clocks.wall += 0.25  # NTP slewed the wall clock meanwhile
+
+    assert timebase.anchor() == timedelta(seconds=0.25)
+    assert timebase.anchor() == timedelta(0)
+
+
+def test_the_first_anchor_moves_nothing() -> None:
+    assert Clocks().timebase().anchor() == timedelta(0)
