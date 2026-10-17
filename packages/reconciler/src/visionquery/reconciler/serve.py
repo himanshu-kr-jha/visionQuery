@@ -1,4 +1,4 @@
-"""`visionquery-reconciler`: reconcile MediaMTX with the camera registry every cycle (ADR 0014).
+"""`visionquery-reconciler`: reconcile MediaMTX with the camera registry every cycle (ADR 0015).
 
     visionquery-reconciler            run until stopped (SIGTERM or SIGINT)
     visionquery-reconciler health     exit 0 while a recent cycle succeeded, 1 otherwise

@@ -156,7 +156,7 @@ services:
       start_interval: 1s
 
   # Keeps MediaMTX's paths and publishers matching the camera registry (visionquery-reconciler,
-  # ADR 0014): every VISIONQUERY_RECONCILE_INTERVAL seconds, so a camera added, changed or
+  # ADR 0015): every VISIONQUERY_RECONCILE_INTERVAL seconds, so a camera added, changed or
   # removed, and a restarted MediaMTX, are put right within one cycle. Healthy while a recent
   # cycle succeeded.
   reconciler:

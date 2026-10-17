@@ -2,7 +2,7 @@
 # Workers and the live view read it. Only what differs from MediaMTX's defaults, or what the
 # stack relies on, is set here; the defaults are in the image's own /mediamtx.yml.
 #
-# Paths are not configured here: the reconciler (visionquery-reconciler, ADR 0014) makes them
+# Paths are not configured here: the reconciler (visionquery-reconciler, ADR 0015) makes them
 # match the camera registry through the API, with one publisher per pushed camera, so this file
 # never lists a camera or its credentials. Until it has, and again after every restart of
 # MediaMTX until its next cycle (seconds), there is no path, so nothing can be published.

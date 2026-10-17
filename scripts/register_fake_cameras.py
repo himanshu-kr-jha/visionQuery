@@ -1,7 +1,7 @@
 """Register the dev profile's fake cameras in the camera registry, so that they may publish.
 
 MediaMTX lets a camera publish only to a path the registry has, with that camera's own
-credentials (ADR 0002, ADR 0014). Each fake camera VISIONQUERY_FAKE_CAMERAS lists is therefore
+credentials (ADR 0002, ADR 0015). Each fake camera VISIONQUERY_FAKE_CAMERAS lists is therefore
 made a pushed camera named for it, publishing to the path of its name as the user of its name,
 with VISIONQUERY_FAKE_CAMERA_PASSWORD, which docker/fake-cameras/fake_cameras.py publishes with.
 A camera already registered so is left alone, or given the password again when it changed; a
