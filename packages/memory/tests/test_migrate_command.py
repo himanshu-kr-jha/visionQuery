@@ -16,8 +16,11 @@ from urllib.parse import SplitResult, urlsplit
 
 import psycopg
 import pytest
+from visionquery.memory.migrate import MIGRATIONS
 
 COMMAND = Path(sys.executable).parent / "visionquery-migrate"
+#: The migrations VisionQuery ships, in order.
+SHIPPED = sorted(path.name for path in MIGRATIONS.glob("*.sql"))
 
 
 def _run(
@@ -139,13 +142,13 @@ def _extensions(database: str) -> list[str]:
 def test_status_lists_pending_migrations_and_changes_nothing(database: str) -> None:
     status, lines, stderr = _run(args=("status",), database__url=database)
     assert (status, stderr) == (0, "")
-    (pending,) = [line for line in lines if line.get("state") == "pending"]
-    assert pending["migration"] == "0001_extensions.sql"
-    assert pending["message"] == "pending 0001_extensions.sql"
+    pending = [line for line in lines if line.get("state") == "pending"]
+    assert [line["migration"] for line in pending] == SHIPPED
+    assert pending[0]["message"] == "pending 0001_extensions.sql"
     (summary,) = [line for line in lines if line["message"].startswith("status:")]
-    assert summary["message"] == "status: 0 applied, 1 pending"
+    assert summary["message"] == f"status: 0 applied, {len(SHIPPED)} pending"
     assert summary["applied"] == []
-    assert summary["pending"] == ["0001_extensions.sql"]
+    assert summary["pending"] == SHIPPED
     # Nothing was applied, and not even the record was created.
     assert _extensions(database) == ["plpgsql"]
     with psycopg.connect(database) as connection:
@@ -157,13 +160,14 @@ def test_status_lists_applied_migrations_with_when_they_were_applied(database: s
     assert _run(database__url=database)[0] == 0
     status, lines, stderr = _run(args=("status",), database__url=database)
     assert (status, stderr) == (0, "")
-    (applied,) = [line for line in lines if line.get("state") == "applied"]
-    assert applied["migration"] == "0001_extensions.sql"
+    every = [line for line in lines if line.get("state") == "applied"]
+    assert [line["migration"] for line in every] == SHIPPED
+    applied = every[0]
     assert applied["message"].startswith("applied 0001_extensions.sql at ")
     assert datetime.fromisoformat(applied["applied_at"]).tzinfo is not None
     assert len(applied["sha256"]) == 64
     (summary,) = [line for line in lines if line["message"].startswith("status:")]
-    assert summary["message"] == "status: 1 applied, 0 pending"
+    assert summary["message"] == f"status: {len(SHIPPED)} applied, 0 pending"
 
 
 def test_status_names_what_a_run_would_refuse(database: str) -> None:
