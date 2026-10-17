@@ -1,0 +1,134 @@
+# Every check, on every PR into develop or main and every push to them.
+#
+# Each job runs the `make` target a developer runs (CLAUDE.md, Commands), so CI and a local run
+# never drift: tests/test_ci.py fails when `make check` gains a target no job runs. Every job is
+# a required check of the develop and main rulesets (scripts/branch_rules.py derives the list
+# from the jobs below), so a job's id is its check's name: renaming one means re-running
+# `make branch-rules` after the rename reaches develop.
+#
+# GitHub sets CI=true, under which a test skipped for a missing prerequisite (Docker, Postgres,
+# the web app's dependencies) fails instead (conftest.py).
+
+name: CI
+
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push to a PR makes the run for the older one pointless; runs on develop and main
+# always finish, so every commit there has a result.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      - run: make lint
+
+  typecheck:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      - run: make typecheck
+
+  contracts:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      - run: make contracts
+
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      # The image and password the tests would start themselves (packages/conftest.py), as a
+      # service so that it is up and healthy before the first test.
+      postgres:
+        image: timescale/timescaledb:2.30.1-pg18
+        env:
+          POSTGRES_PASSWORD: visionquery-test
+        ports:
+          - 127.0.0.1::5432
+        options: >-
+          --health-cmd "pg_isready --host 127.0.0.1 --username postgres"
+          --health-interval 2s
+          --health-timeout 5s
+          --health-retries 60
+    env:
+      VISIONQUERY_TEST_DATABASE_URL: postgresql://postgres:visionquery-test@127.0.0.1:${{ job.services.postgres.ports['5432'] }}/postgres
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          web: true
+      - run: make test
+
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+        with:
+          web: true
+      - run: make web api-types-check
+
+  # Brings the Compose stack up for real under throwaway projects, as `make test-stack` does
+  # locally; Triton stays out (VISIONQUERY_TEST_TRITON unset), its image being about 25 GB.
+  stack:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup
+      - run: docker version && docker compose version
+      - run: make test-stack
+
+  # No agent attribution in any commit, nor in a PR's title or body (CLAUDE.md), and a PR
+  # title that is a Conventional Commit, because it becomes the squash commit's subject.
+  commits:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup
+      - name: Commits of the PR carry no attribution
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: uv run --frozen python scripts/check_attribution.py --commits "$BASE..$HEAD"
+      - name: The PR's title and body carry no attribution, and the title is a Conventional Commit
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          uv run --frozen python scripts/check_attribution.py --env PR_TITLE --env PR_BODY
+          uv run --frozen python scripts/check_commit_message.py --env PR_TITLE
+      - name: Pushed commits carry no attribution
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        # A push that created the branch has no previous commit: check the pushed one alone.
+        run: |
+          if [ "$BEFORE" = 0000000000000000000000000000000000000000 ]; then range="$AFTER^!"; else range="$BEFORE..$AFTER"; fi
+          uv run --frozen python scripts/check_attribution.py --commits "$range"
