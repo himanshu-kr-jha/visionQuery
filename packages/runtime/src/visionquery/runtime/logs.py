@@ -26,7 +26,7 @@ import re
 import sys
 import threading
 import weakref
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any, TextIO, cast
@@ -228,9 +228,20 @@ def _same(kept: object, original: object) -> bool:
     return kept is original or (type(kept) is str and kept == original)
 
 
+def _holds(rebuilt: object, kind: type, members: list[object]) -> bool:
+    """Whether `rebuilt` is a `kind` holding exactly `members`, not a lookalike."""
+    if type(rebuilt) is not kind:
+        return False
+    if not isinstance(rebuilt, (tuple, list)):
+        return True
+    held = cast(Sequence[object], rebuilt)
+    return len(held) == len(members) and all(a is b for a, b in zip(held, members, strict=True))
+
+
 def _rebuilt(original: object, members: list[object]) -> object:
     """A container of `original`'s type holding `members`, or a plain tuple or list."""
-    kind = cast(Callable[..., object], type(original))
+    original_kind: type = type(original)
+    kind = cast(Callable[..., object], original_kind)
     make = cast(Callable[[list[object]], object] | None, getattr(kind, "_make", None))
     # A namedtuple takes its fields one by one through `_make`; another tuple subclass may take
     # its members one by one (`_Pair(url, name)`), or as one iterable.
@@ -243,9 +254,11 @@ def _rebuilt(original: object, members: list[object]) -> object:
         attempts.append(lambda: kind(members))
     for attempt in attempts:
         try:
-            return attempt()
+            rebuilt = attempt()
         except Exception:
             continue
+        if _holds(rebuilt, original_kind, members):
+            return rebuilt
     return tuple(members) if isinstance(original, tuple) else members
 
 

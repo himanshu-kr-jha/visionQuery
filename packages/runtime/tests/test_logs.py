@@ -563,10 +563,30 @@ def test_a_tuple_subclass_with_nothing_to_scrub_is_left_as_it_is(output: io.Stri
     assert _field("pair", pair) is pair
 
 
-def test_a_tuple_subclass_that_cannot_be_rebuilt_is_still_a_tuple(output: io.StringIO) -> None:
+def test_a_tuple_subclass_with_a_positional_constructor_keeps_its_type(output: io.StringIO) -> None:
     pair = _field("pair", _Pair(URL, "gate-3"))
     assert type(pair) is _Pair
     assert pair == (SCRUBBED, "gate-3")
+
+
+class _Plain(tuple[object, ...]):
+    """A tuple subclass with tuple's own constructor."""
+
+
+def test_a_one_member_plain_tuple_subclass_keeps_its_type_and_its_scrubbed_member(
+    output: io.StringIO,
+) -> None:
+    plain = _field("plain", _Plain((URL,)))
+    assert type(plain) is _Plain
+    assert plain == (SCRUBBED,)
+
+
+def test_a_one_member_plain_tuple_subclass_keeps_the_structure_of_its_member(
+    output: io.StringIO,
+) -> None:
+    plain = _field("plain", _Plain(([URL, "a"],)))
+    assert type(plain) is _Plain
+    assert plain == ([SCRUBBED, "a"],)
 
 
 class _Opaque(tuple[str, ...]):
