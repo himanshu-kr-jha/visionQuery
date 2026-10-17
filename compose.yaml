@@ -165,7 +165,7 @@ services:
       MTX_WEBRTCADDITIONALHOSTS: ${VISIONQUERY_MEDIAMTX_WEBRTC_HOSTS:-127.0.0.1}
       # The port is announced to the browser as it is inside, so the host publishes the same number.
       MTX_WEBRTCLOCALUDPADDRESS: ":${VISIONQUERY_MEDIAMTX_WEBRTC_UDP_PORT:-8189}"
-      MTX_AUTHINTERNALUSERS_3_PASS: ${VISIONQUERY_MEDIAMTX_API_PASSWORD:?set VISIONQUERY_MEDIAMTX_API_PASSWORD in .env (see .env.example)}
+      MTX_AUTHINTERNALUSERS_2_PASS: ${VISIONQUERY_MEDIAMTX_API_PASSWORD:?set VISIONQUERY_MEDIAMTX_API_PASSWORD in .env (see .env.example)}
     volumes:
       # The directory, not the file: MediaMTX reloads its configuration when the file changes,
       # and a bind-mounted file would keep showing the copy an editor replaced.
