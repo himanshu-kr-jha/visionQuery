@@ -77,6 +77,10 @@ class DatabaseProbe:
     Logs one WARNING when the database turns unreachable (naming the fixed problem category,
     never any part of the URL), one when a check outlives its deadline, and one INFO when the
     database is reachable again, not one per check.
+
+    `clock` decides what is cached and when a deadline has passed, but the request that starts a
+    check waits for it in real time (a `threading.Event` wait of the time `clock` says is left),
+    so a test that injects a clock must keep a check short or its deadline small.
     """
 
     def __init__(
@@ -107,10 +111,13 @@ class DatabaseProbe:
                     and self._clock() - self._checked_at < self._cache_seconds
                 ):
                     return self._last
-                run = self._run = _Run(self._clock())
+                run = _Run(self._clock())
+                # Published only once the worker runs: a thread that fails to start must not
+                # leave a run nobody will finish.
                 threading.Thread(
                     target=self._work, args=(run,), name="database-check", daemon=True
                 ).start()
+                self._run = run
                 started_here = True
             else:
                 started_here = False
@@ -146,17 +153,19 @@ class DatabaseProbe:
 
     def _work(self, run: _Run) -> None:
         """Run the check and record what it found; the body of `run`'s worker thread."""
+        current = _FAILED
         try:
             current = self._check()
         # Only the class: an exception's text may quote the URL.
         except Exception as error:
             _log.error("the database check raised %s", type(error).__name__)
-            current = _FAILED
-        with self._lock:
-            previous, self._last, self._checked_at = self._last, current, self._clock()
-            run.result = current
-            self._run = None
-            run.done.set()
+        finally:
+            # Whatever happened, the run ends: a waiter is never left on a run that cannot finish.
+            with self._lock:
+                previous, self._last, self._checked_at = self._last, current, self._clock()
+                run.result = current
+                self._run = None
+                run.done.set()
         self._log_change(previous, current)
 
     @staticmethod
