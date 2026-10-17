@@ -29,16 +29,28 @@ def _workspace_packages() -> tuple[str, ...]:
 
 PACKAGES = _workspace_packages()
 
-NO_REACHING_UP = "Perception and the recorder never import the reasoner or the api"
+NO_REACHING_UP = "Perception and the recorder import only the memory and the runtime"
 ONLY_MEMORY_HOLDS_A_DRIVER = "Only memory imports a database driver"
 REASONER_THROUGH_TOOLS = "The reasoner reaches the memory only through tools"
 API_THROUGH_TOOLS = "The api reaches the memory only through tools, except its health probe"
 RUNTIME_IS_A_FOUNDATION = "The runtime imports no other VisionQuery package"
+LAYERS = "Each package imports only the layers below its own"
+BESIDE_THE_LAYERS = "Nothing imports perception or the recorder"
+PERCEPTION_AND_RECORDER_INDEPENDENT = "Perception and the recorder import neither other"
 NO_REACHING_UP_ID = "no-reaching-up"
 ONLY_MEMORY_HOLDS_A_DRIVER_ID = "only-memory-holds-a-driver"
 REASONER_THROUGH_TOOLS_ID = "reasoner-through-tools"
 API_THROUGH_TOOLS_ID = "api-through-tools"
 RUNTIME_IS_A_FOUNDATION_ID = "runtime-is-a-foundation"
+LAYERS_ID = "layers"
+BESIDE_THE_LAYERS_ID = "nothing-imports-perception-or-the-recorder"
+PERCEPTION_AND_RECORDER_INDEPENDENT_ID = "perception-and-recorder-independent"
+KEPT = "Contracts: 8 kept, 0 broken."
+
+# The layering CLAUDE.md states, highest first: a package may import the layers below its
+# own, never one above it nor its sibling. Perception and the recorder sit beside them.
+LAYERING = (("api", "reasoner"), ("tools",), ("linker",), ("memory",), ("runtime",))
+BESIDE = ("perception", "recorder")
 
 
 def _lint_imports(cwd: Path, pythonpath: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -78,7 +90,7 @@ def _broken(result: subprocess.CompletedProcess[str]) -> set[str]:
 def test_the_workspace_keeps_every_contract() -> None:
     result = _lint_imports(ROOT)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Contracts: 5 kept, 0 broken." in result.stdout
+    assert KEPT in result.stdout
 
 
 def test_an_unchanged_copy_keeps_every_contract(tmp_path: Path) -> None:
@@ -87,41 +99,115 @@ def test_an_unchanged_copy_keeps_every_contract(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("importer", "imported", "contract"),
+    ("importer", "imported", "contracts"),
     [
-        ("perception", "visionquery.reasoner", NO_REACHING_UP),
-        ("perception", "visionquery.api", NO_REACHING_UP),
-        ("recorder", "visionquery.reasoner", NO_REACHING_UP),
-        ("recorder", "visionquery.api", NO_REACHING_UP),
-        ("reasoner", "visionquery.memory", REASONER_THROUGH_TOOLS),
-        ("reasoner", "visionquery.linker", REASONER_THROUGH_TOOLS),
-        ("reasoner", "visionquery.perception", REASONER_THROUGH_TOOLS),
-        ("reasoner", "visionquery.recorder", REASONER_THROUGH_TOOLS),
-        ("reasoner", "visionquery.api", REASONER_THROUGH_TOOLS),
-        ("api", "visionquery.memory", API_THROUGH_TOOLS),
-        ("api", "visionquery.memory.migrate", API_THROUGH_TOOLS),
-        ("api", "visionquery.linker", API_THROUGH_TOOLS),
-        *[(p, "psycopg", ONLY_MEMORY_HOLDS_A_DRIVER) for p in PACKAGES if p != "memory"],
         *[
-            ("runtime", f"visionquery.{p}", RUNTIME_IS_A_FOUNDATION)
+            (p, f"visionquery.{up}", {NO_REACHING_UP})
+            for p in BESIDE
+            for up in ("tools", "linker", "reasoner", "api")
+        ],
+        ("perception", "visionquery.recorder", {PERCEPTION_AND_RECORDER_INDEPENDENT}),
+        ("recorder", "visionquery.perception", {PERCEPTION_AND_RECORDER_INDEPENDENT}),
+        ("reasoner", "visionquery.memory", {REASONER_THROUGH_TOOLS}),
+        ("reasoner", "visionquery.linker", {REASONER_THROUGH_TOOLS}),
+        ("reasoner", "visionquery.perception", {REASONER_THROUGH_TOOLS, BESIDE_THE_LAYERS}),
+        ("reasoner", "visionquery.recorder", {REASONER_THROUGH_TOOLS, BESIDE_THE_LAYERS}),
+        ("reasoner", "visionquery.api", {REASONER_THROUGH_TOOLS, LAYERS}),
+        ("api", "visionquery.memory", {API_THROUGH_TOOLS}),
+        ("api", "visionquery.memory.migrate", {API_THROUGH_TOOLS}),
+        ("api", "visionquery.linker", {API_THROUGH_TOOLS}),
+        ("api", "visionquery.reasoner", {LAYERS}),
+        ("api", "visionquery.recorder", {BESIDE_THE_LAYERS}),
+        ("tools", "visionquery.api", {LAYERS}),
+        ("tools", "visionquery.reasoner", {LAYERS}),
+        ("tools", "visionquery.perception", {BESIDE_THE_LAYERS}),
+        ("linker", "visionquery.tools", {LAYERS}),
+        ("linker", "visionquery.api", {LAYERS}),
+        ("linker", "visionquery.reasoner", {LAYERS}),
+        ("linker", "visionquery.recorder", {BESIDE_THE_LAYERS}),
+        *[
+            ("memory", f"visionquery.{up}", {LAYERS})
+            for up in ("linker", "tools", "reasoner", "api")
+        ],
+        *[("memory", f"visionquery.{p}", {BESIDE_THE_LAYERS}) for p in BESIDE],
+        *[(p, "psycopg", {ONLY_MEMORY_HOLDS_A_DRIVER}) for p in PACKAGES if p != "memory"],
+        *[
+            (
+                "runtime",
+                f"visionquery.{p}",
+                # The layers and [nothing-imports-perception-or-the-recorder] imply this
+                # contract; it stays as the foundation's own, plainly named rule.
+                {RUNTIME_IS_A_FOUNDATION, BESIDE_THE_LAYERS if p in BESIDE else LAYERS},
+            )
             for p in PACKAGES
             if p != "runtime"
         ],
-        ("tools", "psycopg_pool", ONLY_MEMORY_HOLDS_A_DRIVER),
-        ("tools", "psycopg2", ONLY_MEMORY_HOLDS_A_DRIVER),
-        ("tools", "asyncpg", ONLY_MEMORY_HOLDS_A_DRIVER),
-        ("tools", "pg8000", ONLY_MEMORY_HOLDS_A_DRIVER),
-        ("tools", "sqlalchemy", ONLY_MEMORY_HOLDS_A_DRIVER),
-        ("tools", "pgvector", ONLY_MEMORY_HOLDS_A_DRIVER),
+        ("tools", "psycopg_pool", {ONLY_MEMORY_HOLDS_A_DRIVER}),
+        ("tools", "psycopg2", {ONLY_MEMORY_HOLDS_A_DRIVER}),
+        ("tools", "asyncpg", {ONLY_MEMORY_HOLDS_A_DRIVER}),
+        ("tools", "pg8000", {ONLY_MEMORY_HOLDS_A_DRIVER}),
+        ("tools", "sqlalchemy", {ONLY_MEMORY_HOLDS_A_DRIVER}),
+        ("tools", "pgvector", {ONLY_MEMORY_HOLDS_A_DRIVER}),
     ],
 )
 def test_a_forbidden_import_is_reported(
-    tmp_path: Path, importer: str, imported: str, contract: str
+    tmp_path: Path, importer: str, imported: str, contracts: set[str]
 ) -> None:
     result = _lint_with(tmp_path, {f"visionquery.{importer}.violation": f"import {imported}\n"})
     assert result.returncode != 0, result.stdout + result.stderr
-    assert _broken(result) == {contract}, result.stdout
+    assert _broken(result) == contracts, result.stdout
     assert f"visionquery.{importer}.violation -> {imported}" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("importer", "imported"),
+    [("tools", "api"), ("tools", "reasoner"), ("linker", "tools"), ("memory", "tools")],
+)
+def test_reaching_up_a_layer_from_deep_inside_a_package_is_reported(
+    tmp_path: Path, importer: str, imported: str
+) -> None:
+    # The gap the layers close: the forbidden contracts tolerate indirect imports, so
+    # tools -> api was reported by none of them, and nothing stopped the cycle it makes.
+    result = _lint_with(
+        tmp_path,
+        {
+            f"visionquery.{imported}.top": "import visionquery.runtime\n",
+            f"visionquery.{importer}.middle": f"import visionquery.{imported}.top\n",
+            f"visionquery.{importer}.bottom": f"import visionquery.{importer}.middle\n",
+        },
+    )
+    assert _broken(result) == {LAYERS}, result.stdout
+    assert f"visionquery.{importer}.middle -> visionquery.{imported}.top" in result.stdout
+
+
+def test_every_intended_path_down_the_layers_is_kept(tmp_path: Path) -> None:
+    result = _lint_with(
+        tmp_path,
+        {
+            "visionquery.runtime.base": "import logging\n",
+            "visionquery.memory.store": "import visionquery.runtime.base\n",
+            "visionquery.linker.follow": "import visionquery.memory.store\n",
+            "visionquery.tools.lookup": "import visionquery.memory.store\n",
+            "visionquery.tools.following": "import visionquery.linker.follow\n",
+            "visionquery.api.routes": (
+                "import visionquery.tools.lookup\nimport visionquery.tools.following\n"
+            ),
+            "visionquery.reasoner.ask": (
+                "import visionquery.tools.lookup\nimport visionquery.tools.following\n"
+            ),
+            "visionquery.perception.worker": "import visionquery.memory.store\n",
+            "visionquery.recorder.segments": "import visionquery.memory.store\n",
+        },
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert KEPT in result.stdout
+
+
+def test_a_new_package_left_out_of_the_layers_is_reported(tmp_path: Path) -> None:
+    # The layers are exhaustive: a new package must be placed in a layer, or beside them.
+    result = _lint_with(tmp_path, {"visionquery.newcomer": "import visionquery.runtime\n"})
+    assert _broken(result) == {LAYERS}, result.stdout
+    assert "visionquery.newcomer" in result.stdout
 
 
 def test_the_reasoner_may_reach_the_memory_through_tools(tmp_path: Path) -> None:
@@ -236,7 +322,7 @@ def test_a_package_that_imports_memory_does_not_count_as_importing_the_driver(
         },
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Contracts: 5 kept, 0 broken." in result.stdout
+    assert KEPT in result.stdout
 
 
 def test_the_reasoner_may_reach_the_linker_through_tools(tmp_path: Path) -> None:
@@ -304,7 +390,7 @@ def test_the_callers_pythonpath_does_not_change_what_is_analysed(
     monkeypatch.setenv("PYTHONPATH", str(tree))
     result = _lint_imports(ROOT)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "Contracts: 5 kept, 0 broken." in result.stdout
+    assert KEPT in result.stdout
 
 
 def _modules(contract: str, key: str) -> set[str]:
@@ -339,18 +425,47 @@ def test_the_runtime_is_forbidden_every_other_package() -> None:
 
 
 def test_perception_and_recorder_contract_matches_claude_md() -> None:
-    # CLAUDE.md: perception and recorder never import reasoner or api. A new package is not
-    # added to either side by default; if it asks or serves questions (like reasoner and api),
-    # add it to forbidden_modules here and in .importlinter, and update CLAUDE.md.
+    # CLAUDE.md: perception and recorder import only the memory and the runtime.
     sources = _modules(NO_REACHING_UP_ID, "source_modules")
     forbidden = _modules(NO_REACHING_UP_ID, "forbidden_modules")
-    assert sources == {"perception", "recorder"}, (
-        "CLAUDE.md names only perception and recorder as sources of [no-reaching-up]; "
+    expected = set(PACKAGES) - set(BESIDE) - {"memory", "runtime"}
+    assert sources == set(BESIDE), (
+        f"CLAUDE.md names only perception and recorder as sources of [{NO_REACHING_UP_ID}]; "
         "changing that is a CLAUDE.md change."
     )
-    assert forbidden == {"reasoner", "api"}, (
-        "CLAUDE.md names reasoner and api as forbidden for perception and recorder; "
-        "a new package that asks or serves questions must be added to forbidden_modules of "
-        f"[{NO_REACHING_UP_ID}] in .importlinter and to this test."
+    assert forbidden == expected, (
+        "Perception and the recorder may import only the memory and the runtime. Add new "
+        f"workspace packages to forbidden_modules of [{NO_REACHING_UP_ID}] in .importlinter "
+        f"(missing: {sorted(expected - forbidden)}, unknown: {sorted(forbidden - expected)})."
     )
-    assert sources | forbidden <= set(PACKAGES)
+
+
+def _layers() -> tuple[tuple[str, ...], ...]:
+    section = _config()[f"importlinter:contract:{LAYERS_ID}"]
+    assert section["type"] == "layers"
+    return tuple(
+        tuple(m.strip() for m in line.split("|")) for line in section["layers"].strip().splitlines()
+    )
+
+
+def test_the_layers_are_the_ones_claude_md_states() -> None:
+    # api | reasoner > tools > linker > memory > runtime; `|` keeps api and reasoner
+    # independent of each other. Changing the order is a CLAUDE.md change.
+    section = _config()[f"importlinter:contract:{LAYERS_ID}"]
+    assert section["containers"].strip() == "visionquery"
+    assert _layers() == LAYERING
+    assert section.getboolean("exhaustive")
+    assert set(section["exhaustive_ignores"].split()) == set(BESIDE)
+
+
+def test_every_package_sits_in_a_layer_or_beside_them() -> None:
+    placed = [p for layer in _layers() for p in layer]
+    assert len(placed) == len(set(placed))
+    assert set(placed) | set(BESIDE) == set(PACKAGES)
+    assert not set(placed) & set(BESIDE)
+
+
+def test_nothing_imports_the_packages_beside_the_layers() -> None:
+    assert _modules(BESIDE_THE_LAYERS_ID, "source_modules") == set(PACKAGES) - set(BESIDE)
+    assert _modules(BESIDE_THE_LAYERS_ID, "forbidden_modules") == set(BESIDE)
+    assert _modules(PERCEPTION_AND_RECORDER_INDEPENDENT_ID, "modules") == set(BESIDE)
