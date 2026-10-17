@@ -56,7 +56,9 @@ def problems(text: str, *, pr_title: bool = False) -> list[str]:
     scopes = _scopes()
     found: list[str] = []
     if not _subject_pattern(scopes, scope_required=pr_title).match(subject):
-        shape = "`type(scope): subject`" if pr_title else "`type(scope): subject` (or `type: subject`)"
+        shape = "`type(scope): subject`"
+        if not pr_title:
+            shape += " (or `type: subject`)"
         found.append(
             f"{subject!r} is not {shape}, with type one of "
             f"{', '.join(TYPES)} and scope one of {', '.join(scopes)}"
