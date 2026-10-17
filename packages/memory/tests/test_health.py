@@ -5,14 +5,32 @@ for an unreachable one.
 """
 
 import socket
+import threading
 import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import SplitResult, quote, urlsplit
 
 import psycopg
 import pytest
 from visionquery.memory.connection import connect
-from visionquery.memory.health import DatabaseHealth, check_database
+from visionquery.memory.health import (
+    CONNECT_SECONDS,
+    HEALTH_BUDGET_SECONDS,
+    STATEMENT_SECONDS,
+    DatabaseHealth,
+    check_database,
+)
+
+
+def _within[T](seconds: float, call: Callable[[], T]) -> T:
+    """What `call` returns, or a failure once `seconds` pass: a wedged check fails, not hangs."""
+    results: list[T] = []
+    worker = threading.Thread(target=lambda: results.append(call()), daemon=True)
+    worker.start()
+    worker.join(seconds)
+    assert results, f"still running after {seconds} s"
+    return results[0]
 
 
 def _host(parts: SplitResult) -> str:
@@ -55,11 +73,9 @@ def test_a_server_that_never_answers_times_out_within_the_timeout() -> None:
         server.bind(("127.0.0.1", 0))
         server.listen(8)  # the kernel completes the handshake; nothing ever replies
         started = time.monotonic()
-        health = check_database(
-            f"postgresql://u:secret@127.0.0.1:{server.getsockname()[1]}/db", timeout=1
-        )
+        health = check_database(f"postgresql://u:secret@127.0.0.1:{server.getsockname()[1]}/db")
     assert health.problem == "timed out"
-    assert time.monotonic() - started < 8
+    assert time.monotonic() - started < CONNECT_SECONDS + 1.5
 
 
 def test_a_query_that_never_finishes_is_cancelled_and_reported_as_timed_out(
@@ -81,17 +97,39 @@ def test_a_query_that_never_finishes_is_cancelled_and_reported_as_timed_out(
 
     monkeypatch.setattr("visionquery.memory.health.connect", slow)
     started = time.monotonic()
-    health = check_database(postgres, timeout=1)
+    health = check_database(postgres)
     assert health.problem == "timed out"
-    assert time.monotonic() - started < 8
+    assert time.monotonic() - started < HEALTH_BUDGET_SECONDS + 1.5
 
 
-def test_the_connection_bounds_a_statement_unless_the_url_sets_its_own_options(
-    postgres: str,
+def test_the_check_has_one_budget_made_of_its_connect_and_statement_bounds() -> None:
+    # The api's probe waits for this plus a margin, and every client of /health longer still.
+    assert HEALTH_BUDGET_SECONDS == CONNECT_SECONDS + STATEMENT_SECONDS
+    # libpq takes a `connect_timeout` under 2 s as 2 s, so a smaller one would not be honest.
+    assert CONNECT_SECONDS >= 2
+
+
+@pytest.mark.parametrize(
+    ("query", "pgconnect_timeout"),
+    [
+        ("?connect_timeout=60", None),
+        # 0 waits forever in libpq; the check must not.
+        ("?connect_timeout=0", None),
+        ("?connect_timeout=-1", None),
+        ("", "60"),
+        ("", "0"),
+    ],
+)
+def test_the_check_keeps_its_own_connect_limit_whatever_the_url_or_environment_say(
+    monkeypatch: pytest.MonkeyPatch, query: str, pgconnect_timeout: str | None
 ) -> None:
-    with connect(postgres, 3, statement_timeout_ms=1234) as connection:
-        row = connection.execute("SHOW statement_timeout").fetchone()
-        assert row == ("1234ms",)
-    own = postgres + ("&" if "?" in postgres else "?") + "options=-c%20statement_timeout%3D777"
-    with connect(own, 3, statement_timeout_ms=1234) as connection:
-        assert connection.execute("SHOW statement_timeout").fetchone() == ("777ms",)
+    if pgconnect_timeout is None:
+        monkeypatch.delenv("PGCONNECT_TIMEOUT", raising=False)
+    else:
+        monkeypatch.setenv("PGCONNECT_TIMEOUT", pgconnect_timeout)
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(8)  # the kernel completes the handshake; nothing ever replies
+        url = f"postgresql://u:s@127.0.0.1:{server.getsockname()[1]}/db{query}"
+        health = _within(CONNECT_SECONDS + 1.5, lambda: check_database(url))
+    assert health.problem == "timed out"

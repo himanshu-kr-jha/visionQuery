@@ -122,3 +122,71 @@ def test_an_empty_pgconnect_timeout_is_unset_so_the_default_applies(
         with pytest.raises(ConnectionFailedError, match="timed out"):
             connect(f"postgresql://u:p@127.0.0.1:{server.getsockname()[1]}/d", 2)
     assert time.monotonic() - started < 10
+
+
+def _shown(connection: psycopg.Connection, setting: str) -> object:
+    row = connection.execute("SELECT current_setting(%s)", [setting]).fetchone()
+    return row[0] if row else None
+
+
+def test_the_connection_bounds_a_statement(postgres: str) -> None:
+    with connect(postgres, 3, statement_timeout_ms=1234) as connection:
+        assert _shown(connection, "statement_timeout") == "1234ms"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        "-c work_mem=7MB",
+        "-cwork_mem=7MB",
+        "--work-mem=7MB",
+        # An escaped space is part of a value: this sets application_name, not the bound.
+        r"-c work_mem=7MB -c application_name=a\ -c\ statement_timeout=777",
+    ],
+)
+def test_a_url_with_its_own_options_keeps_them_and_gains_the_statement_bound(
+    postgres: str, options: str
+) -> None:
+    with connect(_with_options(postgres, options), 3, statement_timeout_ms=1234) as connection:
+        assert _shown(connection, "statement_timeout") == "1234ms"
+        assert _shown(connection, "work_mem") == "7MB"
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        "-c statement_timeout=777",
+        "-cstatement_timeout=777",
+        "-c work_mem=7MB -c statement_timeout=777",
+        "--statement-timeout=777",
+        "--statement_timeout=777",
+        "-c Statement_Timeout=777",
+        "  -c   statement_timeout=777  ",
+    ],
+)
+def test_options_that_set_their_own_statement_bound_keep_it(postgres: str, options: str) -> None:
+    with connect(_with_options(postgres, options), 3, statement_timeout_ms=1234) as connection:
+        assert _shown(connection, "statement_timeout") == "777ms"
+
+
+def test_pgoptions_is_kept_and_gains_the_statement_bound_when_the_url_has_no_options(
+    postgres: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The bound is passed as `options`, which takes the place of PGOPTIONS in libpq, so the
+    # variable's value is carried over rather than dropped.
+    monkeypatch.setenv("PGOPTIONS", "-c work_mem=7MB")
+    with connect(postgres, 3, statement_timeout_ms=1234) as connection:
+        assert _shown(connection, "statement_timeout") == "1234ms"
+        assert _shown(connection, "work_mem") == "7MB"
+    monkeypatch.setenv("PGOPTIONS", "-c statement_timeout=777")
+    with connect(postgres, 3, statement_timeout_ms=1234) as connection:
+        assert _shown(connection, "statement_timeout") == "777ms"
+
+
+def test_without_a_statement_bound_the_url_and_pgoptions_are_left_alone(
+    postgres: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PGOPTIONS", "-c work_mem=7MB")
+    with connect(postgres, 3) as connection:
+        assert _shown(connection, "work_mem") == "7MB"
+        assert _shown(connection, "statement_timeout") == "0"
