@@ -11,9 +11,9 @@ from typing import Any
 from urllib.parse import quote, urlsplit
 
 import pytest
-from fastapi.testclient import TestClient
 from fastapi import FastAPI
-from visionquery.api.app import create_app, database_health
+from fastapi.testclient import TestClient
+from visionquery.api.app import create_app, database_health, operator_router
 from visionquery.memory.health import DatabaseHealth, check_database
 
 
@@ -100,8 +100,6 @@ def test_serves_no_page_that_loads_scripts_from_the_internet() -> None:
 
 def test_health_is_at_the_root_and_operator_operations_will_be_under_api() -> None:
     # /health is for infrastructure (the Compose healthcheck); Operator operations get /api.
-    from visionquery.api.app import operator_router
-
     assert operator_router.prefix == "/api"
     with TestClient(_app(lambda: DatabaseHealth(None))) as client:
         assert client.get("/health").status_code == 200
