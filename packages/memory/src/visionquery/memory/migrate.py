@@ -15,6 +15,12 @@ and says which file is wrong. So does a gap or a repeat in the numbering, a file
 like a migration, a new file numbered at or before the last one applied, and a pending file
 with a statement that begins, commits or rolls back a transaction (it would escape its own).
 
+**A run writes only to an empty database or to a VisionQuery memory.**
+A database is a memory when its `public.schema_migrations` has the record's columns and at
+least one row. Any other database that holds a table, view or sequence of its own (not one an
+extension brought) belongs to something else, and so does one whose `schema_migrations` is not
+shaped like the record: the run refuses and writes nothing to it, not even the record.
+
 **Runners take turns.**
 The whole run holds a Postgres advisory lock, so two runners started at once against one
 database serialise: the second waits, then finds nothing left to apply.
@@ -28,7 +34,8 @@ A connection that breaks mid-file leaves its outcome unknown; rerunning is safe.
 The command reads `VISIONQUERY_DATABASE__URL` and exits 0 when the schema is up to date, 1
 when a migration failed or the database could not be connected to (a fixed message by
 category, never libpq's text), 2 when its settings are
-missing or invalid, and 3 when it refused.
+missing or invalid, and 3 when it refused (the files and the record disagree, or the database
+is not a memory).
 """
 
 import hashlib
@@ -55,6 +62,7 @@ __all__ = [
     "LOCK_TIMEOUT",
     "MIGRATIONS",
     "ConnectionFailedError",
+    "ForeignDatabaseError",
     "MigrationFailedError",
     "MigrationRefusedError",
     "Problem",
@@ -105,6 +113,18 @@ class MigrationRefusedError(Exception):
         super().__init__(f"migrations refused, nothing was applied:\n{details}")
 
 
+class ForeignDatabaseError(Exception):
+    """The database holds something and is not a VisionQuery memory, so nothing was applied."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(
+            f"migrations refused, nothing was applied: the database is not empty and is not a "
+            f"VisionQuery memory ({reason}); point the URL at an empty database or at this "
+            "Deployment's memory"
+        )
+
+
 class MigrationFailedError(Exception):
     """A migration failed; unless the message says otherwise it was rolled back and the ones
     before it stay."""
@@ -139,7 +159,8 @@ def migrate(
     """Apply every pending migration in `directory` to the database at `url`.
 
     Returns the names applied, in order, which is empty when the schema was up to date.
-    Raises `MigrationRefusedError` when the files and the record disagree, and
+    Raises `ForeignDatabaseError` when the database holds something and is not a VisionQuery
+    memory, `MigrationRefusedError` when the files and the record disagree, and
     `MigrationFailedError` when a migration's statements fail. Connecting gives up after
     `connect_timeout` seconds unless the URL sets its own, and a statement of a migration that
     waits `lock_timeout` seconds for a lock fails its file.
@@ -148,6 +169,8 @@ def migrate(
     connection = connect(url, connect_timeout)
     with connection, _locked(connection):
         # Read under the lock, so what is pending is what nobody else is applying.
+        if reason := _foreign(connection):
+            raise ForeignDatabaseError(reason)
         connection.execute(_RECORD)
         applied = _applied(connection)
         problems = _disagreements(files, applied) + problems + _numbering(files, applied)
@@ -171,6 +194,56 @@ CREATE TABLE IF NOT EXISTS public.schema_migrations (
     applied_at timestamptz NOT NULL DEFAULT now()
 )
 """
+
+
+#: The record's columns and types, as `format_type` names them.
+_RECORD_COLUMNS = [
+    ("number", "integer"),
+    ("name", "text"),
+    ("sha256", "bytea"),
+    ("applied_at", "timestamp with time zone"),
+]
+
+_COLUMNS = b"""
+SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+WHERE c.oid = to_regclass('public.schema_migrations') AND c.relkind = 'r'
+  AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+"""
+
+#: The relations someone made in the database, leaving out the record (when it is ours), what
+#: the catalogs and extensions bring, and every session's temporary tables.
+_RELATIONS = b"""
+SELECT format('%%I.%%I', n.nspname, c.relname)
+FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND c.relpersistence <> 't'
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_toast'
+  AND NOT (%(ours)s AND c.oid = to_regclass('public.schema_migrations'))
+  AND NOT EXISTS (
+      SELECT FROM pg_catalog.pg_depend d
+      WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
+  )
+ORDER BY 1
+LIMIT 4
+"""
+
+
+def _foreign(connection: psycopg.Connection) -> str | None:
+    """Why the database is neither empty nor a VisionQuery memory, or None when it is one."""
+    columns = connection.execute(_COLUMNS).fetchall()
+    ours = columns == _RECORD_COLUMNS
+    if columns and not ours:
+        return "it has a schema_migrations table that VisionQuery did not create"
+    if ours:
+        row = connection.execute("SELECT EXISTS (SELECT FROM public.schema_migrations)").fetchone()
+        if row and row[0]:
+            return None
+    relations = [str(name) for (name,) in connection.execute(_RELATIONS, {"ours": ours})]
+    if not relations:
+        return None
+    named = ", ".join(relations[:3]) + (" and more" if len(relations) > 3 else "")
+    return f"it has tables and no record of VisionQuery migrations: {named}"
 
 
 #: What one file may have set or left on the session (`SET search_path`, `SET ROLE`, a temporary
@@ -374,6 +447,9 @@ def main() -> None:
     except MigrationRefusedError as error:
         files = [problem.file for problem in error.problems]
         _log.critical("%s", error, extra={"error": type(error).__name__, "files": files})
+        raise SystemExit(REFUSED) from None
+    except ForeignDatabaseError as error:
+        _log.critical("%s", error, extra={"error": type(error).__name__})
         raise SystemExit(REFUSED) from None
     except ConnectionFailedError as error:
         _log.critical(

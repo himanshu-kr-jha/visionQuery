@@ -478,9 +478,9 @@ def test_a_connect_timeout_in_the_url_wins_over_the_default(migrations: Path) ->
 def test_a_blocked_statement_fails_naming_its_file_instead_of_stalling(
     database: str, migrations: Path
 ) -> None:
-    with psycopg.connect(database, autocommit=True) as setup:
-        setup.execute("CREATE TABLE busy (id int)")
-    _write(migrations, "0001_alter.sql", "ALTER TABLE busy ADD COLUMN extra int;")
+    _write(migrations, "0001_busy.sql", "CREATE TABLE busy (id int);")
+    migrate(database, migrations)
+    _write(migrations, "0002_alter.sql", "ALTER TABLE busy ADD COLUMN extra int;")
 
     outcome: list[BaseException] = []
 
@@ -504,9 +504,9 @@ def test_a_blocked_statement_fails_naming_its_file_instead_of_stalling(
     assert time.monotonic() - started < 15
     (error,) = outcome
     assert isinstance(error, MigrationFailedError)
-    assert "0001_alter.sql" in str(error)
+    assert "0002_alter.sql" in str(error)
     assert isinstance(error.__cause__, psycopg.errors.LockNotAvailable)
-    assert _recorded(database) == []
+    assert _recorded(database) == ["0001_busy.sql"]
 
 
 def test_waiting_for_the_advisory_lock_is_logged_until_it_is_free(

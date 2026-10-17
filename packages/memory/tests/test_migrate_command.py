@@ -89,6 +89,22 @@ def test_an_edited_migration_is_refused_by_name(database: str) -> None:
     assert "0001_extensions.sql was edited after it was applied" in refused["message"]
 
 
+def test_a_database_that_is_not_a_memory_is_refused_and_left_alone(database: str) -> None:
+    with psycopg.connect(database) as connection:
+        connection.execute("CREATE TABLE schema_migrations (version bigint, dirty boolean)")
+
+    status, lines, stderr = _run(database__url=database)
+    assert (status, stderr) == (3, "")
+    (refused,) = [line for line in lines if line["level"] == "CRITICAL"]
+    assert refused["error"] == "ForeignDatabaseError"
+    assert "not a VisionQuery memory" in refused["message"]
+    assert "schema_migrations table that VisionQuery did not create" in refused["message"]
+    with psycopg.connect(database) as connection:
+        # Not even the first migration's extensions were created.
+        extensions = connection.execute("SELECT extname FROM pg_extension").fetchall()
+    assert extensions == [("plpgsql",)]
+
+
 def test_a_missing_database_url_is_named() -> None:
     status, lines, _ = _run()
     assert status == 2
