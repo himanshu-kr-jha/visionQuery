@@ -19,7 +19,10 @@ Read `CLAUDE.md`, the issue the branch belongs to (`gh issue view <n>`), and `CO
 
 Work in your own worktree when another agent uses the main checkout.
 If the branch is already checked out in another worktree, work on a detached checkout of `origin/<branch>` and push with `git push origin HEAD:<branch>`.
-When asked to move a branch built on an unmerged parent onto develop after the parent merged, use `git rebase --onto origin/develop <old-parent-tip>` (merges are squashes, so a plain rebase would replay the parent's commits).
+When asked to move a branch built on an unmerged parent onto develop after the parent merged, use `git rebase --onto origin/develop <parent head>`, where `<parent head>` is the parent PR's final head (merges are squashes, so a plain rebase would replay the parent's commits).
+First run `git fetch origin pull/<parent PR>/head` so the parent's head exists even if its branch was pruned.
+Do it only while the branch still carries the parent's commits (`git merge-base origin/<branch> <parent head>` is not an ancestor of `origin/develop`); otherwise it has been moved already, so change nothing and say so.
+If the parent itself depends on unmerged work, change nothing and report: a branch may depend on unmerged work one level deep at most.
 
 ## Fixing
 
@@ -34,6 +37,7 @@ When asked to move a branch built on an unmerged parent onto develop after the p
 ## Hand back
 
 End your run with this hand-back; the tech lead posts it as a comment on the PR if one exists, otherwise on the issue.
+Start it by naming what it answers: `tester` findings, `pr-reviewer` findings, a CI failure, a rebase, or a bug issue's build, because only the first two count as fix rounds.
 For each finding you were given: fixed (with the test that proves it), or not fixed (with why).
 Then the branch and final commit, and the result of the full check suite.
 
