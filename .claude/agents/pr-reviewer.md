@@ -32,6 +32,11 @@ If the GitHub API is unreachable, the tech lead may supply the PR and issue text
 Run every check CI runs that exists for the repository and is relevant to the change (see the Commands section of `CLAUDE.md`): lint, format check, type check, import contracts, the whole test suite.
 A check that does not exist yet (no Commands entry, no CI job, no `web/`) is reported as "not applicable" with the reason, never as a pass.
 Report exact failures with output; a red check is always a blocking finding.
+Run `make check` (it covers lint, format, type check, import contracts and the fast tests).
+The tester runs the full stack tests (`make test-stack`) on each PR head; run them yourself only when you suspect a defect there, and say which you ran.
+The tech lead tells you which fix round you are judging.
+When the tech lead says two fix rounds are done, mark only security or correctness defects as blocking, and list every other finding as non-blocking for a follow-up issue.
+For a docs-only or config-only change there is no tester run: you are the only check, so read the change completely and run whatever commands it touches.
 
 Then check, and report each failure as a finding:
 

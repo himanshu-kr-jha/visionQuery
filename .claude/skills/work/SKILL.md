@@ -13,9 +13,9 @@ If an issue number was given (`$ARGUMENTS`), work on that issue instead of choos
 
 Run the "Start of every session" routine in `CLAUDE.md`, then establish what is in flight:
 
-- `git fetch --prune` and `git status`.
-  If the working tree is not clean, stop and report to the user.
-  Otherwise `git switch develop && git pull`.
+- `git fetch --prune`, `git status` and `git worktree list`.
+  If the main checkout is not clean and no agent of this session is working in it, stop and report to the user.
+  Agents work in worktrees, so the main checkout may legitimately be on a feature branch; never switch it while an agent uses it.
 - `gh pr list --state open` with each PR's checks (`gh pr checks <n>`) and latest review comments.
   Only PRs whose head branch matches `^(feature|fix|chore|docs)/\d+-` are picked up; release and hotfix PRs are left for the user.
 - Remote branches without a PR, matching `^(feature|fix|chore|docs)/\d+-`.
@@ -26,43 +26,53 @@ Give the user a short status: what is merged, what is in flight and at which ste
 
 ## 2. Resume before starting anything new
 
-Take the first that applies:
+Several issues may be in flight at once.
+Go through every in-flight item, open PRs oldest first and then pushed issue branches without a PR, and apply the first matching rule to each:
 
-1. **An open PR exists:** read the comments on both the PR and its issue, and decide by the latest activity on the PR head:
-   - a builder or `developer` hand-back newer than the last verdict, with code changed: run `tester`, then `pr-reviewer`;
+1. **An open PR:** read the comments on both the PR and its issue, count its fix rounds (the `developer` hand-backs), and decide by the latest activity on the PR head:
+   - the review verdict on the latest commit is "ready to merge", or two fix rounds are done and no security or correctness finding remains, and CI is green (or the pre-CI rule below is met): if two fix rounds are done, first file every open non-security, non-correctness finding (blocking or not) as one follow-up issue under the milestone, unless such an issue already exists for this PR; then merge;
+   - a builder or `developer` hand-back newer than the last verdict: run `tester` then `pr-reviewer` if code changed, or `pr-reviewer` alone for a docs-only or config-only change;
+   - a docs-only or config-only PR with no review verdict on its head: run `pr-reviewer`;
    - a `tester` verdict "ready for PR" for the latest commit but no review verdict: run `pr-reviewer`;
-   - the latest review verdict has blocking findings and no newer hand-back: send them to `developer`;
-   - the review verdict on the latest commit is "ready to merge" and CI is green (or the pre-CI rule below is met): merge.
-2. **A pushed issue branch has no PR:** if a builder hand-back for its latest commit exists as a comment on the issue (or the PR), continue from the tester stage; otherwise send it back to its builder to finish, chosen by the issue's label (`senior-developer` for `task` and `spike`, `developer` for `bug`).
-3. **Nothing in flight:** pick the lowest-numbered open sub-issue of the earliest open milestone (or `$ARGUMENTS`), and start it.
+   - the latest review verdict has blocking findings and no newer hand-back: if fewer than two fix rounds have happened, send them to `developer`; otherwise stop and report to the user, because a security or correctness defect remains after two rounds.
+2. **A pushed issue branch whose hand-back names an unmerged parent branch:** while the parent's PR is open, leave it (the tester diffs it against the parent branch if it is tested early); once the parent's PR is merged, send it to `developer` to run `git rebase --onto origin/develop <parent head>` (the parent PR's final head from `gh pr view <parent> --json headRefOid`) and push, then treat it as below. If its builder is still running, wait for the hand-back.
+3. **A pushed issue branch without a PR:** if a builder hand-back for its latest commit exists as a comment on the issue, continue from the tester stage (or open the PR straight away for a docs-only or config-only change); otherwise send it back to its builder to finish, chosen by the issue's label (`senior-developer` for `task` and `spike`, `developer` for `bug`).
 
-## 3. Drive one issue through the team
+Then, if no `senior-developer` is building, start the next issue (or `$ARGUMENTS`): the lowest-numbered open sub-issue of the earliest open milestone, preferring one that does not depend on unmerged work.
 
-Follow the lifecycle in `CLAUDE.md` exactly:
+## 3. Drive issues through the team, pipelined
 
-1. `senior-developer` for `task` and `spike` issues, `developer` for `bug` issues: build on the branch, test-first.
-2. `tester` verifies the branch; `developer` fixes and `tester` re-verifies until "ready for PR".
+Follow the lifecycle and loop rules in `CLAUDE.md` exactly.
+Keep the pipeline full: as soon as `senior-developer` hands an issue back, start it on the next issue in a new worktree, then send the handed-back branch on to `tester`.
+
+1. `senior-developer` for `task` and `spike` issues, `developer` for `bug` issues: build on the branch, test-first, with `isolation: "worktree"`.
+2. `tester` verifies the branch and runs the stack tests once on its head; `developer` fixes and `tester` re-verifies.
+   Docs-only and config-only changes skip this step.
 3. Open the PR from the template with `Closes #<n>`, without agent attribution.
-4. `pr-reviewer` reviews; blocking findings go to `developer`, then back through `tester` if code changed, then `pr-reviewer`, until "ready to merge".
+4. `pr-reviewer` reviews; blocking findings go to `developer`, then back through `tester` if code changed, then `pr-reviewer`.
+   At most two fix rounds; after that only security or correctness defects block, and every other finding becomes a follow-up issue.
 5. When CI is green, squash-merge with `gh pr merge --squash --delete-branch` and confirm the issue closed.
    If GitHub did not auto-close it, close it with a comment linking the merged PR.
    Until CI exists (issue #8), "CI is green" means the tester ran the full local suite and it passed.
-   When no checks exist for the change, the tester's verdict on the final commit stands in for CI.
+   When no checks exist for the change, the tester's verdict on the final commit stands in for CI; for a docs-only or config-only change, the `pr-reviewer` verdict on the final commit does.
+   Merge when the verdict is "ready to merge", or when two fix rounds are done and no security or correctness finding remains.
    The PR title is a Conventional Commit `type(scope): subject`; the squash body is a short summary plus `Closes #<n>`, without the template checklist.
 6. The `docs/plan/v1.md` status marker is part of the issue's own PR: the builder marks the milestone `[~]` in its first PR and `[x]` in the PR that closes its last sub-issue.
    The tech lead updates the GitHub wiki (a separate repo) directly when a milestone completes or setup changes.
 
 Post each builder hand-back, tester verdict and reviewer verdict as a comment on the PR if one exists, otherwise on the issue.
+After posting a builder hand-back, unlocks and removes the builder's worktree (`git worktree unlock <path>; git worktree remove --force <path>`; agent worktrees are locked), after confirming the worktree has no uncommitted changes and `git rev-parse <branch>` equals `origin/<branch>`, so the branch is free for `developer`; do the same for stale builder worktrees found when resuming.
+Tell `tester` and `pr-reviewer` which fix round they are judging.
 Give each agent everything it needs in its prompt: the issue number, the branch, and the full report it must act on.
 
 ## 4. Continue or stop
 
-After a merge, return to step 2 for the next issue.
+After a merge, return to step 2 for whatever is in flight and keep the pipeline full.
 
 Stop and report to the user when any of these happens:
 
 - the current milestone's last sub-issue is merged: show how to run the milestone's demo and wait for the user's go-ahead before the next milestone; once the user approves the demo, close the milestone issue with a comment summarising what shipped;
-- a finding has bounced three times, or the issue has had five round trips in total;
+- a security or correctness defect remains after two fix rounds;
 - the reviewer's verdict is "do not merge", or a finding needs a design change;
 - something would change an ADR, the meaning of a glossary term, or an issue's acceptance criteria;
 - a decision needs information only the user has (hardware, footage, credentials, a product choice);
