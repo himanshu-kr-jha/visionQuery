@@ -1,9 +1,10 @@
 """Bootstrap a development environment from a fresh clone (`make bootstrap`).
 
 1. Checks every prerequisite the README lists, and names each one that is missing or too old,
-   with how to get it, before changing anything: Docker Engine with a reachable daemon, the
-   Compose and buildx plugins, and Node.js at the major `web/.nvmrc` pins, with npm.
-   uv is checked by the Makefile, which needs it to run this.
+   with how to get it, before changing anything: git and curl (present), Docker Engine with a
+   reachable daemon, the Compose and buildx plugins, and Node.js at the major `web/.nvmrc`
+   pins, with npm. uv is checked by the Makefile, which needs it to run this; GNU Make and Bash
+   are what ran it.
 2. Writes `.env` from `.env.example`, with a generated password for every value the example
    leaves empty (those are the secrets), readable by its owner alone. An `.env` that exists is
    never changed: it is only checked to set every secret, and each one it leaves empty or lacks
@@ -119,7 +120,22 @@ def _node_problems(root: Path) -> list[str]:
 
 def prerequisite_problems(root: Path) -> list[str]:
     """Every prerequisite that is missing or too old, each with how to get it."""
-    return _docker_problems() + _node_problems(root)
+    return _tool_problems() + _docker_problems() + _node_problems(root)
+
+
+#: Tools that need only to be present: the README's commands use them.
+TOOLS = {
+    "git": "https://git-scm.com/downloads",
+    "curl": "https://curl.se/download.html",
+}
+
+
+def _tool_problems() -> list[str]:
+    return [
+        f"{tool} is not installed: install it from your package manager or {how}"
+        for tool, how in TOOLS.items()
+        if shutil.which(tool) is None
+    ]
 
 
 def _variables(text: str) -> dict[str, str]:

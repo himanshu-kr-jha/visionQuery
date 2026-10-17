@@ -44,7 +44,8 @@ CI runs the setup below on Ubuntu 24.04 (x86_64); any Linux with these should do
 - Only for Triton (the `gpu` profile) on a GPU: an NVIDIA GPU with an NVIDIA driver recent enough for the Triton release `compose.yaml` pins (26.09, built on CUDA 13: driver 580 or newer), and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html) set up for Docker (`sudo nvidia-ctk runtime configure --runtime=docker`, then restart Docker).
   Without a GPU, Triton runs on the CPU (see the profiles below), and nothing else needs one.
 
-`make bootstrap` checks each of these except the GPU's, and names any that is missing or too old with how to get it, before changing anything.
+`make bootstrap` checks that uv, git and curl are installed, the Docker Engine, Compose and buildx versions and that the Docker daemon is reachable, and Node.js's major and npm.
+It does not check GNU Make and Bash (they ran it), uv's version, or the GPU's, and it names any problem with how to fix it, before changing anything.
 
 ### From a fresh clone
 
@@ -53,8 +54,8 @@ git clone https://github.com/himanshu-kr-jha/visionQuery.git
 cd visionQuery
 make bootstrap
 make up COMPOSE_PROFILES=dev
-curl --silent --show-error --fail-with-body http://127.0.0.1:8080/health
-docker compose --profile dev exec fake-cameras ffmpeg -v error -rtsp_transport tcp -i rtsp://mediamtx:8554/gym-g299 -frames:v 1 -f null -
+curl --silent --show-error --fail-with-body --max-time 10 http://127.0.0.1:8080/health
+docker compose --profile dev exec fake-cameras ffmpeg -v error -rtsp_transport tcp -timeout 30000000 -i rtsp://mediamtx:8554/gym-g299 -frames:v 1 -f null -
 make down VOLUMES=1
 ```
 

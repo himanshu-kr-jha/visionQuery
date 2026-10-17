@@ -61,7 +61,15 @@ with open(os.environ["FAKE_MAKE_LOG"], "a") as log:
     log.write(f"{os.getcwd()} {' '.join(sys.argv[1:])}\\n")
 sys.exit(int(os.environ.get("FAKE_MAKE_STATUS", "0")))
 """
-FAKES = {"docker": FAKE_DOCKER, "node": FAKE_NODE, "npm": FAKE_NPM, "make": FAKE_MAKE}
+FAKE_TRUE = "pass\n"
+FAKES = {
+    "docker": FAKE_DOCKER,
+    "node": FAKE_NODE,
+    "npm": FAKE_NPM,
+    "make": FAKE_MAKE,
+    "git": FAKE_TRUE,
+    "curl": FAKE_TRUE,
+}
 
 #: Tools as a development machine that meets every prerequisite has them.
 GOOD = {
@@ -285,6 +293,16 @@ def test_another_major_of_node_is_refused(machine: Machine) -> None:
 def test_without_npm_it_says_so(machine: Machine) -> None:
     machine.remove("npm")
     _refused(machine, "npm")
+
+
+def test_without_git_it_says_how_to_install_it(machine: Machine) -> None:
+    machine.remove("git")
+    _refused(machine, "git is not installed", "https://git-scm.com/downloads")
+
+
+def test_without_curl_it_says_how_to_install_it(machine: Machine) -> None:
+    machine.remove("curl")
+    _refused(machine, "curl is not installed", "https://curl.se/download.html")
 
 
 def test_every_missing_prerequisite_is_named_at_once(machine: Machine) -> None:
