@@ -7,6 +7,8 @@ The schema is a directory of numbered SQL files, `NNNN_lowercase_words.sql`, num
 The row in `schema_migrations` that records a file is written in the same transaction as the
 file's statements, so a migration that fails leaves nothing behind and nothing recorded, while
 the ones before it stay applied. The record keeps the SHA-256 of the file's bytes.
+Only the record's owner, the role that migrates, may write it: every run takes back from any
+other role, and from PUBLIC, every privilege on it but `SELECT`.
 
 **A run refuses when the files and the record disagree, naming each file.**
 Migrations are append-only: an applied file that was edited, renamed, renumbered or removed
@@ -53,9 +55,10 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, LiteralString
 
 import psycopg
+from psycopg import sql
 from psycopg.pq import TransactionStatus
 from pydantic import Field
 from visionquery.memory._sql import transaction_control
@@ -218,6 +221,7 @@ def migrate(
         if reason := _foreign(connection):
             raise ForeignDatabaseError(reason)
         connection.execute(_RECORD)
+        _seal(connection)
         pending, problems = _plan(files, misnamed, _applied(connection))
         if problems:
             raise MigrationRefusedError(problems)
@@ -235,6 +239,53 @@ CREATE TABLE IF NOT EXISTS public.schema_migrations (
     applied_at timestamptz NOT NULL DEFAULT now()
 )
 """
+
+
+#: Every privilege on the record held by a role other than its owner, except `SELECT`; the
+#: grantee 0 is PUBLIC.
+_GRANTS = b"""
+SELECT r.rolname, a.privilege_type
+FROM pg_catalog.pg_class c
+CROSS JOIN LATERAL aclexplode(c.relacl) a
+LEFT JOIN pg_catalog.pg_roles r ON r.oid = a.grantee
+WHERE c.oid = 'public.schema_migrations'::regclass
+  AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT'
+ORDER BY 1, 2
+"""
+
+
+#: The table privileges other than `SELECT`, as `aclexplode` names them and as SQL keywords.
+_PRIVILEGES: dict[str, LiteralString] = {
+    "INSERT": "INSERT",
+    "UPDATE": "UPDATE",
+    "DELETE": "DELETE",
+    "TRUNCATE": "TRUNCATE",
+    "REFERENCES": "REFERENCES",
+    "TRIGGER": "TRIGGER",
+    "MAINTAIN": "MAINTAIN",
+}
+
+
+def _seal(connection: psycopg.Connection) -> None:
+    """Take back from every other role what would let it write the record.
+
+    The runner trusts the record to say what was applied, so only its owner, the migrating
+    role, may change it. Grants made by hand or by default privileges (which a Deployment uses
+    to give its services the memory's tables) are revoked on every run; reading stays allowed.
+    A superuser, or a member of the owning role, can still write it: that is the owner.
+    """
+    held: dict[str | None, set[LiteralString]] = {}
+    for grantee, privilege in connection.execute(_GRANTS):
+        # A privilege this runner does not know of is taken back with everything else.
+        held.setdefault(grantee, set()).add(_PRIVILEGES.get(privilege, "ALL"))
+    for grantee, privileges in held.items():
+        keywords = ["ALL"] if "ALL" in privileges else sorted(privileges)
+        connection.execute(
+            sql.SQL("REVOKE {} ON TABLE public.schema_migrations FROM {}").format(
+                sql.SQL(", ").join(sql.SQL(keyword) for keyword in keywords),
+                sql.SQL("PUBLIC") if grantee is None else sql.Identifier(grantee),
+            )
+        )
 
 
 #: The record's columns and types, as `format_type` names them.
