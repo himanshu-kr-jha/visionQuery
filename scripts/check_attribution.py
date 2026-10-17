@@ -7,7 +7,7 @@
                                                  text in environment variables (unset or empty
                                                  is nothing to check)
 
-Matching is case-insensitive. Exits 0 when nothing matched, 1 naming each match, and 2 on a
+Matching is case-insensitive, and the footer is found across spaces, hyphens and line breaks. Exits 0 when nothing matched, 1 naming each match, and 2 on a
 usage error or a range git cannot list.
 """
 
@@ -19,14 +19,24 @@ import sys
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
-FORBIDDEN = re.compile(r"co-authored-by|claude-session|generated with claude code", re.IGNORECASE)
+# The three markers. The footer is matched across whitespace, hyphens and line breaks, with an
+# optional `[` for its markdown link (`Generated with [Claude Code](...)`). The words
+# "Claude Code" on their own, and role names, are ordinary prose and pass.
+FORBIDDEN = re.compile(
+    r"co-authored-by|claude-session|generated[\s-]+with[\s-]+\[?claude[\s-]*code",
+    re.IGNORECASE,
+)
 SCISSORS = "# ------------------------ >8 ------------------------"
 
 
 def _matches(where: str, text: str) -> Iterator[str]:
-    for number, line in enumerate(text.splitlines(), start=1):
-        if FORBIDDEN.search(line):
-            yield f"{where}:{number}: {line.strip()}"
+    # Searched as a whole, so that a marker split across a line break is found; it is reported
+    # at the line it starts on.
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    lines = text.split("\n")
+    for match in FORBIDDEN.finditer(text):
+        number = text.count("\n", 0, match.start()) + 1
+        yield f"{where}:{number}: {lines[number - 1].strip()}"
 
 
 def _commit_message(text: str) -> str:

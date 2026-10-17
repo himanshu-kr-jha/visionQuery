@@ -18,6 +18,16 @@ SCRIPT = ROOT / "scripts" / "check_attribution.py"
 CO_AUTHORED = "Co-" + "Authored-By: Someone <noreply@example.com>"
 SESSION = "Claude-" + "Session: https://example.com/session"
 FOOTER = "Generated with " + "Claude Code"
+#: The footer Claude Code appends to a PR description, and other ways to spell it.
+REAL_FOOTER = "🤖 Generated with [" + "Claude Code](https://claude.com/claude-code)"
+VARIANTS = [
+    REAL_FOOTER,
+    "Generated  with  " + "Claude  Code",
+    "Generated\twith\t" + "Claude\tCode",
+    "Generated-with-" + "Claude-Code",
+    "Generated with [claude" + "code]",
+    "GENERATED WITH [" + "CLAUDE CODE]",
+]
 
 
 def _check(
@@ -61,6 +71,7 @@ def test_a_clean_message_passes(tmp_path: Path) -> None:
         SESSION.lower(),
         FOOTER,
         f"🤖 {FOOTER.upper()} (https://example.com)",
+        *VARIANTS,
     ],
 )
 def test_attribution_anywhere_in_a_message_fails_naming_where(tmp_path: Path, line: str) -> None:
@@ -69,6 +80,25 @@ def test_attribution_anywhere_in_a_message_fails_naming_where(tmp_path: Path, li
     assert result.returncode == 1
     assert f"{message}:3" in result.stderr
     assert line in result.stderr
+
+
+def test_the_footer_split_across_a_line_break_fails_naming_the_line_it_starts_on(
+    tmp_path: Path,
+) -> None:
+    message = _message(tmp_path, "fix(api): one\n\nGenerated with\n" + "Claude Code\n")
+    result = _check(str(message))
+    assert result.returncode == 1
+    assert f"{message}:3" in result.stderr
+
+
+def test_the_words_claude_code_in_ordinary_prose_are_not_attribution(tmp_path: Path) -> None:
+    message = _message(
+        tmp_path,
+        "docs(agents): describe the Claude " + "Code agents\n\n"
+        "The files were generated with the project's script, with code from the tester.\n",
+    )
+    result = _check(str(message))
+    assert result.returncode == 0, result.stderr
 
 
 def test_git_comments_and_the_diff_below_the_scissors_are_not_the_message(tmp_path: Path) -> None:
@@ -97,6 +127,21 @@ def test_pr_text_is_read_from_the_environment(tmp_path: Path) -> None:
 
     environment["PR_BODY"] = "Closes #7\n"
     assert _check("--env", "PR_TITLE", "--env", "PR_BODY", env=environment).returncode == 0
+
+
+@pytest.mark.parametrize("footer", VARIANTS)
+def test_every_spelling_of_the_footer_in_pr_text_fails(footer: str) -> None:
+    environment = {"PATH": "/usr/bin:/bin", "PR_BODY": f"Closes #8\n\nSummary.\n\n{footer}\n"}
+    result = _check("--env", "PR_BODY", env=environment)
+    assert result.returncode == 1
+    assert "PR_BODY:5" in result.stderr
+
+
+def test_a_footer_split_across_a_line_break_in_pr_text_fails() -> None:
+    body = "Summary.\r\n\r\nGenerated\r\nwith " + "Claude\r\nCode\r\n"
+    result = _check("--env", "PR_BODY", env={"PATH": "/usr/bin:/bin", "PR_BODY": body})
+    assert result.returncode == 1
+    assert "PR_BODY:3" in result.stderr
 
 
 def test_an_unset_or_empty_variable_is_nothing_to_check() -> None:
@@ -145,6 +190,15 @@ def test_every_commit_in_a_range_is_checked_and_the_bad_one_named(repository: Pa
     assert result.returncode == 1
     assert f"commit {bad[:12]} (fix(api): two):5" in result.stderr
     assert "feat(api): one" not in result.stderr
+
+
+@pytest.mark.parametrize("footer", [REAL_FOOTER, "Generated\nwith " + "Claude\nCode"])
+def test_the_footer_in_a_commit_of_a_range_fails(repository: Path, footer: str) -> None:
+    base = _git(repository, "rev-parse", "HEAD")
+    bad = _commit(repository, f"fix(api): two\n\nRefs #1\n\n{footer}")
+    result = _check("--commits", f"{base}..HEAD", cwd=repository)
+    assert result.returncode == 1
+    assert f"commit {bad[:12]} (fix(api): two):5" in result.stderr
 
 
 def test_a_clean_range_passes(repository: Path) -> None:
