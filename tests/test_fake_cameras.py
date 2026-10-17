@@ -26,6 +26,7 @@ import pytest
 from fake_cameras import (
     DURATION,
     HUNG_AFTER,
+    PLAYLIST_END_MARGIN,
     PLAYLIST_HOURS,
     PLAYLIST_MOST_PASSES,
     PUBLISHED_LONG_ENOUGH,
@@ -38,6 +39,7 @@ from fake_cameras import (
     not_publishing,
     parse_cameras,
     playlist,
+    playlist_seconds,
     prepare_command,
     publish_command,
     redact,
@@ -219,6 +221,13 @@ def test_a_playlist_stays_small_however_short_the_duration() -> None:
     assert len(_entries(playlist(Path("/cache/abc.mp4"), 0, 20))) < PLAYLIST_MOST_PASSES
 
 
+@pytest.mark.parametrize(("start", "duration"), [(101, 300), (0, 20), (0, 1), (19, 20)])
+def test_the_length_of_a_playlist_is_what_its_entries_add_up_to(start: int, duration: int) -> None:
+    entries = _entries(playlist(Path("/cache/abc.mp4"), start, duration))
+    listed = sum(int(e[-1].removeprefix("duration ")) for e in entries)
+    assert playlist_seconds(start, duration) == listed
+
+
 def test_a_playlist_quotes_the_names_it_lists() -> None:
     assert _entries(playlist(Path("/cache/it's.mp4"), 0, 20))[0][0] == r"file '/cache/it'\''s.mp4'"
 
@@ -328,6 +337,17 @@ def test_a_camera_is_publishing_while_its_frames_keep_coming() -> None:
     progress = {"a": now - 1, "b": now - 30}
     assert not_publishing(cameras, progress, now) == ["b", "c"]
     assert not_publishing(cameras[:1], progress, now) == []
+
+
+def test_the_time_without_a_frame_after_which_a_camera_is_not_publishing_is_a_setting() -> None:
+    cameras = [Camera("a", SYNTHETIC)]
+    assert not_publishing(cameras, {"a": 995.0}, 1000.0, stale_after=10) == []
+    assert not_publishing(cameras, {"a": 995.0}, 1000.0, stale_after=2) == ["a"]
+    env = {"FAKE_CAMERAS": "a=synthetic"}
+    assert Settings.from_environment(env).stale_after == fake_cameras.STALE_AFTER
+    assert Settings.from_environment({**env, "FAKE_CAMERAS_STALE_AFTER": "2"}).stale_after == 2
+    with pytest.raises(ValueError, match="FAKE_CAMERAS_STALE_AFTER"):
+        Settings.from_environment({**env, "FAKE_CAMERAS_STALE_AFTER": "0"})
 
 
 # --- Supervising ffmpeg -----------------------------------------------------------------------
@@ -528,10 +548,12 @@ def test_a_camera_whose_frame_count_stops_is_unhealthy_though_ffmpeg_still_repor
 ) -> None:
     # A real ffmpeg whose RTSP write blocks prints the same `frame=` every second.
     p = publisher("lobby=synthetic")
+    # Reported by the status file, which is written once a second: two seconds is stale.
+    p.env["FAKE_CAMERAS_STALE_AFTER"] = "2"
     p.start()
     _eventually(lambda: p.health().returncode == 0)
     p.stall.touch()
-    _eventually(lambda: p.health().returncode != 0, timeout=fake_cameras.STALE_AFTER + 5)
+    _eventually(lambda: p.health().returncode != 0, timeout=8)
     assert "lobby" in p.health().stdout
     # Its frames move again: it is publishing.
     p.stall.unlink()
@@ -882,6 +904,31 @@ def test_an_ffmpeg_that_ends_soon_after_it_started_is_restarted_as_a_failure(
     assert "lobby: ffmpeg exited with 0; restarting in 1 s" in caplog.text
 
 
+def test_an_ffmpeg_that_ends_well_before_its_playlist_is_restarted_as_a_failure(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Long enough to be told from a failure at once, but nowhere near the playlist's length: an
+    # ffmpeg that exited with 0 then did not play it to the end.
+    early = playlist_seconds(101, DURATION) - PLAYLIST_END_MARGIN - 1
+    assert early > PUBLISHED_LONG_ENOUGH
+    with caplog.at_level(logging.INFO, logger="fake-cameras"):
+        delays, _ = _play_to_the_end(tmp_path, [early])
+    assert "lobby: ffmpeg exited with 0; restarting in 1 s" in caplog.text
+    assert "played its playlist to the end" not in caplog.text
+    assert 1 in delays
+
+
+def test_an_ffmpeg_that_ends_within_the_margin_of_its_playlist_played_it_to_the_end(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    just = playlist_seconds(101, DURATION) - PLAYLIST_END_MARGIN
+    with caplog.at_level(logging.INFO, logger="fake-cameras"):
+        delays, _ = _play_to_the_end(tmp_path, [just])
+    assert "lobby: played its playlist to the end; rejoining the timeline" in caplog.text
+    assert "restarting in" not in caplog.text
+    assert 1 not in delays
+
+
 async def _a_moment(seconds: float) -> None:
     await asyncio.sleep(0.001)
 
@@ -930,6 +977,8 @@ def _until(condition: Callable[[], bool]) -> Coroutine[None, None, None]:
 @pytest.mark.parametrize(
     ("step", "position"),
     [
+        # A step under a second is not rounded up to one.
+        (0.7, 102),
         # The host was suspended for 1234 s: the wall clock moved on, the monotonic one did not.
         (1234.0, 135),
         # The wall clock was set back by a minute.
@@ -958,10 +1007,67 @@ def test_a_step_of_the_wall_clock_makes_every_sample_rejoin_the_timeline_togethe
     assert starts["a"] == starts["b"] == ["inpoint 101", f"inpoint {position}"]
     # The test pattern is on no timeline, and goes on as it was.
     assert starts["c"] == ["loop"]
-    assert f"the wall clock stepped by {step:+.0f} s" in caplog.text
+    assert f"the wall clock stepped by {step:+.1f} s" in caplog.text
     # Not a failure: no backoff, no warning.
     assert "restarting in" not in caplog.text
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def _watch_steps(steps: list[tuple[float, float]]) -> list[logging.LogRecord]:
+    """What `_watch_clock` logs while the clock goes on, a check a second, and the wall clock
+    steps as `steps` say: (seconds of the clock when, by how much)."""
+    wall, clock = [10_000.0], [0.0]
+    pending = sorted(steps)
+
+    async def sleep(seconds: float) -> None:
+        clock[0] += seconds
+        wall[0] += seconds
+        while pending and pending[0][0] <= clock[0]:
+            wall[0] += pending.pop(0)[1]
+        if not pending and clock[0] > 3 * 3600 + 10:
+            raise asyncio.CancelledError
+
+    publisher = RealPublisher(
+        _settings(Path("/nonexistent")), clock=lambda: clock[0], sleep=sleep, wall=lambda: wall[0]
+    )
+    records: list[logging.LogRecord] = []
+
+    class Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger("fake-cameras")
+    handler = Collect(logging.WARNING)
+    logger.addHandler(handler)
+    try:
+        with contextlib.suppress(asyncio.CancelledError):
+            asyncio.run(publisher._watch_clock())  # pyright: ignore[reportPrivateUsage]
+    finally:
+        logger.removeHandler(handler)
+    return records
+
+
+def test_a_host_whose_clock_steps_often_is_warned_about_by_the_count() -> None:
+    # Four steps within an hour (more than three).
+    records = _watch_steps([(100.0, 5.0), (200.0, -5.0), (300.0, 5.0), (400.0, -5.0)])
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert "4 times" in records[0].getMessage()
+    assert "hour" in records[0].getMessage()
+
+
+def test_a_few_steps_of_the_wall_clock_are_not_warned_about() -> None:
+    assert _watch_steps([(100.0, 5.0), (200.0, -5.0), (300.0, 5.0)]) == []
+    # Nor are many, when they are spread over hours.
+    assert _watch_steps([(i * 1500.0 + 100, 5.0) for i in range(6)]) == []
+
+
+def test_the_warning_about_a_clock_that_steps_often_comes_at_most_once_an_hour() -> None:
+    # Eight steps within a quarter of an hour: warned at the fourth, not at the next four.
+    # Four more, long after, are warned about again.
+    steps = [(100.0 + i * 100, 5.0) for i in range(8)] + [(5000.0 + i * 100, 5.0) for i in range(4)]
+    records = _watch_steps(steps)
+    assert len(records) == 2
+    assert all("4 times" in r.getMessage() for r in records)
 
 
 def test_a_step_of_the_wall_clock_while_a_camera_waits_to_join_is_not_missed(

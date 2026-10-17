@@ -94,6 +94,14 @@ PREPARE_RETRY = 30.0
 BACKOFF = (1, 2, 4, 8)
 #: A camera that published for this long is back to the shortest backoff when it exits.
 PUBLISHED_LONG_ENOUGH = 30.0
+#: An ffmpeg that exits with 0 has played its playlist to the end only if it published for at
+#: least the playlist's length less this many seconds (it starts a little late, and ends early).
+PLAYLIST_END_MARGIN = 30.0
+#: A wall clock that steps more than this many times in CLOCK_STEPS_WITHIN seconds is a host to
+#: look at (an NTP daemon fighting another, a VM that is paused): warned about, at most that
+#: often.
+CLOCK_STEPS_OFTEN = 3
+CLOCK_STEPS_WITHIN = 3600.0
 
 _NAME = re.compile(r"[A-Za-z0-9_-]+")
 #: The `user:password@` of a URL.
@@ -190,6 +198,16 @@ def _quiet(ffmpeg: str) -> list[str]:
     return [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error"]
 
 
+def _passes(duration: int, hours: int) -> int:
+    return min(PLAYLIST_MOST_PASSES, max(2, math.ceil(hours * 3600 / duration)))
+
+
+def playlist_seconds(start: int, duration: int = DURATION, hours: int = PLAYLIST_HOURS) -> int:
+    """How long `playlist` (with the same arguments) plays: what is left of the first pass,
+    then whole passes."""
+    return duration - start + (_passes(duration, hours) - 1) * duration
+
+
 def playlist(
     source: Path, start: int, duration: int = DURATION, hours: int = PLAYLIST_HOURS
 ) -> str:
@@ -203,7 +221,7 @@ def playlist(
     if start:
         first.append(f"inpoint {start}")
     first.append(f"duration {duration - start}")
-    passes = min(PLAYLIST_MOST_PASSES, max(2, math.ceil(hours * 3600 / duration)))
+    passes = _passes(duration, hours)
     return "\n".join([*first, *[f"file '{name}'\nduration {duration}"] * (passes - 1)]) + "\n"
 
 
@@ -273,13 +291,16 @@ def restart_delay(failures: int) -> int:
 
 
 def not_publishing(
-    cameras: Sequence[Camera], progress: Mapping[str, float], now: float
+    cameras: Sequence[Camera],
+    progress: Mapping[str, float],
+    now: float,
+    stale_after: float = STALE_AFTER,
 ) -> list[str]:
     """The cameras whose ffmpeg has not sent a new frame recently."""
     return [
         c.name
         for c in cameras
-        if (last := progress.get(c.name)) is None or now - last > STALE_AFTER
+        if (last := progress.get(c.name)) is None or now - last > stale_after
     ]
 
 
@@ -295,6 +316,8 @@ class Settings:
     duration: int = DURATION
     prepare_attempts: int = PREPARE_ATTEMPTS
     prepare_retry: float = PREPARE_RETRY
+    #: Seconds without a new frame after which `health` says a camera is not publishing.
+    stale_after: float = STALE_AFTER
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str]) -> Settings:
@@ -306,20 +329,22 @@ class Settings:
             duration = int(env.get("FAKE_CAMERAS_DURATION", DURATION))
             attempts = int(env.get("FAKE_CAMERAS_PREPARE_ATTEMPTS", PREPARE_ATTEMPTS))
             retry = float(env.get("FAKE_CAMERAS_PREPARE_RETRY", PREPARE_RETRY))
+            stale = float(env.get("FAKE_CAMERAS_STALE_AFTER", STALE_AFTER))
         except ValueError as error:
             raise ValueError(
                 f"FAKE_CAMERAS_DURATION and _PREPARE_ATTEMPTS must be whole numbers and "
-                f"_PREPARE_RETRY a number: {error}"
+                f"_PREPARE_RETRY and _STALE_AFTER numbers: {error}"
             ) from error
-        if duration < 1 or attempts < 1 or retry < 0:
+        if duration < 1 or attempts < 1 or retry < 0 or not stale > 0:
             raise ValueError(
-                "FAKE_CAMERAS_DURATION and FAKE_CAMERAS_PREPARE_ATTEMPTS must be at least 1 and "
-                "FAKE_CAMERAS_PREPARE_RETRY at least 0"
+                "FAKE_CAMERAS_DURATION and FAKE_CAMERAS_PREPARE_ATTEMPTS must be at least 1, "
+                "FAKE_CAMERAS_PREPARE_RETRY at least 0 and FAKE_CAMERAS_STALE_AFTER above 0"
             )
         return cls(
             duration=duration,
             prepare_attempts=attempts,
             prepare_retry=retry,
+            stale_after=stale,
             cameras=cameras,
             rtsp=env.get("FAKE_CAMERAS_RTSP", "rtsp://mediamtx:8554").rstrip("/"),
             ffmpeg=env.get("FAKE_CAMERAS_FFMPEG", "ffmpeg"),
@@ -484,6 +509,7 @@ class Publisher:
         _LOG.info("%s: publishing %s to %s", camera.name, label, redact(url))
         failures = 0
         while True:
+            expected = 0.0
             if not timed:
                 command = publish_command(source, url, self._settings.ffmpeg)
                 started = self._clock()
@@ -494,6 +520,7 @@ class Publisher:
                 wait, start = timeline_start(self._wall(), self._settings.duration)
                 playing = self._settings.status.with_name(f"{camera.name}.concat")
                 playing.write_text(playlist(source, start, self._settings.duration))
+                expected = playlist_seconds(start, self._settings.duration)
                 await self._sleep(wait)
                 command = publish_command(source, url, self._settings.ffmpeg, playing)
                 started = self._clock()
@@ -504,7 +531,12 @@ class Publisher:
                 _LOG.info("%s: rejoining the timeline", camera.name)
                 failures = 0
                 continue
-            if timed and ended.status == 0 and published > PUBLISHED_LONG_ENOUGH:
+            if (
+                timed
+                and ended.status == 0
+                and published > PUBLISHED_LONG_ENOUGH
+                and published >= expected - PLAYLIST_END_MARGIN
+            ):
                 _LOG.info("%s: played its playlist to the end; rejoining the timeline", camera.name)
                 failures = 0
                 continue
@@ -539,15 +571,29 @@ class Publisher:
         where it was, so that the cameras are no longer where the timeline says, and one that
         restarted would no longer be in step with the others."""
         offset = self._wall() - self._clock()
+        steps: list[float] = []
+        warned: float | None = None
         while True:
             await self._sleep(CLOCK_EVERY)
             step = self._wall() - self._clock() - offset
             if abs(step) > CLOCK_STEP:
                 _LOG.info(
-                    "the wall clock stepped by %+.0f s: every camera playing a sample rejoins "
+                    "the wall clock stepped by %+.1f s: every camera playing a sample rejoins "
                     "the timeline",
                     step,
                 )
+                now = self._clock()
+                steps = [at for at in steps if now - at < CLOCK_STEPS_WITHIN] + [now]
+                if len(steps) > CLOCK_STEPS_OFTEN and (
+                    warned is None or now - warned >= CLOCK_STEPS_WITHIN
+                ):
+                    warned = now
+                    _LOG.warning(
+                        "the wall clock stepped %d times in the last hour: the host's time is "
+                        "not steady, and every camera playing a sample rejoined the timeline "
+                        "each time",
+                        len(steps),
+                    )
                 offset += step
                 self._stepped.set()
                 self._stepped = asyncio.Event()
@@ -680,7 +726,7 @@ def _health(settings: Settings) -> int:
         progress: dict[str, float] = json.loads(settings.status.read_text())
     except OSError, ValueError:
         progress = {}
-    silent = not_publishing(settings.cameras, progress, time.time())
+    silent = not_publishing(settings.cameras, progress, time.time(), settings.stale_after)
     if silent:
         print(f"not publishing: {', '.join(silent)}")
         return 1
