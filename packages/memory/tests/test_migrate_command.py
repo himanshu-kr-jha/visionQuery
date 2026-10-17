@@ -9,6 +9,7 @@ import os
 import socket
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -20,7 +21,7 @@ COMMAND = Path(sys.executable).parent / "visionquery-migrate"
 
 
 def _run(
-    extra: dict[str, str] | None = None, **variables: str
+    extra: dict[str, str] | None = None, *, args: tuple[str, ...] = (), **variables: str
 ) -> tuple[int, list[dict[str, Any]], str]:
     inherited = {k: v for k, v in os.environ.items() if not k.upper().startswith("VISIONQUERY_")}
     environment = inherited | {f"VISIONQUERY_{k.upper()}": v for k, v in variables.items()}
@@ -28,7 +29,12 @@ def _run(
     # Bound to loopback; the port is the command's own default, which must not be a fixed one.
     environment["VISIONQUERY_METRICS_HOST"] = "127.0.0.1"
     done = subprocess.run(
-        [str(COMMAND)], env=environment, capture_output=True, text=True, timeout=60, check=False
+        [str(COMMAND), *args],
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
     )
     return done.returncode, [json.loads(line) for line in done.stdout.splitlines()], done.stderr
 
@@ -103,6 +109,85 @@ def test_a_database_that_is_not_a_memory_is_refused_and_left_alone(database: str
         # Not even the first migration's extensions were created.
         extensions = connection.execute("SELECT extname FROM pg_extension").fetchall()
     assert extensions == [("plpgsql",)]
+
+
+# --- `visionquery-migrate status` ----------------------------------------------------------
+
+
+def _extensions(database: str) -> list[str]:
+    with psycopg.connect(database) as connection:
+        rows = connection.execute("SELECT extname FROM pg_extension ORDER BY 1").fetchall()
+    return [str(name) for (name,) in rows]
+
+
+def test_status_lists_pending_migrations_and_changes_nothing(database: str) -> None:
+    status, lines, stderr = _run(args=("status",), database__url=database)
+    assert (status, stderr) == (0, "")
+    (pending,) = [line for line in lines if line.get("state") == "pending"]
+    assert pending["migration"] == "0001_extensions.sql"
+    assert pending["message"] == "pending 0001_extensions.sql"
+    (summary,) = [line for line in lines if line["message"].startswith("status:")]
+    assert summary["message"] == "status: 0 applied, 1 pending"
+    assert summary["applied"] == []
+    assert summary["pending"] == ["0001_extensions.sql"]
+    # Nothing was applied, and not even the record was created.
+    assert _extensions(database) == ["plpgsql"]
+    with psycopg.connect(database) as connection:
+        row = connection.execute("SELECT to_regclass('public.schema_migrations')").fetchone()
+    assert row == (None,)
+
+
+def test_status_lists_applied_migrations_with_when_they_were_applied(database: str) -> None:
+    assert _run(database__url=database)[0] == 0
+    status, lines, stderr = _run(args=("status",), database__url=database)
+    assert (status, stderr) == (0, "")
+    (applied,) = [line for line in lines if line.get("state") == "applied"]
+    assert applied["migration"] == "0001_extensions.sql"
+    assert applied["message"].startswith("applied 0001_extensions.sql at ")
+    assert datetime.fromisoformat(applied["applied_at"]).tzinfo is not None
+    assert len(applied["sha256"]) == 64
+    (summary,) = [line for line in lines if line["message"].startswith("status:")]
+    assert summary["message"] == "status: 1 applied, 0 pending"
+
+
+def test_status_names_what_a_run_would_refuse(database: str) -> None:
+    assert _run(database__url=database)[0] == 0
+    with psycopg.connect(database) as connection:
+        connection.execute(
+            "UPDATE schema_migrations SET sha256 = sha256('before'::bytea) WHERE number = 1"
+        )
+    status, lines, stderr = _run(args=("status",), database__url=database)
+    assert (status, stderr) == (3, "")
+    (refused,) = [line for line in lines if line["level"] == "CRITICAL"]
+    assert refused["error"] == "MigrationRefusedError"
+    assert refused["files"] == ["0001_extensions.sql"]
+    assert "a run would refuse" in refused["message"]
+    assert "0001_extensions.sql was edited after it was applied" in refused["message"]
+
+
+def test_status_refuses_a_database_that_is_not_a_memory(database: str) -> None:
+    with psycopg.connect(database) as connection:
+        connection.execute("CREATE TABLE invoices (id int)")
+    status, lines, stderr = _run(args=("status",), database__url=database)
+    assert (status, stderr) == (3, "")
+    (refused,) = [line for line in lines if line["level"] == "CRITICAL"]
+    assert refused["error"] == "ForeignDatabaseError"
+    assert "public.invoices" in refused["message"]
+
+
+def test_status_of_an_unreachable_database_fails_without_its_password() -> None:
+    url = "postgresql://vq:hunter2@127.0.0.1:1/db"
+    status, lines, stderr = _run(args=("status",), database__url=url)
+    assert status == 1
+    (failed,) = [line for line in lines if line["level"] == "CRITICAL"]
+    assert failed["error"] == "ConnectionFailedError"
+    assert "hunter2" not in json.dumps(lines) + stderr
+
+
+def test_an_unknown_command_is_a_usage_error() -> None:
+    status, _, stderr = _run(args=("upgrade",))
+    assert status == 2
+    assert "status" in stderr
 
 
 def test_a_missing_database_url_is_named() -> None:

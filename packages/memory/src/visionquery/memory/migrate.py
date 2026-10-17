@@ -36,8 +36,14 @@ when a migration failed or the database could not be connected to (a fixed messa
 category, never libpq's text), 2 when its settings are
 missing or invalid, and 3 when it refused (the files and the record disagree, or the database
 is not a memory).
+
+`visionquery-migrate status` changes nothing: in one read-only transaction, without waiting for
+a run in progress, it logs each applied migration (with when it was applied and its SHA-256),
+each pending one, and what a run would refuse. It exits 0, or as a run would: 1 when the
+database cannot be reached, 2 for bad settings, and 3 when a run would refuse.
 """
 
+import argparse
 import hashlib
 import logging
 import re
@@ -45,6 +51,7 @@ import time
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated
 
@@ -61,13 +68,16 @@ __all__ = [
     "LOCK_KEY",
     "LOCK_TIMEOUT",
     "MIGRATIONS",
+    "AppliedMigration",
     "ConnectionFailedError",
     "ForeignDatabaseError",
     "MigrationFailedError",
     "MigrationRefusedError",
     "Problem",
+    "SchemaStatus",
     "main",
     "migrate",
+    "status",
 ]
 
 _log = logging.getLogger(__name__)
@@ -107,10 +117,12 @@ class Problem:
 class MigrationRefusedError(Exception):
     """The files and the record disagree, so nothing was applied."""
 
-    def __init__(self, problems: Sequence[Problem]) -> None:
+    def __init__(
+        self, problems: Sequence[Problem], lead: str = "migrations refused, nothing was applied"
+    ) -> None:
         self.problems = tuple(problems)
         details = "\n".join(f"  {problem.message}" for problem in self.problems)
-        super().__init__(f"migrations refused, nothing was applied:\n{details}")
+        super().__init__(f"{lead}:\n{details}")
 
 
 class ForeignDatabaseError(Exception):
@@ -143,10 +155,44 @@ class _Migration:
 
 
 @dataclass(frozen=True)
-class _Applied:
+class AppliedMigration:
+    """One row of the record: a migration this database applied, and when."""
+
     number: int
     name: str
     sha256: bytes
+    applied_at: datetime
+
+
+@dataclass(frozen=True)
+class SchemaStatus:
+    """What `status` found: the applied migrations in number order, the pending ones by name,
+    and what a run would refuse (when there is anything, a run applies nothing)."""
+
+    applied: tuple[AppliedMigration, ...]
+    pending: tuple[str, ...]
+    problems: tuple[Problem, ...]
+
+
+def status(
+    url: str, directory: Path = MIGRATIONS, *, connect_timeout: int = CONNECT_TIMEOUT
+) -> SchemaStatus:
+    """What a run would do to the database at `url`, found without changing anything.
+
+    Reads in one read-only transaction and does not wait for a run in progress; what it finds
+    is what that run had committed when it looked. Raises `ForeignDatabaseError` when the
+    database holds something and is not a VisionQuery memory.
+    """
+    files, misnamed = _read(directory)
+    connection = connect(url, connect_timeout)
+    connection.read_only = True
+    connection.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+    with connection, connection.transaction():
+        if reason := _foreign(connection):
+            raise ForeignDatabaseError(reason)
+        applied = _applied(connection)
+    pending, problems = _plan(files, misnamed, applied)
+    return SchemaStatus(tuple(applied), tuple(m.name for m in pending), tuple(problems))
 
 
 def migrate(
@@ -165,20 +211,15 @@ def migrate(
     `connect_timeout` seconds unless the URL sets its own, and a statement of a migration that
     waits `lock_timeout` seconds for a lock fails its file.
     """
-    files, problems = _read(directory)
+    files, misnamed = _read(directory)
     connection = connect(url, connect_timeout)
     with connection, _locked(connection):
         # Read under the lock, so what is pending is what nobody else is applying.
         if reason := _foreign(connection):
             raise ForeignDatabaseError(reason)
         connection.execute(_RECORD)
-        applied = _applied(connection)
-        problems = _disagreements(files, applied) + problems + _numbering(files, applied)
+        pending, problems = _plan(files, misnamed, _applied(connection))
         if problems:
-            raise MigrationRefusedError(problems)
-        recorded = {record.name for record in applied}
-        pending = [migration for migration in files if migration.name not in recorded]
-        if problems := _transaction_control(pending):
             raise MigrationRefusedError(problems)
         for migration in pending:
             _apply(connection, migration, lock_timeout)
@@ -301,14 +342,38 @@ def _read(directory: Path) -> tuple[list[_Migration], list[Problem]]:
     return files, problems
 
 
-def _applied(connection: psycopg.Connection) -> list[_Applied]:
+def _applied(connection: psycopg.Connection) -> list[AppliedMigration]:
+    """The record's rows in number order; none when there is no record yet."""
+    row = connection.execute("SELECT to_regclass('public.schema_migrations')").fetchone()
+    if row is None or row[0] is None:
+        return []
     rows = connection.execute(
-        "SELECT number, name, sha256 FROM public.schema_migrations ORDER BY number"
+        "SELECT number, name, sha256, applied_at FROM public.schema_migrations ORDER BY number"
     ).fetchall()
-    return [_Applied(number, name, bytes(sha256)) for number, name, sha256 in rows]
+    return [
+        AppliedMigration(number, name, bytes(sha256), applied_at)
+        for number, name, sha256, applied_at in rows
+    ]
 
 
-def _disagreements(files: Sequence[_Migration], applied: Sequence[_Applied]) -> list[Problem]:
+def _plan(
+    files: Sequence[_Migration], misnamed: Sequence[Problem], applied: Sequence[AppliedMigration]
+) -> tuple[list[_Migration], list[Problem]]:
+    """The files a run would apply, in order, and every reason it would refuse to."""
+    recorded = {record.name for record in applied}
+    pending = [migration for migration in files if migration.name not in recorded]
+    problems = [
+        *_disagreements(files, applied),
+        *misnamed,
+        *_numbering(files, applied),
+        *_transaction_control(pending),
+    ]
+    return pending, problems
+
+
+def _disagreements(
+    files: Sequence[_Migration], applied: Sequence[AppliedMigration]
+) -> list[Problem]:
     """Each applied migration whose file is no longer exactly what was applied."""
     by_name = {migration.name: migration for migration in files}
     recorded = {record.name for record in applied}
@@ -341,7 +406,7 @@ def _disagreements(files: Sequence[_Migration], applied: Sequence[_Applied]) -> 
     return problems
 
 
-def _numbering(files: Sequence[_Migration], applied: Sequence[_Applied]) -> list[Problem]:
+def _numbering(files: Sequence[_Migration], applied: Sequence[AppliedMigration]) -> list[Problem]:
     """Repeated or missing numbers, and new files numbered among the applied ones."""
     recorded = {record.name for record in applied}
     applied_digests = {record.sha256 for record in applied}
@@ -434,15 +499,35 @@ class MigrateSettings(Settings):
     connect_timeout: Annotated[int, Field(ge=1)] = CONNECT_TIMEOUT
 
 
-def main() -> None:
+def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="visionquery-migrate",
+        description=(
+            "Bring the memory's schema up to date, or with `status` list the applied and "
+            "pending migrations and what a run would refuse, changing nothing. Reads "
+            "VISIONQUERY_DATABASE__URL. Exits 0 when done, 1 when a migration failed or the "
+            "database could not be reached, 2 when the settings are missing or invalid, and 3 "
+            "when a run refuses (or, for `status`, would refuse)."
+        ),
+    )
+    parser.add_argument(
+        "command", nargs="?", choices=["status"], help="only report, change nothing"
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
     """The `visionquery-migrate` command."""
+    only_report = _arguments(argv).command == "status"
     process = start("migrate", MigrateSettings)
     try:
         settings = process.settings
+        url = settings.database.url.get_secret_value()
+        if only_report:
+            _report(status(url, connect_timeout=settings.connect_timeout))
+            return
         applied = migrate(
-            settings.database.url.get_secret_value(),
-            connect_timeout=settings.connect_timeout,
-            lock_timeout=settings.lock_timeout,
+            url, connect_timeout=settings.connect_timeout, lock_timeout=settings.lock_timeout
         )
     except MigrationRefusedError as error:
         files = [problem.file for problem in error.problems]
@@ -477,3 +562,32 @@ def main() -> None:
     finally:
         process.close()
     _log.info("migrated: %d applied", len(applied), extra={"applied": list(applied)})
+
+
+def _report(found: SchemaStatus) -> None:
+    """Log what `status` found, one line per migration; raise when a run would refuse."""
+    for record in found.applied:
+        _log.info(
+            "applied %s at %s",
+            record.name,
+            record.applied_at.isoformat(),
+            extra={
+                "migration": record.name,
+                "state": "applied",
+                "applied_at": record.applied_at.isoformat(),
+                "sha256": record.sha256.hex(),
+            },
+        )
+    for name in found.pending:
+        _log.info("pending %s", name, extra={"migration": name, "state": "pending"})
+    _log.info(
+        "status: %d applied, %d pending",
+        len(found.applied),
+        len(found.pending),
+        extra={
+            "applied": [record.name for record in found.applied],
+            "pending": list(found.pending),
+        },
+    )
+    if found.problems:
+        raise MigrationRefusedError(found.problems, "a run would refuse and apply nothing")
