@@ -359,12 +359,74 @@ def test_no_two_services_publish_the_same_host_port() -> None:
         seen[key] = name
 
 
+CAMERA_FACING = {
+    ("mediamtx", "8554", "tcp"),
+    ("mediamtx", "8889", "tcp"),
+    ("mediamtx", "8189", "udp"),
+}
+
+
+def _bound(config: Mapping[str, Any]) -> dict[tuple[str, str, str], str]:
+    """Each published port as (service, container port, protocol), and its host address."""
+    return {
+        (name, str(port["target"]), port.get("protocol", "tcp")): port.get("host_ip", "")
+        for name, service in _services(config).items()
+        for port in service.get("ports", [])
+    }
+
+
 def test_ports_are_published_on_loopback_unless_told_otherwise() -> None:
-    published = _published(_config())
+    bound = _bound(_config())
+    assert bound
+    assert set(bound.values()) == {"127.0.0.1"}
+
+
+def test_widening_a_bind_address_never_widens_the_others() -> None:
+    # Cameras elsewhere need MediaMTX's camera-facing ports, not Postgres, Prometheus (which has
+    # no authentication), Grafana, Triton or MediaMTX's control API.
+    cameras = _bound(_config(env={"VISIONQUERY_MEDIAMTX_BIND_ADDRESS": "0.0.0.0"}))
+    assert {key for key, host_ip in cameras.items() if host_ip == "0.0.0.0"} == CAMERA_FACING
+    assert {host_ip for key, host_ip in cameras.items() if key not in CAMERA_FACING} == {
+        "127.0.0.1"
+    }
+    rest = _bound(_config(env={"VISIONQUERY_BIND_ADDRESS": "0.0.0.0"}))
+    assert {key for key, host_ip in rest.items() if host_ip == "127.0.0.1"} == CAMERA_FACING
+    assert {host_ip for key, host_ip in rest.items() if key not in CAMERA_FACING} == {"0.0.0.0"}
+
+
+def test_every_bind_address_defaults_to_loopback_and_is_documented() -> None:
+    text = COMPOSE.read_text()
+    addresses = {n for n in _example() if n.endswith("_BIND_ADDRESS")}
+    assert addresses == {"VISIONQUERY_BIND_ADDRESS", "VISIONQUERY_MEDIAMTX_BIND_ADDRESS"}
+    assert {_example()[n] for n in addresses} == {"127.0.0.1"}
+    published = re.findall(r'^\s+- "(\$\{[^}]*\}):', text, re.MULTILINE)
     assert published
-    assert {host_ip for _, host_ip, _, _ in published} == {"127.0.0.1"}
-    moved = _published(_config(env={"VISIONQUERY_BIND_ADDRESS": "0.0.0.0"}))
-    assert {host_ip for _, host_ip, _, _ in moved} == {"0.0.0.0"}
+    for host in published:
+        assert host in {f"${{{n}:-127.0.0.1}}" for n in addresses}, host
+
+
+def test_the_open_publish_and_read_warning_is_on_the_mediamtx_bind_address() -> None:
+    lines = ENV_EXAMPLE.read_text().splitlines()
+    at = lines.index("VISIONQUERY_MEDIAMTX_BIND_ADDRESS=127.0.0.1")
+    comment = "\n".join(itertools.takewhile(lambda line: line.startswith("#"), lines[at - 1 :: -1]))
+    assert "publish to" in comment
+    assert "WARNING" in comment
+
+
+def test_webrtc_media_is_announced_at_the_hosts_and_port_the_browser_reaches() -> None:
+    chosen = {
+        "VISIONQUERY_MEDIAMTX_WEBRTC_HOSTS": "192.0.2.7,vq.example",
+        "VISIONQUERY_MEDIAMTX_WEBRTC_UDP_PORT": "47123",
+    }
+    config = _config(env=chosen)
+    environment = _services(config)["mediamtx"]["environment"]
+    assert environment["MTX_WEBRTCADDITIONALHOSTS"] == "192.0.2.7,vq.example"
+    assert environment["MTX_WEBRTCLOCALUDPADDRESS"] == ":47123"
+    [udp] = [p for p in _services(config)["mediamtx"]["ports"] if p["protocol"] == "udp"]
+    assert (udp["published"], udp["target"]) == ("47123", 47123)
+    default = _services(_config())["mediamtx"]["environment"]
+    assert default["MTX_WEBRTCADDITIONALHOSTS"] == "127.0.0.1"
+    assert default["MTX_WEBRTCLOCALUDPADDRESS"] == ":8189"
 
 
 def test_every_published_port_has_a_variable_of_its_own() -> None:

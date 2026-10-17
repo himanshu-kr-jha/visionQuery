@@ -48,7 +48,7 @@ A GPU is needed only for Triton (the `gpu` profile), and then with NVIDIA's cont
    - `--profile dev`: the fake camera publisher, once it lands (#6).
 4. Stop it with `make down`, which stops every service whatever its profile (Triton included) and keeps the data; `make down VOLUMES=1` deletes the database and metrics as well.
 
-Every port listens on loopback only unless `VISIONQUERY_BIND_ADDRESS` says otherwise, and each can be moved with its own variable when something on the machine already uses it.
+Every port listens on loopback only unless `VISIONQUERY_BIND_ADDRESS` (or, for the camera-facing ports of MediaMTX alone, `VISIONQUERY_MEDIAMTX_BIND_ADDRESS`) says otherwise, and each can be moved with its own variable when something on the machine already uses it.
 
 Every VisionQuery process is configured only through environment variables prefixed `VISIONQUERY_`, logs JSON lines to stdout, and serves Prometheus metrics on `/metrics` (port `9100` unless `VISIONQUERY_METRICS_PORT` says otherwise).
 The variables every process reads are listed in [`CLAUDE.md`](CLAUDE.md#architecture); a process that is missing one it needs exits with status 2 after logging which.

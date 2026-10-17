@@ -25,6 +25,7 @@ import os
 import secrets
 import shlex
 import shutil
+import socket
 import subprocess
 import time
 import urllib.error
@@ -212,6 +213,12 @@ class Stack:
         return f"--- ps ---\n{ps}\n--- logs ---\n{logs}"
 
 
+def _free_udp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return int(probe.getsockname()[1])
+
+
 def _new_stack(
     profiles: Iterable[str] = (),
     files: Iterable[Path] = (),
@@ -223,6 +230,10 @@ def _new_stack(
     for name, value in _documented().items():
         if not value:
             env[name] = secrets.token_hex(16)
+        elif name == "VISIONQUERY_MEDIAMTX_WEBRTC_UDP_PORT":
+            # MediaMTX announces this number to browsers, so it is the same inside and out and
+            # cannot be ephemeral: take one that is free now.
+            env[name] = str(_free_udp_port())
         elif name.endswith("_PORT"):
             env[name] = "0"  # an ephemeral port, so nothing on the host is ever in the way
     env |= environment or {}
@@ -360,6 +371,22 @@ def test_mediamtx_api_answers_the_visionquery_user_only(default_stack: Stack) ->
     assert json.loads(body)["items"] == []
     assert _get(url)[0] == 401
     assert _get(url, ("visionquery", "wrong"))[0] == 401
+
+
+def test_mediamtx_advertises_a_host_a_browser_can_send_webrtc_media_to(
+    default_stack: Stack,
+) -> None:
+    url = default_stack.url("mediamtx", 9997, "/v3/config/global/get")
+    password = default_stack.secret("VISIONQUERY_MEDIAMTX_API_PASSWORD")
+    status, body = _get(url, ("visionquery", password))
+    assert status == 200, body
+    config = json.loads(body)
+    assert config["webrtcAdditionalHosts"] == ["127.0.0.1"]
+    udp = default_stack.env["VISIONQUERY_MEDIAMTX_WEBRTC_UDP_PORT"]
+    assert config["webrtcLocalUDPAddress"] == f":{udp}"
+    # The port it announces is the one published on the host.
+    published = default_stack.compose("port", "--protocol", "udp", "mediamtx", udp).stdout
+    assert published.strip().endswith(f":{udp}"), published
 
 
 def test_the_awkward_password_reached_both_postgres_and_the_migrations(

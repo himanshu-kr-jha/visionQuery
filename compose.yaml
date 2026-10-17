@@ -20,7 +20,9 @@
 #   dev            the fake camera publisher (#6); until it lands, the same as no profile.
 #
 # Every variable is documented in .env.example. Ports are published on
-# VISIONQUERY_BIND_ADDRESS (loopback unless set) and each has a variable of its own.
+# VISIONQUERY_BIND_ADDRESS (loopback unless set) and each has a variable of its own; only
+# MediaMTX's camera-facing ports use VISIONQUERY_MEDIAMTX_BIND_ADDRESS, so opening them to
+# cameras never opens anything else.
 
 name: visionquery
 
@@ -111,17 +113,21 @@ services:
     pull_policy: never
     read_only: true
     environment:
+      # The address a browser sends WebRTC media to; the container cannot know it.
+      MTX_WEBRTCADDITIONALHOSTS: ${VISIONQUERY_MEDIAMTX_WEBRTC_HOSTS:-127.0.0.1}
+      # The port is announced to the browser as it is inside, so the host publishes the same number.
+      MTX_WEBRTCLOCALUDPADDRESS: ":${VISIONQUERY_MEDIAMTX_WEBRTC_UDP_PORT:-8189}"
       MTX_AUTHINTERNALUSERS_3_PASS: ${VISIONQUERY_MEDIAMTX_API_PASSWORD:?set VISIONQUERY_MEDIAMTX_API_PASSWORD in .env (see .env.example)}
     volumes:
       # The directory, not the file: MediaMTX reloads its configuration when the file changes,
       # and a bind-mounted file would keep showing the copy an editor replaced.
       - ./docker/mediamtx:/etc/mediamtx:ro
     ports:
-      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_RTSP_PORT:-8554}:8554"
+      - "${VISIONQUERY_MEDIAMTX_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_RTSP_PORT:-8554}:8554"
       - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_API_PORT:-9997}:9997"
-      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_WEBRTC_PORT:-8889}:8889"
-      # WebRTC media; ICE announces 8189, so keep the same number on the host.
-      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_WEBRTC_UDP_PORT:-8189}:8189/udp"
+      - "${VISIONQUERY_MEDIAMTX_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_WEBRTC_PORT:-8889}:8889"
+      # WebRTC media, on the same number inside and out (see MTX_WEBRTCLOCALUDPADDRESS).
+      - "${VISIONQUERY_MEDIAMTX_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_WEBRTC_UDP_PORT:-8189}:${VISIONQUERY_MEDIAMTX_WEBRTC_UDP_PORT:-8189}/udp"
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:9997/v3/paths/list"]
       interval: 10s

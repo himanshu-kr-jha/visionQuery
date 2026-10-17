@@ -13,7 +13,7 @@ logStructured: true
 authMethod: internal
 authInternalUsers:
   # Cameras publish and the live view reads without credentials, but only from where the
-  # published ports reach (loopback by default, see VISIONQUERY_BIND_ADDRESS).
+  # published ports reach (loopback by default, see VISIONQUERY_MEDIAMTX_BIND_ADDRESS).
   - user: any
     pass:
     ips: []
@@ -63,7 +63,10 @@ rtspAddress: :8554
 # The live view in the browser (M1).
 webrtc: true
 webrtcAddress: :8889
+# Compose sets the port to the published one and the hosts a browser reaches this machine at
+# (MTX_WEBRTCLOCALUDPADDRESS, MTX_WEBRTCADDITIONALHOSTS); these are the defaults without it.
 webrtcLocalUDPAddress: :8189
+webrtcAdditionalHosts: []
 
 # Nothing uses these, so they stay closed. RTMP stays off in particular: stock MediaMTX drops
 # an RTMP publisher that sends a track it did not declare (some dashcams add audio late), and
