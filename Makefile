@@ -6,7 +6,6 @@ SHELL := bash
 .SHELLFLAGS := -euo pipefail -c
 
 .PHONY: sync lint format typecheck contracts test test-stack check up down fetch-samples
-.PHONY: sync lint format typecheck contracts test test-stack check up down
 .PHONY: web web-lint web-typecheck web-test api-types api-types-check
 
 # The web app (web/) needs Node 24 (web/.nvmrc) and installs from its lockfile.
