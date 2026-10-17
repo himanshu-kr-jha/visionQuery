@@ -33,7 +33,7 @@ GRAFANA_DATASOURCES = ROOT / "docker" / "grafana" / "provisioning" / "datasource
 
 PROFILES = ("dev", "gpu", "observability")
 #: What `docker compose up` starts with no profile, on a machine without a GPU.
-DEFAULT_SERVICES = {"postgres", "migrate", "mediamtx", "reconciler", "api"}
+DEFAULT_SERVICES = {"postgres", "migrate", "mediamtx", "reconciler", "recorder", "api"}
 #: What each profile adds.
 PROFILE_SERVICES: dict[str, set[str]] = {
     "dev": {"fake-cameras", "register-fake-cameras"},
@@ -677,6 +677,48 @@ def test_the_reconciler_drives_mediamtx_as_visionquery_once_both_are_up() -> Non
     assert reconciler["depends_on"]["mediamtx"]["condition"] == "service_healthy"
     assert reconciler["healthcheck"]["test"] == ["CMD", "visionquery-reconciler", "health"]
     assert "ports" not in reconciler
+
+
+def test_the_recorder_reads_mediamtx_as_visionquery_into_a_footage_volume_of_its_own() -> None:
+    config = _config(
+        env={"VISIONQUERY_MEDIAMTX_API_PASSWORD": "chosen", "VISIONQUERY_SEGMENT_SECONDS": "60"}
+    )
+    recorder = _services(config)["recorder"]
+    assert recorder["command"] == ["visionquery-recorder"]
+    environment = recorder["environment"]
+    assert environment["VISIONQUERY_MEDIAMTX__RTSP_URL"] == "rtsp://mediamtx:8554"
+    assert environment["VISIONQUERY_MEDIAMTX__PASSWORD"] == "chosen"
+    assert "VISIONQUERY_MEDIAMTX__USER" not in environment
+    assert environment["VISIONQUERY_SEGMENT_SECONDS"] == "60"
+    assert _example()["VISIONQUERY_SEGMENT_SECONDS"] == "300"
+    assert environment["VISIONQUERY_FOOTAGE_DIR"] == "/footage"
+    (mount,) = recorder["volumes"]
+    assert (mount["type"], mount["source"], mount["target"]) == ("volume", "footage", "/footage")
+    assert not mount.get("read_only")
+    # Footage is Visual Data (ADR 0002): no other service mounts it, and nothing is published.
+    mounting = [
+        name
+        for name, service in _services(config).items()
+        if any(m.get("source") == "footage" for m in service.get("volumes", []))
+    ]
+    assert mounting == ["recorder"]
+    assert "ports" not in recorder
+    assert recorder["depends_on"]["mediamtx"]["condition"] == "service_healthy"
+    assert recorder["healthcheck"]["test"] == ["CMD", "visionquery-recorder", "health"]
+
+
+def test_the_image_ships_the_ffmpeg_the_fake_cameras_run_and_a_footage_directory() -> None:
+    """One ffmpeg, pinned once in each Dockerfile, so the recorder's tests (which take it from
+    the root Dockerfile) and the fake cameras exercise the same build."""
+    stage = re.compile(r"^FROM (\S+) AS ffmpeg$", re.M)
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    fake_cameras = (ROOT / "docker" / "fake-cameras" / "Dockerfile").read_text()
+    (ours,) = stage.findall(dockerfile)
+    assert stage.findall(fake_cameras) == [ours]
+    runtime = dockerfile[dockerfile.index("AS runtime") :]
+    assert "COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg" in runtime
+    # A named volume takes the ownership of the directory it is first mounted on.
+    assert re.search(r"mkdir /footage\s*\\?\s*&& chown visionquery:visionquery /footage", runtime)
 
 
 def test_the_fake_cameras_are_registered_and_reconciled_before_they_publish() -> None:

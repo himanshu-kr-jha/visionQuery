@@ -76,7 +76,9 @@ CI's `setup-guide` job runs exactly these commands on a clean runner (its checko
 2. Start it: `make up`.
    It builds the images (rebuilding only what changed, so edited code is what runs; a bare `docker compose up` builds only an image that is absent and never rebuilds), then starts Postgres and runs the database migrations and waits for them to succeed (`MIGRATE_TIMEOUT`, 300 s), and only then starts the long-running services and waits for their healthchecks (`WAIT_TIMEOUT`, 300 s).
    `docker compose up --wait` alone would return while a migration is still running, so a failed or stuck migration stops `make up` with an error and the migration's log.
-   It starts Postgres (TimescaleDB and pgvector), MediaMTX, the reconciler that keeps MediaMTX matching the camera registry, and the VisionQuery api, and returns once every service is healthy.
+   It starts Postgres (TimescaleDB and pgvector), MediaMTX, the reconciler that keeps MediaMTX matching the camera registry, the recorder, and the VisionQuery api, and returns once every service is healthy.
+   The recorder copies every registered camera's video, never decoded, into Footage in the `footage` volume: one directory per camera id, holding Segments of `VISIONQUERY_SEGMENT_SECONDS` (300 s) cut at the same instants for every camera.
+   Their times come from the host's clock as NTP disciplines it, so run an NTP client on the host (systemd-timesyncd or chrony); without one the recorder still records, and marks the times unverified (`visionquery_recorder_clock_verified` is 0).
    Postgres listens on `127.0.0.1:15432` (user and database `visionquery`), MediaMTX on `127.0.0.1:8554` (RTSP) and `127.0.0.1:9997` (API, user `visionquery`), and the api on `127.0.0.1:8080`, where <http://127.0.0.1:8080/health> says whether it can reach the database.
    MediaMTX lets a camera publish only to its own path with its own credentials, and lets only VisionQuery's own user `visionquery` (with `VISIONQUERY_MEDIAMTX_API_PASSWORD`) read; a camera added, changed or removed reaches it within one reconcile (`VISIONQUERY_RECONCILE_INTERVAL`, 5 s), and so does a restarted MediaMTX.
    `docker compose exec reconciler visionquery-reconciler status` says whether each camera's video is arriving.
@@ -87,7 +89,7 @@ CI's `setup-guide` job runs exactly these commands on a clean runner (its checko
    - `COMPOSE_PROFILES=dev` (or `--profile dev`): fake cameras, each looping a video into MediaMTX over RTSP as a real camera would publish it, so that everything can be developed without one.
      See "Fake cameras" below.
 4. To see the web app, run `npm --prefix web run dev` and open the address it prints: a page showing the Deployment's health, read from the api.
-5. Stop it with `make down`, which stops every service whatever its profile (Triton included) and keeps the data; `make down VOLUMES=1` deletes the database and metrics as well.
+5. Stop it with `make down`, which stops every service whatever its profile (Triton included) and keeps the data; `make down VOLUMES=1` deletes the database, the Footage and the metrics as well.
 
 ### Fake cameras
 

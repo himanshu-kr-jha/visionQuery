@@ -48,13 +48,15 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM debian:trixie-20261005-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS runtime
 # ca-certificates for TLS (the remote Reasoner, ADR 0002, is reached over it) and tzdata for
-# zone names; nothing else is added to a base that has no shell tools worth keeping.
+# zone names; nothing else is added to a base that has no shell tools worth keeping. /footage is
+# where the recorder writes, owned by its user so that a new named volume mounted there is too.
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 10001 visionquery \
     && useradd --system --uid 10001 --gid visionquery --no-create-home \
-        --home-dir /tmp --shell /usr/sbin/nologin visionquery
+        --home-dir /tmp --shell /usr/sbin/nologin visionquery \
+    && mkdir /footage && chown visionquery:visionquery /footage
 COPY --from=build /opt/python /opt/python
 COPY --from=build /opt/visionquery /opt/visionquery
 COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg

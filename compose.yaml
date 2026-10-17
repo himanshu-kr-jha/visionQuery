@@ -1,13 +1,13 @@
 # The VisionQuery stack.
 #
 #   make bootstrap                    checks the prerequisites, writes .env, installs
-#   make up                           Postgres, migrations, MediaMTX, its reconciler and the
-#                                     api; no GPU
+#   make up                           Postgres, migrations, MediaMTX, its reconciler, the
+#                                     recorder and the api; no GPU
 #   make up COMPOSE_PROFILES=observability     adds Prometheus and Grafana
 #   make up COMPOSE_PROFILES=gpu               adds Triton on the host's GPUs
 #   make up COMPOSE_PROFILES=dev               adds fake cameras (`make fetch-samples` first)
 #   make down                         stop everything, whatever its profile; the data stays
-#   make down VOLUMES=1               stop, and delete the data (database, metrics) too
+#   make down VOLUMES=1               stop, and delete the data (database, Footage, metrics) too
 # `make up` builds the images (so changed code is what runs), brings the stack up and checks
 # that `migrate` exited 0, which `docker compose up --wait` does not: it returns while a
 # migration is still running. A bare `docker compose up` builds only an absent image, so after
@@ -177,6 +177,38 @@ services:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "visionquery-reconciler", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+  # Records every camera in the registry into Footage (visionquery-recorder): reads each one's
+  # video from MediaMTX as the `visionquery` user and copies it, never decoded, into Segments of
+  # VISIONQUERY_SEGMENT_SECONDS, epoch-aligned and timed by the host's NTP-disciplined clock, in
+  # the `footage` volume, which no other service mounts and nothing publishes (Footage is Visual
+  # Data, ADR 0002). Healthy while it reads the camera registry.
+  recorder:
+    <<: *visionquery
+    command: ["visionquery-recorder"]
+    environment:
+      <<: *runtime-environment
+      # As for migrate: the password is in PGPASSWORD, never in the URL.
+      VISIONQUERY_DATABASE__URL: postgresql://visionquery@postgres:5432/visionquery
+      PGPASSWORD: ${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}
+      VISIONQUERY_MEDIAMTX__RTSP_URL: rtsp://mediamtx:8554
+      VISIONQUERY_MEDIAMTX__PASSWORD: ${VISIONQUERY_MEDIAMTX_API_PASSWORD:?set VISIONQUERY_MEDIAMTX_API_PASSWORD in .env (see .env.example)}
+      VISIONQUERY_FOOTAGE_DIR: /footage
+      VISIONQUERY_SEGMENT_SECONDS: ${VISIONQUERY_SEGMENT_SECONDS:-300}
+    volumes:
+      - footage:/footage
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mediamtx:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "visionquery-recorder", "health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -413,6 +445,8 @@ services:
       start_interval: 1s
 
 volumes:
+  # Every camera's Footage, one directory per camera id; `make down VOLUMES=1` deletes it too.
+  footage:
   scrape-targets:
   fake-cameras:
   postgres:
