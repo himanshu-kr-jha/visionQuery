@@ -173,9 +173,14 @@ CREATE TABLE IF NOT EXISTS public.schema_migrations (
 """
 
 
-#: What one file may have set on the session (`SET search_path`, `SET ROLE`...) must not reach
-#: the next, which a fresh run would not have seen. Not `DISCARD ALL`: it drops advisory locks.
-_RESET = b"RESET ALL; RESET ROLE; RESET SESSION AUTHORIZATION"
+#: What one file may have set or left on the session (`SET search_path`, `SET ROLE`, a temporary
+#: table, a prepared statement, a held cursor, a `LISTEN`, a sequence's `currval`...) must not
+#: reach the next, which a fresh run would not have seen. This is `DISCARD ALL` without the
+#: `pg_advisory_unlock_all()` it includes, because the run's advisory lock must stay held.
+_RESET = (
+    b"RESET ALL; RESET ROLE; RESET SESSION AUTHORIZATION; DISCARD TEMP; DISCARD PLANS; "
+    b"DISCARD SEQUENCES; DEALLOCATE ALL; CLOSE ALL; UNLISTEN *"
+)
 
 
 @contextmanager
