@@ -12,7 +12,7 @@ import subprocess
 import threading
 import tomllib
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
@@ -231,6 +231,35 @@ def test_a_mismatch_never_replaces_a_good_copy_with_a_bad_one(
     assert (tmp_path / "walk.mp4").read_bytes() == b"stale"
 
 
+def test_a_download_larger_than_the_manifest_says_is_aborted_and_cleaned_up(
+    server: Server, tmp_path: Path
+) -> None:
+    server.files["walk.mp4"] = VIDEO
+    small = replace(_sample(server.url("walk.mp4")), size=len(VIDEO) // 2)
+    with pytest.raises(FetchError, match=r"walk\.mp4.*more than the \d+ bytes"):
+        fetch(small, tmp_path)
+    assert _leftovers(tmp_path) == []
+
+
+def test_a_directory_that_cannot_be_used_fails_naming_the_sample_not_with_a_traceback(
+    server: Server, tmp_path: Path
+) -> None:
+    server.files["walk.mp4"] = VIDEO
+    with pytest.raises(FetchError, match=r"walk\.mp4.*cannot use .*nowhere"):
+        fetch(_sample(server.url("walk.mp4")), tmp_path / "nowhere")
+
+
+def test_a_directory_whose_mode_cannot_be_changed_fails_naming_the_sample(
+    server: Server, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def refuse(self: Path, mode: int) -> None:
+        raise PermissionError(1, "Operation not permitted", str(self))
+
+    monkeypatch.setattr(Path, "chmod", refuse)
+    with pytest.raises(FetchError, match=r"walk\.mp4.*cannot use .*Operation not permitted"):
+        fetch(_sample(server.url("walk.mp4")), tmp_path)
+
+
 def test_a_dropped_download_is_cleaned_up(server: Server, tmp_path: Path) -> None:
     server.files["walk.mp4"] = VIDEO
     server.cut_after = 1000
@@ -329,6 +358,26 @@ def test_the_command_fetches_the_rest_and_fails_when_one_sample_fails(
     assert (tmp_path / "good.mp4").read_bytes() == VIDEO
     assert not (tmp_path / "bad.mp4").exists()
     assert "bad.mp4" in capsys.readouterr().err
+
+
+def test_the_command_creates_a_missing_directory(server: Server, tmp_path: Path) -> None:
+    server.files["a.mp4"] = VIDEO
+    manifest = tmp_path / "manifest.toml"
+    _write_manifest(manifest, [_sample(server.url("a.mp4"), file="a.mp4")])
+    samples = tmp_path / "not" / "there" / "yet"
+    assert main(["--manifest", str(manifest), "--directory", str(samples)]) == 0
+    assert (samples / "a.mp4").read_bytes() == VIDEO
+
+
+def test_a_directory_that_cannot_be_created_is_reported_not_a_traceback(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    manifest = tmp_path / "manifest.toml"
+    _write_manifest(manifest, [_sample("https://example.org/a.mp4", file="a.mp4")])
+    (tmp_path / "in-the-way").write_text("a file, not a directory")
+    arguments = ["--manifest", str(manifest), "--directory", str(tmp_path / "in-the-way" / "x")]
+    assert main(arguments) == 1
+    assert "cannot create" in capsys.readouterr().err
 
 
 def test_a_malformed_manifest_is_refused(

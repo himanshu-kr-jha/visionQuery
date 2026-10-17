@@ -100,10 +100,19 @@ class _CancelledError(Exception):
     pass
 
 
-def _copy(response: BinaryIO, into: BinaryIO, cancelled: threading.Event) -> str:
-    """Copy the response, returning the SHA-256 of what was copied."""
+class _TooLargeError(Exception):
+    pass
+
+
+def _copy(response: BinaryIO, into: BinaryIO, cancelled: threading.Event, limit: int) -> str:
+    """Copy the response, returning the SHA-256 of what was copied; stop, rather than fill the
+    disk, once more than `limit` bytes have arrived."""
     digest = hashlib.sha256()
+    copied = 0
     while not cancelled.is_set() and (chunk := response.read(_CHUNK)):
+        copied += len(chunk)
+        if copied > limit:
+            raise _TooLargeError
         digest.update(chunk)
         into.write(chunk)
     if cancelled.is_set():
@@ -115,16 +124,22 @@ def fetch(sample: Sample, directory: Path, cancelled: threading.Event | None = N
     """Make `directory/sample.file` the sample the manifest describes, downloading it if needed.
     Setting `cancelled` stops the download, which then fails."""
     target = directory / sample.file
-    # The fake cameras run as a user of their own, and read the directory (and, below, each
-    # sample) through a bind mount: a umask of 077 would otherwise lock them out.
-    directory.chmod(directory.stat().st_mode | 0o005)
-    if target.is_file() and _digest(target) == sample.sha256:
-        target.chmod(target.stat().st_mode | 0o004)
-        return Outcome.PRESENT
+    try:
+        # The fake cameras run as a user of their own, and read the directory (and, below, each
+        # sample) through a bind mount: a umask of 077 would otherwise lock them out.
+        directory.chmod(directory.stat().st_mode | 0o005)
+        if target.is_file() and _digest(target) == sample.sha256:
+            target.chmod(target.stat().st_mode | 0o004)
+            return Outcome.PRESENT
+    except OSError as error:
+        raise FetchError(
+            f"{sample.file}: cannot use {directory} (is it yours? `chmod a+rX` it, or fix its "
+            f"owner): {error}"
+        ) from error
     part = target.with_name(f"{target.name}.part")
     try:
         with urllib.request.urlopen(sample.url, timeout=60) as response, part.open("wb") as file:
-            digest = _copy(response, file, cancelled or threading.Event())
+            digest = _copy(response, file, cancelled or threading.Event(), sample.size)
         if digest != sample.sha256:
             raise FetchError(
                 f"{sample.file}: the download's SHA-256 is {digest}, the manifest says "
@@ -133,6 +148,12 @@ def fetch(sample: Sample, directory: Path, cancelled: threading.Event | None = N
     except _CancelledError:
         part.unlink(missing_ok=True)
         raise FetchError(f"{sample.file}: cancelled") from None
+    except _TooLargeError:
+        part.unlink(missing_ok=True)
+        raise FetchError(
+            f"{sample.file}: more than the {sample.size} bytes the manifest says arrived, so "
+            "it is not the sample the manifest describes"
+        ) from None
     except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
         part.unlink(missing_ok=True)
         raise FetchError(f"{sample.file}: could not download {sample.url}: {error}") from error
@@ -155,6 +176,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ValueError, TypeError, tomllib.TOMLDecodeError) as error:
         print(f"fetch-samples: {arguments.manifest} is malformed: {error}", file=sys.stderr)
         return 2
+    try:
+        arguments.directory.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        print(f"fetch-samples: cannot create {arguments.directory}: {error}", file=sys.stderr)
+        return 1
     total = sum(sample.size for sample in samples)
     print(
         f"Fetching {len(samples)} samples ({total / 1e6:.0f} MB) into {arguments.directory}",
