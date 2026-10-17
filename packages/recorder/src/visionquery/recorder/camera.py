@@ -3,8 +3,9 @@
 **Segment boundaries are the clock's, not the stream's.** A Segment covers one epoch-aligned
 window (`segment.window`), so every camera cuts its Footage at the same instants without
 coordinating. Copy-only Footage can be cut only at a keyframe, so a Segment rolls at the first
-Fragment that starts at or after its window's end: each Segment begins at the first keyframe in
-its window and ends with the Fragment that holds the boundary.
+Fragment that starts at or after its window's end: each Segment's media begins at the first
+keyframe in its window and ends with the Fragment that holds the boundary, and a Segment rolled
+on the same connection begins, in time, exactly where the one before it ended (ADR 0017).
 
 **The timebase is anchored again when a Segment opens** and carried forward by the monotonic
 clock (`visionquery.recorder.timebase`); an arrival is read from it the moment its Fragment is
