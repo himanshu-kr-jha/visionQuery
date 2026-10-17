@@ -1,4 +1,4 @@
-"""A real Postgres with TimescaleDB and pgvector for the memory's tests, and a database per test.
+"""A real Postgres with TimescaleDB and pgvector for the tests of any package, a database per test.
 
 The server is the one named by `VISIONQUERY_TEST_DATABASE_URL`, a superuser's `postgresql://`
 URL, when that is set. Otherwise the session starts a disposable container of `IMAGE` under a

@@ -1,7 +1,7 @@
 """The migration runner applies numbered SQL files once each, in order, and refuses to guess.
 
-Every test runs against a real Postgres (see conftest.py), in a database of its own, with a
-directory of migrations written for the test.
+Every test runs against a real Postgres (see packages/conftest.py), in a database of its own,
+with a directory of migrations written for the test.
 """
 
 import hashlib
@@ -367,13 +367,17 @@ SELECT CASE WHEN true THEN 1 ELSE 2 END;
 def test_session_settings_of_one_file_do_not_leak_into_the_next(
     database: str, migrations: Path
 ) -> None:
+    # The timeout must outlast the runner's own bookkeeping statements in the same transaction
+    # as 0001 (a loaded machine can take tens of ms) yet be shorter than the sleep in 0003: were
+    # the setting to leak, that sleep would be cancelled.
     _write(
         migrations,
         "0001_settings.sql",
-        "CREATE SCHEMA other;\nSET search_path TO other, public;\nSET statement_timeout = '1ms';\n",
+        "CREATE SCHEMA other;\nSET search_path TO other, public;\n"
+        "SET statement_timeout = '300ms';\n",
     )
     _write(migrations, "0002_table.sql", "CREATE TABLE t2 (id int);")
-    _write(migrations, "0003_sleep.sql", "SELECT pg_sleep(0.1);")
+    _write(migrations, "0003_sleep.sql", "SELECT pg_sleep(1);")
 
     assert migrate(database, migrations) == (
         "0001_settings.sql",

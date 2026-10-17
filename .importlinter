@@ -74,6 +74,26 @@ forbidden_modules =
     visionquery.api
 allow_indirect_imports = True
 
+; ADR 0009 - Operator operations go through the typed tools, so the api does not name the
+; memory or the linker itself; api -> tools -> memory stays legal (allow_indirect_imports).
+; The ignored imports are the one exception, each named: the health probe asks the database
+; whether it can be reached, and the process reads the database settings. Anything else
+; the api needs from the memory belongs in a tool.
+
+[importlinter:contract:api-through-tools]
+name = The api reaches the memory only through tools, except its health probe
+type = forbidden
+source_modules =
+    visionquery.api
+forbidden_modules =
+    visionquery.memory
+    visionquery.linker
+allow_indirect_imports = True
+ignore_imports =
+    visionquery.api.probe -> visionquery.memory.health
+    visionquery.api.serve -> visionquery.memory.health
+    visionquery.api.serve -> visionquery.memory.settings
+
 ; The runtime is what every process starts with (settings, logs, metrics), so every
 ; package may import it, and it may import none of them: a foundation that reached up
 ; would make every package depend on every other. Its database-driver ban is in

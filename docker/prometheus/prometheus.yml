@@ -39,6 +39,13 @@ scrape_configs:
         port: 9187
         refresh_interval: 15s
 
+  - job_name: api
+    dns_sd_configs:
+      - names: [api.]
+        type: A
+        port: 9100
+        refresh_interval: 15s
+
   - job_name: mediamtx
     dns_sd_configs:
       - names: [mediamtx.]

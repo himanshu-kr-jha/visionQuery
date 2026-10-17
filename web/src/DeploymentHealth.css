@@ -1,0 +1,32 @@
+/* Each state also differs in its words and mark (see DeploymentHealth.tsx), not colour alone. */
+.report {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-left: 0.35rem solid;
+}
+
+.report p {
+  margin: 0;
+}
+
+.report[data-state="checking"] {
+  border-left-style: dotted;
+  color: #444;
+}
+
+.report[data-state="healthy"] {
+  border-left-style: solid;
+  color: #0b5d1e;
+}
+
+.report[data-state="unhealthy"] {
+  border-left-style: double;
+  border-left-width: 0.5rem;
+  color: #8a1c1c;
+}
+
+.report[data-state="error"] {
+  border-left-style: dashed;
+  color: #7a4b00;
+  font-weight: bold;
+}

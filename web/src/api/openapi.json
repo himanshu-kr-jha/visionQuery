@@ -1,0 +1,107 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "VisionQuery",
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Whether the Deployment is ready to serve: its database can be reached",
+        "description": "Readiness, not liveness: 200 only while the api can do its work.\n\nA running api that cannot reach the database answers 503 here, so the Compose\nhealthcheck (which asks this) marks it unhealthy rather than letting an api that\ncan answer nothing look fine. The body names the problem by category only.",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Service Unavailable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ConnectionProblem": {
+        "type": "string",
+        "enum": [
+          "authentication failed",
+          "database does not exist",
+          "server is not accepting connections",
+          "server has too many connections",
+          "host name could not be resolved",
+          "timed out",
+          "connection refused or host unreachable",
+          "other connection failure",
+          "still checking"
+        ]
+      },
+      "DatabaseStatus": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "connected",
+              "unreachable"
+            ],
+            "title": "Status"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConnectionProblem"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "problem"
+        ],
+        "title": "DatabaseStatus",
+        "description": "Whether the api can reach the Deployment's database, and if not, why."
+      },
+      "Health": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "healthy",
+              "unhealthy"
+            ],
+            "title": "Status"
+          },
+          "database": {
+            "$ref": "#/components/schemas/DatabaseStatus"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "database"
+        ],
+        "title": "Health",
+        "description": "Whether the api is ready to serve: ready only when everything it depends on is reachable."
+      }
+    }
+  }
+}
