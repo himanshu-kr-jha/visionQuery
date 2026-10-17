@@ -143,7 +143,7 @@ def test_the_connection_bounds_a_statement(postgres: str) -> None:
         # An escaped space is part of a value: this sets application_name, not the bound.
         r"-c work_mem=7MB -c application_name=a\ -c\ statement_timeout=777",
         # Only ASCII whitespace separates words, as in the server: these are one word.
-        "-c work_mem=7MB -c application_name=a -c statement_timeout=777",
+        "-c work_mem=7MB -c application_name=a\xa0-c\xa0statement_timeout=777",
         "-c work_mem=7MB -c application_name=a\x1c-c\x1fstatement_timeout=777",
         # A dangling backslash is dropped by the server, so it must not escape our separator.
         "-c work_mem=7MB\\",
