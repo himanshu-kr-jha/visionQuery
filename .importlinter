@@ -2,7 +2,7 @@
 ;
 ;   uv run lint-imports        exits non-zero on a violation
 ;
-; Enforced by `make check` and by the test suite now, and by CI once #8 lands.
+; Enforced by `make check`, by the test suite and by CI (the `contracts` job).
 ; tests/test_import_contracts.py proves each contract reports the import it forbids and
 ; keeps the legal paths legal, and that `allow_indirect_imports` is on only where a
 ; contract must tolerate paths through another package (and off where it must not).

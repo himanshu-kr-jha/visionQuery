@@ -48,10 +48,9 @@ The process role names (tech lead, `senior-developer`, `developer`, `tester`, `p
 **Pull requests** use `.github/pull_request_template.md`.
 The PR title must be a Conventional Commit `type(scope): subject`, because it becomes the squash commit subject.
 The squash commit body is a short summary plus `Closes #<n>`, without the template checklist.
-Required CI checks must pass before merging; nobody pushes directly to `main` or `develop`.
-Until CI exists (issue #8), "CI is green" is replaced by "the tester ran the full local suite and it passed".
-When no checks exist for the change, the tester's verdict on the final commit stands in for CI.
-For a docs-only or config-only change, which has no tester run, the `pr-reviewer` verdict on the final commit stands in for CI.
+Nobody pushes directly to `main` or `develop`.
+A PR whose head has a CI run merges only when every CI check on that head is green; the rulesets (see "After CI first lands" under Commands) make GitHub enforce it.
+The tester's full local suite on the final commit stands in only for a head with no CI run; for a docs-only or config-only change, which has no tester run, the `pr-reviewer` verdict on the final commit does.
 
 ## The team
 
@@ -157,9 +156,32 @@ Run everything from the repository root.
 | Rebuild after changing code: `make up` does it; a bare `docker compose up` builds only an absent image | `make up` |
 | Stack tests (bring the stack up for real) | `make test-stack` (`uv run pytest -m stack`) |
 | ...including the fake cameras on the real samples (downloads them first) | `VISIONQUERY_TEST_SAMPLES=1 make test-stack` |
+| Install the git hooks (opt-in; a `pre-commit` or `commit-msg` hook already in `.git/hooks` is kept as `<name>.legacy` and still runs first, unless `--overwrite`) | `uv run pre-commit install` |
+| Run the pre-commit hooks over every file | `uv run pre-commit run --all-files` |
+| Print the develop and main rulesets `make branch-rules` would send | `uv run scripts/branch_rules.py` |
+| Make develop and main require a PR and every CI check (a repository admin, once the workflow has passed on develop) | `make branch-rules` |
 
-`make lint` runs both ruff commands.
+`make lint` runs both ruff commands and actionlint over `.github/workflows/`.
 After changing a dependency, run `uv lock` and commit `uv.lock` with the change.
+
+**CI** is `.github/workflows/ci.yml`, run on every PR into `develop` or `main`, and every push to them (there is no manual trigger, so a run cannot replace a required check's result on the same commit; repeat one with `gh run rerun`).
+Each job runs the `make` target a developer runs, so CI and a local run never drift (`tests/test_ci.py` fails when `make check` gains a target no job runs): `lint`, `typecheck`, `contracts`, `test` (`make test` against a Postgres service of the tests' own image), `web` (`make web api-types-check`), `stack` (`make test-stack` without Triton, about 7 minutes), and `commits`, which fails when a commit of the PR, or its title or body, carries agent attribution (`scripts/check_attribution.py`), or when the title is not a `type(scope): subject` Conventional Commit (`scripts/check_commit_message.py`; a commit message may leave the scope out, a PR title may not).
+The `develop` and `main` rulesets require every job, with the PR up to date with its base, and `make branch-rules` (`scripts/branch_rules.py`) is how they are set: it derives the checks from the workflow's job ids, so after adding or renaming a job, run it once the change has passed on `develop`.
+It resets what it manages (the `deletion`, `non_fast_forward`, `pull_request` and `required_status_checks` rules, with the parameters it sets) and keeps what it does not: the live `pull_request` parameters it does not set, the bypass actors, and any other rule type.
+Actions are pinned by full commit SHA with the version in a comment, and uv is the version the Dockerfile builds with (`tests/test_ci.py` checks both).
+GitHub sets `CI`, and with it set the root `conftest.py` turns a test skipped for a missing prerequisite into a failure: such a skip's reason starts with "needs " (`needs Postgres: ...`), and a new one must too.
+The pre-commit hooks (`.pre-commit-config.yaml`) are ruff, ruff format, and on the commit message the same two checks as the `commits` job; each runs the locked tool through `uv run`, so the hooks, `make check` and CI share one version of each.
+Scripts the workflow and the hooks run live in `scripts/`, with their tests in `tests/`.
+
+**After CI first lands** (the tech lead, once the PR that adds `ci.yml` is merged into `develop`; this is what proves the merge gate works):
+
+1. Wait for the run triggered by the push to `develop` (`gh run list --branch develop --workflow ci.yml`, then `gh run watch <id>`) and confirm all 7 jobs (`lint`, `typecheck`, `contracts`, `test`, `web`, `stack`, `commits`) are green.
+   If one is not, fix it with a `fix/` PR first: the rulesets must not require a check that does not pass.
+2. Run `make branch-rules` as a repository admin.
+3. Verify both rulesets with `gh api repos/{owner}/{repo}/rulesets`, then `gh api repos/{owner}/{repo}/rulesets/<id>` for `protect-develop` and `protect-main`: `enforcement` is `active`, the `pull_request`, `non_fast_forward` and `deletion` rules are present, and `required_status_checks` lists all 7 contexts.
+4. Open a throwaway, non-draft PR into `develop` from a branch (`chore/ci-gate-check`) that adds one failing test.
+   Confirm the `test` check goes red, `gh pr view <n> --json mergeStateStatus` reports `BLOCKED`, and `gh pr merge <n> --squash` is refused.
+5. Close the PR without merging (`gh pr close <n> --delete-branch`), and confirm the branch is gone.
 
 **The web app** (`web/`) is React, TypeScript in strict mode and Vite, linted by eslint with typescript-eslint's strict type-checked rules and tested by vitest with React Testing Library.
 It needs Node 24 (`web/.nvmrc`; npm refuses another through `engines` and `engine-strict`), and every dependency is pinned to an exact version (`save-exact`) and locked in `web/package-lock.json`: add one with `npm --prefix web install <name>@<version>` and commit both files.
@@ -192,7 +214,7 @@ The `dev` profile's stack test uses test patterns and a clip it makes itself, so
 
 The memory's and the api's tests run against a real Postgres with TimescaleDB and pgvector, from the fixtures in `packages/conftest.py`.
 By default the test session starts a disposable `timescale/timescaledb:2.30.1-pg18` container of its own (on an ephemeral loopback port, removed at the end), so Docker must be running; to use an existing server instead, set `VISIONQUERY_TEST_DATABASE_URL` to a superuser's `postgresql://` URL.
-Without either, those tests are skipped with the reason.
+Without either, those tests are skipped with the reason (and fail in CI, which runs them against a Postgres service through that variable).
 
 **Migrations** (ADR 0011) are numbered SQL files in `packages/memory/src/visionquery/memory/migrations/`, shipped inside the `visionquery-memory` wheel.
 A schema change is a new file numbered one after the last (`NNNN_lowercase_words.sql`); an applied file is never edited, renamed, renumbered or removed.

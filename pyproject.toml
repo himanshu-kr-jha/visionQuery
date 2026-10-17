@@ -33,8 +33,10 @@ visionquery-runtime = { workspace = true }
 
 [dependency-groups]
 dev = [
+    "actionlint-py>=1.7.12.25",
     "httpx2>=2.13.1",
     "import-linter>=2.15",
+    "pre-commit>=4.7.0",
     "pyright[nodejs]>=1.1.414",
     "pytest>=9.1.1",
     "pyyaml>=6.0.3",
@@ -78,7 +80,7 @@ select = [
 [tool.pyright]
 typeCheckingMode = "strict"
 pythonVersion = "3.14"
-include = ["packages", "tests", "scripts", "docker/fake-cameras"]
+include = ["conftest.py", "packages", "tests", "scripts", "docker/fake-cameras"]
 extraPaths = ["scripts", "docker/fake-cameras"]
 venvPath = "."
 venv = ".venv"
