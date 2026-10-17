@@ -54,10 +54,13 @@ SYNTHETIC_SECONDS = 60
 #: A camera whose ffmpeg last reported a frame longer ago than this is not publishing.
 STALE_AFTER = 5.0
 #: Changes whenever prepare_command does, so that samples prepared the old way are redone.
-PREPARATION = "2"
+PREPARATION = "3"
 #: Every sample is prepared to this many seconds (a whole number, so that every restart can
 #: land on a keyframe), and every camera plays it from the same point of the shared timeline.
 DURATION = 300
+#: How long a camera plays its video before its ffmpeg ends and a new one joins the timeline
+#: again, which lets a playlist stand in for a loop (see `playlist`).
+PLAYLIST_HOURS = 24
 #: Where that timeline starts, in Unix time: at 0, a loop of 300 s begins at every five minutes
 #: of the wall clock (hh:00, hh:05, ...), whatever the machine and whenever the cameras started.
 EPOCH = 0.0
@@ -170,13 +173,38 @@ def _quiet(ffmpeg: str) -> list[str]:
     return [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error"]
 
 
-def publish_command(source: Path, url: str, ffmpeg: str = "ffmpeg", start: int = 0) -> list[str]:
-    """Loop a prepared sample into MediaMTX in real time, as it is, reporting progress: first
-    from second `start` of it, then from its beginning."""
+def playlist(
+    source: Path, start: int, duration: int = DURATION, hours: int = PLAYLIST_HOURS
+) -> str:
+    """An ffmpeg concat list that plays `source` from second `start` to its end, and then from
+    its beginning again for `hours` hours. This is a loop that starts part-way through, which
+    `-ss` with `-stream_loop` is not: that gives the pass after the first timestamps that do not
+    move for the length of the video, and `-re` then sends all of it at once. Every pass is
+    `duration` seconds long whatever the file's own length, so that the loops do not drift."""
+    name = str(source).replace("'", "'\\''")
+    first = [f"file '{name}'"]
+    if start:
+        first.append(f"inpoint {start}")
+    first.append(f"duration {duration - start}")
+    passes = max(2, math.ceil(hours * 3600 / duration))
+    return "\n".join([*first, *[f"file '{name}'\nduration {duration}"] * (passes - 1)]) + "\n"
+
+
+def publish_command(
+    source: Path, url: str, ffmpeg: str = "ffmpeg", playlist: Path | None = None
+) -> list[str]:
+    """Loop a prepared sample into MediaMTX in real time, as it is, reporting progress: for
+    ever from its beginning, or (with a `playlist` of it, see `playlist`) from where the
+    playlist starts."""
+    reading = (
+        ["-stream_loop", "-1", "-i", str(source)]
+        if playlist is None
+        else ["-f", "concat", "-safe", "0", "-i", str(playlist)]
+    )
     return [
         *_quiet(ffmpeg),
         "-progress", "pipe:1", "-stats_period", "1",
-        "-re", "-stream_loop", "-1", "-ss", str(start), "-i", str(source),
+        "-re", *reading,
         "-map", "0:v:0", "-c", "copy", "-an",
         # RTP packets that fit MediaMTX's limit, which would otherwise split every one again.
         "-pkt_size", "1400",
@@ -197,10 +225,10 @@ def prepare_command(
         )
         given = ["-f", "lavfi", "-i", pattern]
     else:
-        given = [
-            "-i", str(source), "-map", "0:v:0",
-            "-vf", f"tpad=stop_mode=clone:stop_duration={duration}", "-t", str(duration),
-        ]  # fmt: skip
+        # The pictures start at 0 whatever the recording's first ones are (MEVA's lose two to
+        # the AVI), so that the keyframes fall on whole seconds, where the timeline joins.
+        pad = f"setpts=PTS-STARTPTS,tpad=stop_mode=clone:stop_duration={duration}"
+        given = ["-i", str(source), "-map", "0:v:0", "-vf", pad, "-t", str(duration)]
     return [
         *_quiet(ffmpeg),
         *given,
@@ -412,11 +440,13 @@ class Publisher:
         _LOG.info("%s: publishing %s to %s", camera.name, label, redact(url))
         failures = 0
         while True:
-            start = 0
+            playing = None
             if timed:
                 wait, start = timeline_start(self._wall(), self._settings.duration)
+                playing = self._settings.status.with_name(f"{camera.name}.concat")
+                playing.write_text(playlist(source, start, self._settings.duration))
                 await self._sleep(wait)
-            command = publish_command(source, url, self._settings.ffmpeg, start)
+            command = publish_command(source, url, self._settings.ffmpeg, playing)
             started = self._clock()
             ended = await self._run(camera.name, command, HUNG_AFTER)
             self._progress.pop(camera.name, None)

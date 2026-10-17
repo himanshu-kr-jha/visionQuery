@@ -25,6 +25,7 @@ import pytest
 from fake_cameras import (
     DURATION,
     HUNG_AFTER,
+    PLAYLIST_HOURS,
     PUBLISHED_LONG_ENOUGH,
     SYNTHETIC,
     Camera,
@@ -34,6 +35,7 @@ from fake_cameras import (
     find_sample,
     not_publishing,
     parse_cameras,
+    playlist,
     prepare_command,
     publish_command,
     redact,
@@ -166,16 +168,47 @@ def test_a_camera_loops_a_prepared_sample_in_real_time_without_transcoding() -> 
     assert _after(command, "-c") == "copy"
 
 
-def test_a_camera_joins_the_timeline_before_reading_its_input_and_then_loops_from_the_start() -> (
-    None
-):
-    command = publish_command(Path("/cache/abc.mp4"), URL, start=101)
-    assert _after(command, "-ss") == "101"
-    # Before -i, so that it seeks (to a keyframe) rather than decodes up to the point.
-    assert command.index("-ss") < command.index("-i")
-    # A loop reads from the beginning again, which -ss does only once.
-    assert _after(command, "-stream_loop") == "-1"
-    assert _after(publish_command(Path("/cache/abc.mp4"), URL), "-ss") == "0"
+def test_a_camera_joining_the_timeline_reads_a_playlist_not_a_seek_and_a_loop() -> None:
+    command = publish_command(Path("/cache/abc.mp4"), URL, playlist=Path("/tmp/lobby.concat"))
+    assert _after(command, "-f") == "concat"
+    assert _after(command, "-safe") == "0"
+    assert _after(command, "-i") == "/tmp/lobby.concat"
+    # `-ss` with `-stream_loop` gives the pass after the first timestamps that do not move,
+    # so that `-re` sends the whole loop at once: neither is used.
+    assert "-ss" not in command
+    assert "-stream_loop" not in command
+    assert command.index("-re") < command.index("-i")
+
+
+def _entries(text: str) -> list[list[str]]:
+    """The `file` entries of a concat list, each as its lines."""
+    entries: list[list[str]] = []
+    for line in text.splitlines():
+        if line.startswith("file "):
+            entries.append([])
+        entries[-1].append(line)
+    return entries
+
+
+def test_a_playlist_plays_the_rest_of_the_sample_and_then_the_whole_of_it_again() -> None:
+    entries = _entries(playlist(Path("/cache/abc.mp4"), 101, 300))
+    # Cut at a whole second, which is a keyframe, and as long as what is left of the duration.
+    assert entries[0] == ["file '/cache/abc.mp4'", "inpoint 101", "duration 199"]
+    # Every later pass is the duration long, whatever the file's own length.
+    assert len(entries) > 1
+    assert all(e == ["file '/cache/abc.mp4'", "duration 300"] for e in entries[1:])
+    # Long enough that an ffmpeg runs for a day before it joins the timeline anew.
+    assert sum(300 for _ in entries) >= PLAYLIST_HOURS * 3600
+
+
+def test_a_playlist_from_the_beginning_has_no_inpoint() -> None:
+    entries = _entries(playlist(Path("/cache/abc.mp4"), 0, 20))
+    assert entries[0] == ["file '/cache/abc.mp4'", "duration 20"]
+    assert len(entries) == PLAYLIST_HOURS * 3600 // 20
+
+
+def test_a_playlist_quotes_the_names_it_lists() -> None:
+    assert _entries(playlist(Path("/cache/it's.mp4"), 0, 20))[0][0] == r"file '/cache/it'\''s.mp4'"
 
 
 def test_every_camera_publishes_over_rtsp_on_tcp_to_its_own_path() -> None:
@@ -224,6 +257,8 @@ def test_every_sample_is_prepared_to_the_same_duration() -> None:
     assert command.index("-t") > command.index("-i")
     # One shorter than that holds its last picture rather than looping early.
     assert "tpad=stop_mode=clone:stop_duration=300" in _after(command, "-vf")
+    # And starts at 0, so that its keyframes (every second) are at whole seconds.
+    assert _after(command, "-vf").startswith("setpts=PTS-STARTPTS,")
     other = prepare_command(Path("/samples/a.avi"), Path("/cache/a.part"), duration=20)
     assert _after(other, "-t") == "20"
     assert "stop_duration=20" in _after(other, "-vf")
@@ -401,8 +436,17 @@ def _publishing(calls: list[list[str]]) -> list[str]:
 
 
 def _inputs(calls: list[list[str]]) -> set[str]:
-    """What every publishing ffmpeg started so far read."""
-    return {c[c.index("-i") + 1] for c in calls if c[-1].startswith("rtsp://")}
+    """What every publishing ffmpeg started so far read: the file it loops, or the one a
+    playlist it was given lists."""
+    return {_played(c) for c in calls if c[-1].startswith("rtsp://")}
+
+
+def _played(command: list[str]) -> str:
+    """The file a publishing ffmpeg plays."""
+    read = command[command.index("-i") + 1]
+    if "concat" not in command:
+        return read
+    return Path(read).read_text().splitlines()[0].removeprefix("file '").removesuffix("'")
 
 
 def _prepared(calls: list[list[str]]) -> list[list[str]]:
@@ -709,6 +753,7 @@ def _settings(tmp_path: Path, spec: str = "lobby=synthetic", **changes: object) 
 def test_every_start_and_restart_of_a_sample_rejoins_the_shared_timeline(tmp_path: Path) -> None:
     wall = [1000.4]
     commands: list[list[str]] = []
+    starts: list[str] = []
 
     async def sleep(seconds: float) -> None:
         wall[0] += seconds
@@ -721,6 +766,7 @@ def test_every_start_and_restart_of_a_sample_rejoins_the_shared_timeline(tmp_pat
 
     async def run(label: str, command: list[str], hung_after: float | None = None) -> Ended:
         commands.append(command)
+        starts.append(Path(_after(command, "-i")).read_text().splitlines()[1])
         wall[0] += 40  # It published for a while, and then exited.
         return Ended(1, [])
 
@@ -730,7 +776,8 @@ def test_every_start_and_restart_of_a_sample_rejoins_the_shared_timeline(tmp_pat
         asyncio.run(keep_publishing(Camera("lobby", "a.mp4"), tmp_path / "x.mp4", "u", "l", True))
     # Started at 1001 s (the next whole second), then restarted at 1042 s and at 1083 s, each
     # time at the point of the sample the other cameras are at: not from its beginning.
-    assert [_after(c, "-ss") for c in commands] == ["101", "142", "183"]
+    assert starts == ["inpoint 101", "inpoint 142", "inpoint 183"]
+    assert all(_played(c) == str(tmp_path / "x.mp4") for c in commands)
 
 
 def test_the_test_pattern_has_no_timeline_to_join(tmp_path: Path) -> None:
@@ -749,7 +796,8 @@ def test_the_test_pattern_has_no_timeline_to_join(tmp_path: Path) -> None:
     keep_publishing = publisher._keep_publishing  # pyright: ignore[reportPrivateUsage]
     with contextlib.suppress(asyncio.CancelledError):
         asyncio.run(keep_publishing(Camera("lobby", SYNTHETIC), tmp_path / "x.mp4", "u", "l"))
-    assert [_after(c, "-ss") for c in commands] == ["0"]
+    assert [_after(c, "-stream_loop") for c in commands] == ["-1"]
+    assert "concat" not in commands[0]
 
 
 # --- A hung ffmpeg ----------------------------------------------------------------------------
