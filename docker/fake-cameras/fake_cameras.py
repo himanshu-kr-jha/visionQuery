@@ -8,8 +8,8 @@ comes back after MediaMTX restarts. It is a development tool, never part of a De
     FAKE_CAMERAS="gate=meva-school-g299.avi,lobby=synthetic" fake_cameras.py [run | health]
 
 FAKE_CAMERAS lists the cameras as `name=source`, comma-separated: the name is the camera's
-MediaMTX path, and the source is `synthetic` (a test pattern, encoded live) or a video's
-path relative to the samples directory. Each video, and the test pattern, is first prepared
+MediaMTX path, and the source is `synthetic` (a test pattern) or a video's path relative
+to the samples directory. Each video, and the test pattern, is first prepared
 once into the cache as a camera would send it (H.264, no B-frames, a keyframe every second, no
 audio) and then looped in real time without transcoding, so a camera costs next to no CPU; a
 video is prepared again only when its content changes, and shows the test pattern meanwhile.
