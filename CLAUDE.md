@@ -87,17 +87,24 @@ Lifecycle of one issue:
 
 Rules for the loop:
 
-- At most two fix rounds per issue (a round is one `developer` pass on findings from `tester` or `pr-reviewer`, counted by the `developer` hand-back comments on the PR and its issue).
+- At most two fix rounds per issue.
+  A round is one `developer` hand-back answering findings from `tester` or `pr-reviewer`, counted from the hand-back comments on the PR and its issue; a `developer` hand-back for a build (a bug issue), a rebase or a CI failure is not a round.
   After the second round only security or correctness defects block; before merging, the tech lead files every other open finding, blocking or not, as one follow-up issue under the same milestone (once), and the PR merges.
   The tech lead tells `tester` and `pr-reviewer` which round they are judging.
   If a security or correctness defect remains after two rounds, the tech lead stops and brings it to the user.
 - A "do not merge" verdict, or a finding that needs a design change, goes to the user.
+- Non-blocking findings in a "ready to merge" verdict are fixed in the same PR, as a fix round, while fewer than two rounds are done and the fix stays within the issue's scope.
+  Any finding still unfixed at the merge is filed before it as one follow-up issue.
+- A follow-up issue filed before a merge goes under the same milestone, and its body starts with `Follow-up to #<pr>`.
+  Before filing one, the tech lead looks for it with `gh issue list --state all --search "Follow-up to #<pr>"` and files none if it exists, so a PR gets at most one.
 - Escalate to the user, rather than deciding alone, anything that would change an ADR, the glossary's meaning of an existing term, or an issue's acceptance criteria.
 - Post each builder hand-back, tester verdict and reviewer verdict as a comment on the PR if one exists, otherwise on the issue, so the history is visible on GitHub, without agent attribution.
 - Work is pipelined: once `senior-developer` hands back an issue it never returns to it, and starts the next issue straight away while `tester`, `developer` and `pr-reviewer` finish the previous one.
   Every builder runs with `isolation: "worktree"`, and so does `developer` whenever another agent is using the main checkout, so no two agents share a working tree.
   The next issue is the lowest-numbered open sub-issue of the earliest open milestone, preferring one that does not depend on unmerged work.
-  If every candidate depends on unmerged work, the builder cuts its branch from the unmerged branch; once that merges, `developer` moves it onto develop with `git rebase --onto origin/develop <old-parent-tip>`, and its PR is opened only after that.
+  If every candidate depends on unmerged work, the builder cuts its branch from the unmerged branch; once that merges, `developer` moves it onto develop with `git rebase --onto origin/develop <parent head>`, where `<parent head>` is the parent PR's final head (`gh pr view <parent> --json headRefOid`), and its PR is opened only after that.
+  The move happens only while the branch still carries the parent's commits: while `<parent head>` is an ancestor of the branch, or, for a branch cut before the parent's last commits, while `git merge-base origin/<branch> <parent head>` is not an ancestor of `origin/develop`.
+  Once moved, the branch is treated like any other.
 - Stack tests are isolated per Compose project, so agents may run them at the same time.
 
 ## Project state
