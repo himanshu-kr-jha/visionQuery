@@ -138,9 +138,12 @@ class Segmenter:
             rolled = self.finish("rolled")
         if self._segment is None:
             arrived_at += self._timebase.anchor()
-            begins = arrived_at - timedelta(seconds=fragment.seconds)
-            if self._not_before is not None:
-                begins = max(begins, self._not_before)
+            if rolled is None:
+                begins = arrived_at - timedelta(seconds=fragment.seconds)
+                if self._not_before is not None:
+                    begins = max(begins, self._not_before)
+            # A rolled Segment's media runs on from the last one's: it begins where that one
+            # ended, and is filed under the window its first Fragment begins in.
             start, self._ends_at = window(begins, self._length)
             self._segment = SegmentFile.open(
                 self._directory,
@@ -148,6 +151,7 @@ class Segmenter:
                 window_start=start,
                 not_before=self._not_before,
                 verified=self._timebase.verified,
+                begins_at=None if rolled is None else rolled.time_to,
             )
         self._segment.append(fragment, arrived_at=arrived_at)
         return rolled

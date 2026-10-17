@@ -106,11 +106,17 @@ class SegmentFile:
     """One Segment being written."""
 
     def __init__(
-        self, path: Path, segment_id: UUID, not_before: datetime | None, verified: bool
+        self,
+        path: Path,
+        segment_id: UUID,
+        not_before: datetime | None,
+        begins_at: datetime | None,
+        verified: bool,
     ) -> None:
         self.path = path
         self.segment_id = segment_id
         self._not_before = not_before
+        self._begins_at = begins_at
         self._verified = verified
         self._fragments = 0
         self._time_from: datetime | None = None
@@ -128,12 +134,15 @@ class SegmentFile:
         window_start: datetime,
         not_before: datetime | None,
         verified: bool,
+        begins_at: datetime | None = None,
     ) -> SegmentFile:
         """Fix the Segment's identity and write its init in `directory`, the camera's.
 
         `window_start` names the file. `not_before` is the earliest instant the Segment can
         honestly begin: when its connection opened, or when the Segment before it on that
-        connection ended. `verified` says whether the timebase stood on NTP when it opened.
+        connection ended. `begins_at`, for a Segment whose media runs on from the one before it,
+        is exactly when it begins: where that one ended. `verified` says whether the timebase
+        stood on NTP when it opened.
         """
         start = window_start.astimezone(UTC)
         day = directory / start.strftime("%Y-%m-%d")
@@ -143,6 +152,7 @@ class SegmentFile:
             day / f"{start.strftime('%H%M%S')}-{segment_id.hex}.mp4",
             segment_id,
             not_before,
+            begins_at,
             verified,
         )
         segment._data.write(init.data)
@@ -173,6 +183,8 @@ class SegmentFile:
             begins = arrived_at - timedelta(seconds=fragment.seconds)
             if self._not_before is not None:
                 begins = max(begins, self._not_before)
+            if self._begins_at is not None:
+                begins = self._begins_at
             line["from"] = begins.isoformat()
             line["verified"] = self._verified
         self._lines.write(json.dumps(line, separators=(",", ":")) + "\n")

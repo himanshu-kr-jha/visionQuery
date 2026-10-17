@@ -158,3 +158,29 @@ def test_a_connection_that_sent_no_fragment_leaves_nothing(tmp_path: Path) -> No
 
     assert segmenter.finish("stream_ended") is None
     assert list(tmp_path.rglob("*.*")) == []
+
+
+def test_a_rolled_segment_begins_exactly_where_the_one_before_it_ended(tmp_path: Path) -> None:
+    """Its media runs on from the last one's, so no instant falls between them, however the
+    clock was slewed when the new Segment's anchor was taken or late a Fragment arrived; and it
+    is still filed under the window it begins."""
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    length = timedelta(seconds=10)
+    segmenter = Segmenter(tmp_path, parsed_init(), timebase, length, not_before=None)
+    rolled: list[Segment] = []
+    for n, frag in enumerate(fragments(15)):
+        clocks.tick(2)
+        clocks.wall += 0.000_25  # NTP slewing the wall clock, a little every second
+        late = timedelta(milliseconds=3 if n % 2 else 0)
+        done = segmenter.add(frag, arrived_at=timebase.now() + late)
+        if done is not None:
+            rolled.append(done)
+    last = segmenter.finish("stopped")
+    assert last is not None
+
+    found = [*rolled, last]
+
+    assert len(found) == 3
+    assert all(a.time_to == b.time_from for a, b in pairwise(found))
+    assert [segment.path.name[:6] for segment in found] == ["100000", "100010", "100020"]
