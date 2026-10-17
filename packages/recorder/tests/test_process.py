@@ -114,8 +114,13 @@ def within(seconds: float, condition: Callable[[], bool]) -> None:
         time.sleep(0.1)
 
 
-def frame_hashes(ffmpeg: Path, video: Path) -> list[str]:
-    """The MD5 of every decoded frame, in order; the test fails unless it decodes cleanly."""
+def frame_hashes(ffmpeg: Path, video: Path, *, ended: bool = False) -> list[str]:
+    """The MD5 of every decoded frame, in order; the test fails unless it decodes cleanly.
+
+    A stream that `ended` may have ended inside its last frame: when a publisher leaves,
+    MediaMTX ends its readers' sessions with whatever of the last frame they have, and that
+    frame is kept as it arrived (damaged; decoders conceal it). It must still play to the end.
+    """
     decoded = subprocess.run(
         [
             str(ffmpeg), "-nostdin", "-v", "error", "-i", str(video),
@@ -126,7 +131,9 @@ def frame_hashes(ffmpeg: Path, video: Path) -> list[str]:
         check=False,
         timeout=120,
     )  # fmt: skip
-    assert (decoded.returncode, decoded.stderr) == (0, "")
+    assert decoded.returncode == 0, decoded.stderr
+    if not ended:
+        assert decoded.stderr == ""
     return [
         line.rsplit(",", 1)[1].strip()
         for line in decoded.stdout.splitlines()
@@ -194,13 +201,19 @@ def test_a_published_clip_is_read_back_whole_from_the_segments_covering_it(
     running.stop()
 
     found = segments(camera)
-    recorded = [frame for segment in found for frame in frame_hashes(ffmpeg, segment.path)]
+    recorded = [
+        frame
+        for segment in found
+        for frame in frame_hashes(ffmpeg, segment.path, ended=segment is found[-1])
+    ]
     clip = frame_hashes(ffmpeg, known_clip)
     known = clip[40:]  # the eight seconds after the lead-in
     assert len(set(known)) == 80
-    # Copy-only and gapless: a run of the clip's own frames, ending where the clip does.
-    assert recorded == clip[-len(recorded) :]
-    assert recorded[-80:] == known
+    # Copy-only and gapless: a run of the clip's own frames, ending where the clip does (its
+    # very last frame, which the stream may have ended inside, is there but may be damaged).
+    assert len(recorded) >= 80
+    assert recorded[:-1] == clip[-len(recorded) : -1]
+    assert recorded[-80:-1] == known[:-1]
     # Cut on 3-second boundaries of the epoch, one Segment running on from the next.
     assert {segment.reason for segment in found[:-1]} == {"rolled"}
     assert found[-1].reason == "stream_ended"

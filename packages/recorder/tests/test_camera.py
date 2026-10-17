@@ -71,7 +71,11 @@ async def until(condition: Callable[[], bool], timeout: float) -> None:
 
 
 def frames(ffmpeg: Path, segment: Segment) -> int:
-    """How many frames the Segment decodes to; the test fails if it does not play cleanly."""
+    """How many frames the Segment decodes to; the test fails if it does not play cleanly.
+
+    A stream that ended may have ended inside its last frame, kept as it arrived (see
+    test_process.py), so a `stream_ended` Segment need only play to its end.
+    """
     decoded = subprocess.run(
         [str(ffmpeg), "-nostdin", "-v", "error", "-i", str(segment.path), "-f", "framecrc", "-"],
         capture_output=True,
@@ -79,7 +83,9 @@ def frames(ffmpeg: Path, segment: Segment) -> int:
         check=False,
         timeout=60,
     )
-    assert (decoded.returncode, decoded.stderr) == (0, "")
+    assert decoded.returncode == 0, decoded.stderr
+    if segment.reason != "stream_ended":
+        assert decoded.stderr == ""
     return len([line for line in decoded.stdout.splitlines() if not line.startswith("#")])
 
 
