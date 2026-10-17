@@ -7,7 +7,7 @@ It is a closed system: one installation per owner, running on the owner's own ha
 
 ## How it works
 
-1. **Cameras** are added by URL (or publish into the system) through MediaMTX.
+1. **Cameras** are added by URL (or publish into the system) through MediaMTX, which a reconciler keeps matching the camera registry: only a registered camera may publish, with its own credentials, and only VisionQuery itself may read.
 2. **Footage** from every camera is recorded continuously in fixed segments.
 3. **Perception workers** run person detection, tracking and appearance embedding on the GPU through Triton, producing a **Track** for every person each camera sees, with a few **Keyframes** showing how they looked.
 4. A **linker** connects Tracks across cameras into **Visits**, but only when it is confident, using appearance and how long it takes to walk between cameras.
@@ -55,14 +55,14 @@ cd visionQuery
 make bootstrap
 make up COMPOSE_PROFILES=dev
 curl --silent --show-error --fail-with-body --max-time 10 http://127.0.0.1:8080/health
-docker compose --profile dev exec fake-cameras ffmpeg -v error -rtsp_transport tcp -timeout 30000000 -i rtsp://mediamtx:8554/gym-g299 -frames:v 1 -f null -
+docker compose exec reconciler visionquery-reconciler status
 make down VOLUMES=1
 ```
 
 1. `make bootstrap` checks the prerequisites, writes `.env` from `.env.example` with a generated password for each of the three secrets it leaves empty (an `.env` that exists is never changed, only checked to set them), and installs the Python packages and the web app's from their lockfiles (`make sync`).
    Running it again is safe.
 2. `make up COMPOSE_PROFILES=dev` builds the images and starts the stack with fake cameras, returning once every service is healthy (the first build takes a few minutes).
-3. The api answers `{"status":"healthy", ...}` once it reaches the database, and the last check reads one frame from a fake camera through MediaMTX, from inside the stack, so it needs nothing more on the machine.
+3. The api answers `{"status":"healthy", ...}` once it reaches the database, and the last check asks the reconciler, inside the stack, whether MediaMTX receives every registered camera's video (the fake cameras are registered as they start), so it needs nothing more on the machine; it exits 1, naming the camera, when one is not.
    Before `make fetch-samples` has downloaded the videos, the cameras show a test pattern.
 4. `make down VOLUMES=1` stops the stack and deletes its data; `make down` keeps the data.
 
@@ -76,8 +76,10 @@ CI's `setup-guide` job runs exactly these commands on a clean runner (its checko
 2. Start it: `make up`.
    It builds the images (rebuilding only what changed, so edited code is what runs; a bare `docker compose up` builds only an image that is absent and never rebuilds), then starts Postgres and runs the database migrations and waits for them to succeed (`MIGRATE_TIMEOUT`, 300 s), and only then starts the long-running services and waits for their healthchecks (`WAIT_TIMEOUT`, 300 s).
    `docker compose up --wait` alone would return while a migration is still running, so a failed or stuck migration stops `make up` with an error and the migration's log.
-   It starts Postgres (TimescaleDB and pgvector), MediaMTX and the VisionQuery api, and returns once every service is healthy.
+   It starts Postgres (TimescaleDB and pgvector), MediaMTX, the reconciler that keeps MediaMTX matching the camera registry, and the VisionQuery api, and returns once every service is healthy.
    Postgres listens on `127.0.0.1:15432` (user and database `visionquery`), MediaMTX on `127.0.0.1:8554` (RTSP) and `127.0.0.1:9997` (API, user `visionquery`), and the api on `127.0.0.1:8080`, where <http://127.0.0.1:8080/health> says whether it can reach the database.
+   MediaMTX lets a camera publish only to its own path with its own credentials, and lets only VisionQuery's own user `visionquery` (with `VISIONQUERY_MEDIAMTX_API_PASSWORD`) read; a camera added, changed or removed reaches it within one reconcile (`VISIONQUERY_RECONCILE_INTERVAL`, 5 s), and so does a restarted MediaMTX.
+   `docker compose exec reconciler visionquery-reconciler status` says whether each camera's video is arriving.
 3. Add what you need with profiles:
    - `make up COMPOSE_PROFILES=observability` (or `--profile observability` with `docker compose`): Prometheus on <http://127.0.0.1:9090> scraping every service, and Grafana on <http://127.0.0.1:3000> (user `admin`) reading it.
    - `COMPOSE_PROFILES=gpu` (or `--profile gpu`): Triton on `127.0.0.1:8000` (HTTP) and `8001` (gRPC), on every GPU.
@@ -90,6 +92,7 @@ CI's `setup-guide` job runs exactly these commands on a clean runner (its checko
 ### Fake cameras
 
 The `dev` profile's `fake-cameras` service publishes one MediaMTX path per camera that `VISIONQUERY_FAKE_CAMERAS` in `.env` lists, as `name=video` pairs.
+Before they start, the one-shot `register-fake-cameras` registers each as a pushed camera of that name, publishing to the path of its name as the user of its name with `VISIONQUERY_FAKE_CAMERA_PASSWORD`, which the fake cameras publish with; the reconciler then adds them to MediaMTX.
 By default these are three cameras of the [MEVA](https://mevadata.org/) dataset's school ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/legalcode)), recording the same five minutes: two views of a busy gym from opposite sides, and a stairwell by an entrance.
 
 1. Download the videos once: `make fetch-samples` (about 400 MB, into `samples/`, which git ignores).
@@ -97,7 +100,7 @@ By default these are three cameras of the [MEVA](https://mevadata.org/) dataset'
 2. Start the stack with the profile: `make up COMPOSE_PROFILES=dev`.
    Each video is first re-encoded once as a camera sends video (H.264 without B-frames, a keyframe a second), which takes about a minute per video and is kept in the `fake-cameras` volume; the camera shows a test pattern meanwhile.
    A camera whose video is not in `samples/` shows the test pattern instead, with a warning in `docker compose logs fake-cameras`, so the profile works before anything is downloaded; restart the service (`docker compose restart fake-cameras`) once the video is there.
-3. Watch a camera: `ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/gym-g299` (or the same URL in VLC), or open <http://127.0.0.1:8889/gym-g299> in a browser for MediaMTX's WebRTC player.
+3. Watch a camera as VisionQuery reads it, with the `visionquery` user and `VISIONQUERY_MEDIAMTX_API_PASSWORD` from `.env`: `ffplay -rtsp_transport tcp rtsp://visionquery:<password>@127.0.0.1:8554/gym-g299` (or the same URL in VLC), or open <http://127.0.0.1:8889/gym-g299> in a browser for MediaMTX's WebRTC player, which asks for them.
 
 All the cameras play their videos in step.
 Each video is cut to the same five minutes (`VISIONQUERY_FAKE_CAMERA_DURATION`, in seconds; MEVA's recordings are 300.0 to 300.3 s long and would otherwise drift apart), and every camera shows the second of its video that the wall clock says, counted from the Unix epoch.

@@ -46,6 +46,13 @@ scrape_configs:
         port: 9100
         refresh_interval: 15s
 
+  - job_name: reconciler
+    dns_sd_configs:
+      - names: [reconciler.]
+        type: A
+        port: 9100
+        refresh_interval: 15s
+
   - job_name: mediamtx
     dns_sd_configs:
       - names: [mediamtx.]

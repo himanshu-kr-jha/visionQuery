@@ -44,6 +44,7 @@ from urllib.parse import quote
 import psycopg
 import pytest
 from fake_cameras import parse_cameras, prepare_command
+from visionquery.memory.cameras import CameraRegistry, PublishCredentials
 from visionquery.memory.migrate import MIGRATIONS
 
 pytestmark = pytest.mark.stack
@@ -299,6 +300,12 @@ def _get(
         return error.code, error.read()
 
 
+def _healthy(stack: Stack, services: set[str]) -> bool:
+    containers = stack.containers()
+    return all((containers[n]["State"], containers[n]["Health"]) == ("running", "healthy")
+               for n in services)  # fmt: skip
+
+
 def _assert_healthy(stack: Stack, services: set[str]) -> None:
     containers = stack.containers()
     unhealthy = {
@@ -324,12 +331,12 @@ def default_stack() -> Iterator[Stack]:
         yield stack
 
 
-def test_the_default_stack_starts_postgres_mediamtx_and_the_api_healthy(
+def test_the_default_stack_starts_postgres_mediamtx_its_reconciler_and_the_api_healthy(
     default_stack: Stack,
 ) -> None:
     containers = default_stack.containers()
-    assert set(containers) == {"postgres", "migrate", "mediamtx", "api"}
-    _assert_healthy(default_stack, {"postgres", "mediamtx", "api"})
+    assert set(containers) == {"postgres", "migrate", "mediamtx", "reconciler", "api"}
+    _assert_healthy(default_stack, {"postgres", "mediamtx", "reconciler", "api"})
 
 
 def _health(stack: Stack) -> tuple[int, dict[str, Any]]:
@@ -437,6 +444,65 @@ def test_mediamtx_api_answers_the_visionquery_user_only(default_stack: Stack) ->
     assert json.loads(body)["items"] == []
     assert _get(url)[0] == 401
     assert _get(url, ("visionquery", "wrong"))[0] == 401
+
+
+#: The reconciler's cycle in the stack (VISIONQUERY_RECONCILE_INTERVAL), and what a cycle may
+#: take beyond it on a busy machine.
+RECONCILE_INTERVAL = 5
+RECONCILE_SLACK = 10
+
+
+@contextmanager
+def _registry(stack: Stack) -> Generator[CameraRegistry]:
+    """The stack's camera registry, as the api will reach it."""
+    with psycopg.connect(_database_url(stack), connect_timeout=10, autocommit=True) as connection:
+        yield CameraRegistry(connection)
+
+
+def _wait_for_paths(stack: Stack, wanted: set[str], timeout: float) -> None:
+    """Until MediaMTX has exactly the paths `wanted` (it may be restarting meanwhile)."""
+    password = stack.secret("VISIONQUERY_MEDIAMTX_API_PASSWORD")
+
+    def matches() -> tuple[bool | None, str]:
+        try:
+            url = stack.url("mediamtx", 9997, "/v3/config/paths/list")
+            status, body = _get(url, ("visionquery", password))
+        except (AssertionError, OSError) as error:
+            return None, f"MediaMTX's API cannot be reached: {error}"
+        if status != 200:
+            return None, f"MediaMTX's API answered {status}"
+        paths = {item["name"] for item in json.loads(body)["items"]}
+        return (True, "") if paths == wanted else (None, f"MediaMTX has {sorted(paths)}")
+
+    wait_for(matches, timeout)
+
+
+def test_cameras_added_and_removed_reach_mediamtx_and_survive_its_restart(
+    default_stack: Stack,
+) -> None:
+    # The reconciler, in the stack as a Deployment runs it, against the stack's own registry.
+    credentials = PublishCredentials.of("dock", "dock-pa55word-stack")
+    cycle = RECONCILE_INTERVAL + RECONCILE_SLACK
+    with _registry(default_stack) as registry:
+        dock = registry.add_pushed("Dock", "dock", credentials)
+        gate = registry.add_pulled("Gate", "rtsp://admin:pw@192.0.2.7/stream")
+        try:
+            _wait_for_paths(default_stack, {"dock", gate.path}, cycle)
+            # MediaMTX forgets what its API was told when it restarts; the reconciler puts it
+            # back by itself.
+            default_stack.compose("restart", "mediamtx")
+            _wait_for_paths(default_stack, {"dock", gate.path}, cycle)
+        finally:
+            registry.remove(dock.id)
+            registry.remove(gate.id)
+    _wait_for_paths(default_stack, set(), cycle)
+    wait_for(
+        lambda: (True, "") if _healthy(default_stack, {"mediamtx", "reconciler"}) else (None, ""),
+        60,
+    )
+    logs = default_stack.compose("logs", "--no-color", "reconciler").stdout
+    assert "reconciled" in logs
+    assert "admin:pw" not in logs
 
 
 def test_mediamtx_advertises_a_host_a_browser_can_send_webrtc_media_to(
@@ -661,7 +727,7 @@ def test_concurrent_projects_do_not_touch_each_others_images_or_containers() -> 
 # --- The observability profile --------------------------------------------------------------
 
 #: Every Prometheus job with a target in the stack without `gpu`.
-OBSERVED_JOBS = {"prometheus", "grafana", "postgres", "mediamtx", "api"}
+OBSERVED_JOBS = {"prometheus", "grafana", "postgres", "mediamtx", "reconciler", "api"}
 
 
 @pytest.fixture(scope="module")
@@ -828,6 +894,12 @@ def _make_samples(directory: Path) -> None:
         (directory / name).chmod(0o644)
 
 
+def _reading(stack: Stack, camera: str) -> str:
+    """Where VisionQuery's processes read a camera: only they may (ADR 0002)."""
+    password = quote(stack.secret("VISIONQUERY_MEDIAMTX_API_PASSWORD"), safe="")
+    return f"rtsp://visionquery:{password}@mediamtx:8554/{camera}"
+
+
 def _try_probe(stack: Stack, camera: str, seconds: float) -> tuple[dict[str, Any] | None, str]:
     """Read `seconds` of the camera from MediaMTX over RTSP, as a client on the project's
     network would (a container on it works on every host, unlike `--network host`, which
@@ -840,7 +912,7 @@ def _try_probe(stack: Stack, camera: str, seconds: float) -> tuple[dict[str, Any
          FFMPEG_IMAGE, "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
          "-count_frames", "-read_intervals", f"%+{seconds}",
          "-show_entries", "stream=codec_name,width,height,has_b_frames,nb_read_frames",
-         "-of", "json", f"rtsp://mediamtx:8554/{camera}"],
+         "-of", "json", _reading(stack, camera)],
         capture_output=True,
         text=True,
         check=False,
@@ -909,7 +981,7 @@ def _marker_offsets(stack: Stack, cameras: tuple[str, ...], seconds: float) -> d
              # One decoding thread: with one per core, the decoder holds back a picture per
              # thread, which would put every camera a machine-dependent second behind the clock.
              "-threads", "1",
-             "-i", f"rtsp://mediamtx:8554/{camera}", "-t", str(seconds), "-an",
+             "-i", _reading(stack, camera), "-t", str(seconds), "-an",
              # One byte per frame: the brightness of the whole picture, as stored in the video.
              "-vf", "scale=1:1:flags=area,format=yuv420p,extractplanes=y",
              "-fps_mode", "passthrough",
@@ -997,7 +1069,66 @@ def _dev_cameras() -> set[str]:
 
 
 def test_the_dev_profile_adds_fake_cameras_healthy(dev_stack: Stack) -> None:
-    _assert_healthy(dev_stack, {"postgres", "mediamtx", "fake-cameras"})
+    _assert_healthy(dev_stack, {"postgres", "mediamtx", "reconciler", "fake-cameras"})
+    registered = dev_stack.containers()["register-fake-cameras"]
+    assert (registered["State"], registered["ExitCode"]) == ("exited", 0)
+
+
+def test_each_fake_camera_is_a_registered_pushed_camera_publishing_as_itself(
+    dev_stack: Stack,
+) -> None:
+    with _registry(dev_stack) as registry:
+        cameras = registry.list()
+    assert {(c.name, c.path) for c in cameras} == {(n, n) for n in _dev_cameras()}
+    password = dev_stack.secret("VISIONQUERY_FAKE_CAMERA_PASSWORD")
+    for camera in cameras:
+        assert camera.publish_credentials is not None
+        assert camera.publish_credentials.user == camera.name
+        assert camera.publish_credentials.verify(password)
+
+
+def _publish(stack: Stack, path: str, credentials: str = "") -> subprocess.CompletedProcess[str]:
+    """Publish two seconds of a test pattern to `path` as a camera would, from the project's
+    network; ffmpeg exits 0 only when MediaMTX took it."""
+    return subprocess.run(
+        ["docker", "run", "--rm", "--network", f"{stack.project}_default",
+         "--entrypoint", "/ffmpeg", FFMPEG_IMAGE, "-v", "error", "-re",
+         "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10:duration=2",
+         "-c:v", "libx264", "-preset", "ultrafast", "-f", "rtsp", "-rtsp_transport", "tcp",
+         f"rtsp://{credentials}mediamtx:8554/{path}"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )  # fmt: skip
+
+
+def test_mediamtx_refuses_an_unauthenticated_publish_and_read(dev_stack: Stack) -> None:
+    # ADR 0002: Visual Data cannot leave the Deployment through MediaMTX, and nothing gets in
+    # but a registered camera with its own credentials.
+    _wait_until_every_camera_is_ready(dev_stack, _dev_cameras(), timeout=60)
+    refused = subprocess.run(
+        ["docker", "run", "--rm", "--network", f"{dev_stack.project}_default",
+         "--entrypoint", "/ffprobe", FFMPEG_IMAGE, "-v", "error", "-rtsp_transport", "tcp",
+         "-show_entries", "stream=codec_name", "rtsp://mediamtx:8554/lobby"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )  # fmt: skip
+    assert refused.returncode != 0
+    assert "401" in refused.stderr, refused.stderr
+    assert _probe(dev_stack, "lobby", 1)["codec_name"] == "h264"
+
+    password = quote(dev_stack.secret("VISIONQUERY_FAKE_CAMERA_PASSWORD"), safe="")
+    unauthenticated = _publish(dev_stack, "lobby")
+    assert unauthenticated.returncode != 0
+    assert "401" in unauthenticated.stderr, unauthenticated.stderr
+    # Not to a path the registry does not have, nor with another camera's credentials.
+    assert _publish(dev_stack, "unregistered").returncode != 0
+    assert _publish(dev_stack, "lobby", f"yard:{password}@").returncode != 0
+    assert _publish(dev_stack, "unregistered", f"yard:{password}@").returncode != 0
+    _assert_healthy(dev_stack, {"fake-cameras"})
 
 
 def test_mediamtx_has_a_ready_path_for_exactly_the_configured_cameras(dev_stack: Stack) -> None:

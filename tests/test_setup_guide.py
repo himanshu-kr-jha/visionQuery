@@ -119,19 +119,13 @@ def test_the_quick_start_checks_the_health_the_api_publishes() -> None:
     )
 
 
-def test_the_quick_start_reads_a_frame_from_a_camera_the_example_lists() -> None:
-    (read,) = [c for c in quick_start() if "rtsp://" in c]
-    camera = re.search(r"rtsp://mediamtx:8554/([\w-]+)", read)
-    assert camera is not None
-    cameras = [pair.split("=")[0] for pair in _example()["VISIONQUERY_FAKE_CAMERAS"].split(",")]
-    assert camera.group(1) in cameras
-    # From inside the project's network, with the ffmpeg the fake cameras already have, so the
-    # check needs nothing installed on the host; one decoded frame proves the camera plays.
-    assert read.startswith("docker compose --profile dev exec fake-cameras ffmpeg ")
-    assert "-frames:v 1 -f null -" in read
-    # A camera that does not answer must fail the check, not hang it: the socket timeout is
-    # in microseconds.
-    assert re.search(r"-timeout \d+ ", read)
+def test_the_quick_start_checks_that_every_cameras_video_arrives() -> None:
+    # Only VisionQuery's own processes may read a camera (ADR 0002), so the check asks the
+    # reconciler, inside the stack, whether MediaMTX receives every registered camera's video:
+    # it exits 1 when one does not, so needs nothing installed on the host and cannot pass on
+    # a camera that is not publishing.
+    (check,) = [c for c in quick_start() if "visionquery-reconciler" in c]
+    assert check == "docker compose exec reconciler visionquery-reconciler status"
 
 
 def test_every_make_target_the_readme_runs_exists() -> None:

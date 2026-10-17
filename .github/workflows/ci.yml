@@ -120,7 +120,7 @@ jobs:
       - run: make bootstrap
       - run: make up COMPOSE_PROFILES=dev
       - run: curl --silent --show-error --fail-with-body --max-time 10 http://127.0.0.1:8080/health
-      - run: docker compose --profile dev exec fake-cameras ffmpeg -v error -rtsp_transport tcp -timeout 30000000 -i rtsp://mediamtx:8554/gym-g299 -frames:v 1 -f null -
+      - run: docker compose exec reconciler visionquery-reconciler status
       - if: failure()
         run: docker compose --profile '*' ps --all && docker compose --profile '*' logs --no-color --tail 100
       - if: always()

@@ -1,7 +1,8 @@
 # The VisionQuery stack.
 #
 #   make bootstrap                    checks the prerequisites, writes .env, installs
-#   make up                           Postgres, migrations, MediaMTX and the api; no GPU
+#   make up                           Postgres, migrations, MediaMTX, its reconciler and the
+#                                     api; no GPU
 #   make up COMPOSE_PROFILES=observability     adds Prometheus and Grafana
 #   make up COMPOSE_PROFILES=gpu               adds Triton on the host's GPUs
 #   make up COMPOSE_PROFILES=dev               adds fake cameras (`make fetch-samples` first)
@@ -18,7 +19,8 @@
 #   gpu            Triton, reserving every GPU. On a machine without one, add
 #                  `-f compose.yaml -f compose.no-gpu.yaml` to run it on the CPU.
 #   observability  Prometheus scraping every service's /metrics, and Grafana reading it.
-#   dev            fake cameras looping sample videos into MediaMTX, for development.
+#   dev            fake cameras looping sample videos into MediaMTX, for development, registered
+#                  in the camera registry first.
 #
 # Every variable is documented in .env.example. Ports are published on
 # VISIONQUERY_BIND_ADDRESS (loopback unless set) and each has a variable of its own; only
@@ -147,6 +149,34 @@ services:
         - python
         - -c
         - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4)
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+  # Keeps MediaMTX's paths and publishers matching the camera registry (visionquery-reconciler,
+  # ADR 0014): every VISIONQUERY_RECONCILE_INTERVAL seconds, so a camera added, changed or
+  # removed, and a restarted MediaMTX, are put right within one cycle. Healthy while a recent
+  # cycle succeeded.
+  reconciler:
+    <<: *visionquery
+    command: ["visionquery-reconciler"]
+    environment:
+      <<: *runtime-environment
+      # As for migrate: the password is in PGPASSWORD, never in the URL.
+      VISIONQUERY_DATABASE__URL: postgresql://visionquery@postgres:5432/visionquery
+      PGPASSWORD: ${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}
+      VISIONQUERY_MEDIAMTX__URL: http://mediamtx:9997
+      VISIONQUERY_MEDIAMTX__PASSWORD: ${VISIONQUERY_MEDIAMTX_API_PASSWORD:?set VISIONQUERY_MEDIAMTX_API_PASSWORD in .env (see .env.example)}
+      VISIONQUERY_RECONCILE_INTERVAL: ${VISIONQUERY_RECONCILE_INTERVAL:-5}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      mediamtx:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "visionquery-reconciler", "health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -301,6 +331,29 @@ services:
   # volume, then looped without transcoding. Every camera shows the same moment of its video
   # as every other (all are cut to VISIONQUERY_FAKE_CAMERA_DURATION seconds and follow the wall
   # clock), also after a restart. Each camera reconnects by itself when MediaMTX restarts. Not scraped by Prometheus: it is never part of a Deployment.
+  # Development only: registers each fake camera as a pushed camera publishing as itself with
+  # VISIONQUERY_FAKE_CAMERA_PASSWORD (scripts/register_fake_cameras.py), since MediaMTX lets
+  # only registered cameras publish, each with its own credentials. Runs once, in the
+  # VisionQuery image, before the fake cameras start.
+  register-fake-cameras:
+    <<: *visionquery
+    profiles: [dev]
+    restart: "no"
+    command: ["python", "/scripts/register_fake_cameras.py"]
+    environment:
+      <<: *runtime-environment
+      VISIONQUERY_DATABASE__URL: postgresql://visionquery@postgres:5432/visionquery
+      PGPASSWORD: ${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}
+      VISIONQUERY_FAKE_CAMERAS: ${VISIONQUERY_FAKE_CAMERAS:-gym-g299=meva-school-g299.avi,gym-g330=meva-school-g330.avi,stairs-g420=meva-school-g420.avi}
+      VISIONQUERY_FAKE_CAMERA_PASSWORD: ${VISIONQUERY_FAKE_CAMERA_PASSWORD:?set VISIONQUERY_FAKE_CAMERA_PASSWORD in .env (see .env.example)}
+    volumes:
+      # The script and the fake cameras' own reading of VISIONQUERY_FAKE_CAMERAS, which it imports.
+      - ./scripts/register_fake_cameras.py:/scripts/register_fake_cameras.py:ro
+      - ./docker/fake-cameras/fake_cameras.py:/scripts/fake_cameras.py:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
   fake-cameras:
     <<: *service
     profiles: [dev]
@@ -314,11 +367,19 @@ services:
       FAKE_CAMERAS: ${VISIONQUERY_FAKE_CAMERAS:-gym-g299=meva-school-g299.avi,gym-g330=meva-school-g330.avi,stairs-g420=meva-school-g420.avi}
       FAKE_CAMERAS_RTSP: rtsp://mediamtx:8554
       FAKE_CAMERAS_DURATION: ${VISIONQUERY_FAKE_CAMERA_DURATION:-300}
+      # Each camera publishes as the user named for it with this, as registered above.
+      FAKE_CAMERAS_PASSWORD: ${VISIONQUERY_FAKE_CAMERA_PASSWORD:?set VISIONQUERY_FAKE_CAMERA_PASSWORD in .env (see .env.example)}
     volumes:
       - ${VISIONQUERY_FAKE_CAMERA_SAMPLES:-./samples}:/samples:ro
       - fake-cameras:/cache
     depends_on:
       mediamtx:
+        condition: service_healthy
+      # Registered, and in MediaMTX once the reconciler has run a cycle since (seconds; each
+      # camera retries publishing meanwhile).
+      register-fake-cameras:
+        condition: service_completed_successfully
+      reconciler:
         condition: service_healthy
     healthcheck:
       # Every camera's ffmpeg sent a frame in the last 5 s. A sample being prepared is replaced
