@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-import { fetchHealth, HealthError, type Health } from "./api/health";
+import { CHECK_AGAIN_MS, fetchHealth, HealthError, type Health } from "./api/health";
 import "./DeploymentHealth.css";
 
 type State =
@@ -16,20 +16,31 @@ export function DeploymentHealth() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetchHealth(controller.signal).then(
-      (health) => {
-        setState({ kind: "answered", health });
-      },
-      (error: unknown) => {
-        if (controller.signal.aborted) return;
-        setState({
-          kind: "error",
-          message: error instanceof HealthError ? error.message : UNREACHABLE,
-        });
-      },
-    );
+    let again: ReturnType<typeof setTimeout> | undefined;
+    const ask = () => {
+      fetchHealth(controller.signal).then(
+        (health) => {
+          if (controller.signal.aborted) return;
+          // The api has not finished its first look at the database: keep checking.
+          if (health.database.status === "checking") {
+            again = setTimeout(ask, CHECK_AGAIN_MS);
+            return;
+          }
+          setState({ kind: "answered", health });
+        },
+        (error: unknown) => {
+          if (controller.signal.aborted) return;
+          setState({
+            kind: "error",
+            message: error instanceof HealthError ? error.message : UNREACHABLE,
+          });
+        },
+      );
+    };
+    ask();
     return () => {
       controller.abort();
+      clearTimeout(again);
     };
   }, []);
 

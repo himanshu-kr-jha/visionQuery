@@ -8,7 +8,7 @@
     "/health": {
       "get": {
         "summary": "Whether the Deployment is ready to serve: its database can be reached",
-        "description": "Readiness, not liveness: 200 only while the api can do its work.\n\nA running api that cannot reach the database answers 503 here, so the Compose\nhealthcheck (which asks this) marks it unhealthy rather than letting an api that\ncan answer nothing look fine. The body names the problem by category only.",
+        "description": "Readiness, not liveness: 200 only while the api can do its work.\n\nA running api that cannot reach the database answers 503 here, so the Compose\nhealthcheck (which asks this) marks it unhealthy rather than letting an api that\ncan answer nothing look fine. The body names the problem by category only. Before the\nfirst look at the database has finished it is not ready either, but claims no problem.",
         "operationId": "health",
         "responses": {
           "200": {
@@ -49,8 +49,7 @@
           "server rejected a startup option",
           "timed out",
           "connection refused or host unreachable",
-          "other connection failure",
-          "still checking"
+          "other connection failure"
         ]
       },
       "DatabaseStatus": {
@@ -59,7 +58,8 @@
             "type": "string",
             "enum": [
               "connected",
-              "unreachable"
+              "unreachable",
+              "checking"
             ],
             "title": "Status"
           },
@@ -80,7 +80,7 @@
           "problem"
         ],
         "title": "DatabaseStatus",
-        "description": "Whether the api can reach the Deployment's database, and if not, why."
+        "description": "Whether the api can reach the Deployment's database, and if not, why.\n\n\"checking\" while the first look at it has not finished, when nothing is known yet."
       },
       "Health": {
         "properties": {
