@@ -4,6 +4,7 @@ Each test copies every package's source into a temporary tree, adds the import u
 test, and runs `lint-imports` against that tree with the repository's own contracts.
 """
 
+import ast
 import configparser
 import os
 import re
@@ -156,19 +157,35 @@ def test_the_api_s_health_probe_may_import_the_memory_health_check(tmp_path: Pat
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("module", ["app", "routes"])
-@pytest.mark.parametrize("memory_module", ["connection", "health"])
-def test_only_the_probe_and_the_composition_root_import_the_memory(
-    tmp_path: Path, module: str, memory_module: str
-) -> None:
+def test_a_new_api_module_opening_connections_is_reported(tmp_path: Path) -> None:
     # The app takes its dependencies as arguments; it never opens a connection itself.
-    path = ROOT / "packages/api/src/visionquery/api" / f"{module}.py"
-    source = (
-        path.read_text() if path.exists() else ""
-    ) + f"\nimport visionquery.memory.{memory_module}\n"
-    result = _lint_with(tmp_path, {f"visionquery.api.{module}": source})
+    result = _lint_with(
+        tmp_path, {"visionquery.api.routes": "import visionquery.memory.connection\n"}
+    )
     assert _broken(result) == {API_THROUGH_TOOLS}, result.stdout
-    assert f"visionquery.api.{module} -> visionquery.memory.{memory_module}" in result.stdout
+    assert "visionquery.api.routes -> visionquery.memory.connection" in result.stdout
+
+
+def test_the_api_app_imports_nothing_from_the_memory_itself() -> None:
+    # Read from the source, not linted in a copy: a copy that replaces an existing module is
+    # not reliably the one lint-imports analyses. `make contracts` lints the real tree.
+    source = (ROOT / "packages/api/src/visionquery/api/app.py").read_text()
+    imported = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ImportFrom | ast.Import)
+    ]
+    names = [
+        n
+        for node in imported
+        for n in (
+            [node.module or ""]
+            if isinstance(node, ast.ImportFrom)
+            else [a.name for a in node.names]
+        )
+    ]
+    assert names
+    assert not [n for n in names if n.startswith("visionquery.memory")], names
 
 
 def test_another_api_module_importing_the_memory_health_check_is_reported(tmp_path: Path) -> None:
