@@ -6,9 +6,10 @@ import logging
 import sys
 import threading
 import warnings
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import pytest
 from visionquery.runtime import configure_logging
@@ -469,3 +470,113 @@ def test_a_credential_split_between_message_and_argument_is_never_leaked(
         library.propagate = True
     assert "hunter2" not in stream.getvalue()
     assert len(stream.getvalue().splitlines()) == 2
+
+
+def test_a_field_a_record_factory_installed_before_configuring_adds_survives() -> None:
+    # OpenTelemetry's logging instrumentor installs a factory that adds trace ids; the
+    # runtime, configured after it, must build on it rather than replace it.
+    previous = logging.getLogRecordFactory()
+
+    def traced(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = previous(*args, **kwargs)
+        record.otelTraceID = "4bf92f3577b34da6"
+        return record
+
+    logging.setLogRecordFactory(traced)
+    stream = io.StringIO()
+    configure_logging("recorder", "INFO", stream=stream)
+    logging.getLogger("x").info("opening %s", URL)
+    (line,) = _lines(stream)
+    assert line["otelTraceID"] == "4bf92f3577b34da6"
+    assert line["message"] == f"opening {SCRUBBED}"
+    _assert_clean(stream)
+
+
+def _make_record_adding_host(
+    standard: Callable[..., logging.LogRecord],
+) -> Callable[..., logging.LogRecord]:
+    def make_record(self: logging.Logger, *args: Any, **kwargs: Any) -> logging.LogRecord:
+        record = standard(self, *args, **kwargs)
+        record.host = "box-1"
+        return record
+
+    return make_record
+
+
+def test_a_field_a_make_record_installed_before_configuring_adds_survives() -> None:
+    logging.Logger.makeRecord = _make_record_adding_host(logging.Logger.makeRecord)
+    stream = io.StringIO()
+    configure_logging("recorder", "INFO", stream=stream)
+    logging.getLogger("x").info("opening", extra={"url": URL})
+    (line,) = _lines(stream)
+    assert line["host"] == "box-1"
+    assert line["url"] == SCRUBBED
+
+
+def test_configuring_twice_builds_on_an_earlier_factory_once() -> None:
+    previous = logging.getLogRecordFactory()
+    calls: list[str] = []
+
+    def counted(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        calls.append("made")
+        return previous(*args, **kwargs)
+
+    logging.setLogRecordFactory(counted)
+    configure_logging("recorder", "INFO", stream=io.StringIO())
+    factory, make_record = logging.getLogRecordFactory(), logging.Logger.makeRecord
+    configure_logging("recorder", "INFO", stream=io.StringIO())
+    assert logging.getLogRecordFactory() is factory
+    assert logging.Logger.makeRecord is make_record
+    logging.getLogger("x").info("once")
+    assert calls == ["made"]
+
+
+class _Camera(NamedTuple):
+    url: str
+    fps: int
+
+
+class _Pair(tuple[str, str]):
+    """A tuple subclass whose constructor does not take one iterable."""
+
+    def __new__(cls, first: str, second: str) -> _Pair:
+        return super().__new__(cls, (first, second))
+
+
+def _field(name: str, value: object) -> object:
+    """`value` as the field `name` of a record made with it in `extra=`."""
+    record = logging.getLogger("x").makeRecord(
+        "x", logging.INFO, "f", 1, "m", (), None, extra={name: value}
+    )
+    return record.__dict__[name]
+
+
+def test_a_named_tuple_in_extra_keeps_its_type_through_scrubbing(output: io.StringIO) -> None:
+    camera = _field("camera", _Camera(URL, 25))
+    assert type(camera) is _Camera
+    assert camera == _Camera(SCRUBBED, 25)
+
+
+def test_a_tuple_subclass_with_nothing_to_scrub_is_left_as_it_is(output: io.StringIO) -> None:
+    pair = _Pair("gate-2", "gate-3")
+    assert _field("pair", pair) is pair
+
+
+def test_a_tuple_subclass_that_cannot_be_rebuilt_is_still_a_tuple(output: io.StringIO) -> None:
+    pair = _field("pair", _Pair(URL, "gate-3"))
+    assert isinstance(pair, tuple)
+    assert pair == (SCRUBBED, "gate-3")
+
+
+def test_a_field_a_filter_adds_on_the_runtimes_handler_is_scrubbed(output: io.StringIO) -> None:
+    # A filter runs after the record is made, so only the JSON formatter sees what it adds;
+    # on a handler a library installed for itself, such a field is not scrubbed (ADR 0012).
+    def add_upstream(record: logging.LogRecord) -> bool:
+        record.upstream = URL
+        return True
+
+    logging.getLogger().handlers[0].addFilter(add_upstream)
+    logging.getLogger("x").info("relayed")
+    (line,) = _lines(output)
+    assert line["upstream"] == SCRUBBED
+    _assert_clean(output)

@@ -18,7 +18,7 @@ import math
 import re
 import sys
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Any, TextIO, cast
@@ -38,8 +38,10 @@ _STANDARD_ATTRIBUTES = frozenset(
 _SURROGATES = re.compile("[\ud800-\udfff]")
 _UNPRINTABLE = "<unprintable>"
 
-_make_record = logging.getLogRecordFactory()
-_STD_MAKE_RECORD = logging.Logger.makeRecord
+#: Marks a record factory or `makeRecord` as the runtime's scrubbing wrapper, so that
+#: configuring again finds it in place and does not wrap it a second time.
+_SCRUBS = "_visionquery_scrubs"
+
 _exceptions = logging.Formatter()
 
 
@@ -47,17 +49,22 @@ def configure_logging(service: str, level: LogLevel, *, stream: TextIO | None = 
     """Send every log record of this process to `stream` (stdout) as scrubbed JSON lines.
 
     Replaces whatever handlers the root logger had, and also routes warnings and uncaught
-    exceptions, in the main thread or any other, through the same path.
+    exceptions, in the main thread or any other, through the same path. The record factory
+    and `Logger.makeRecord` in place when it is called (OpenTelemetry's, say) are wrapped,
+    not replaced, so whatever fields they add are kept.
     """
     handler = logging.StreamHandler(stream if stream is not None else sys.stdout)
     handler.setFormatter(JsonFormatter(service))
     root = logging.getLogger()
     root.handlers[:] = [handler]
     root.setLevel(level)
-    logging.setLogRecordFactory(_scrubbed_record)
-    # Covers loggers that already exist, because the method is looked up on the class. Always
-    # wraps the standard method, never an earlier wrapper, so configuring twice wraps once.
-    logging.Logger.makeRecord = _make_record_with_scrubbed_extra
+    factory = logging.getLogRecordFactory()
+    if not _scrubs(factory):
+        logging.setLogRecordFactory(_scrubbing_factory(factory))
+    # Replaced on the class, process-wide, which covers loggers that already exist (ADR 0012).
+    make_record = logging.Logger.makeRecord
+    if not _scrubs(make_record):
+        logging.Logger.makeRecord = _scrubbing_make_record(make_record)
     logging.captureWarnings(True)
     sys.excepthook = _log_uncaught
     threading.excepthook = _log_uncaught_in_thread
@@ -137,34 +144,47 @@ def _rendered(record: logging.LogRecord) -> tuple[str, bool]:
         return f"{_text(record.msg)} {_UNPRINTABLE}", False
 
 
-def _make_record_with_scrubbed_extra(
-    self: logging.Logger,
-    name: str,
-    level: int,
-    fn: str,
-    lno: int,
-    msg: object,
-    args: Any,
-    exc_info: Any,
-    func: str | None = None,
-    extra: Mapping[str, object] | None = None,
-    sinfo: str | None = None,
-) -> logging.LogRecord:
-    """`Logger.makeRecord`, then the `extra=` fields it attached, scrubbed."""
-    record = _STD_MAKE_RECORD(self, name, level, fn, lno, msg, args, exc_info, func, extra, sinfo)
-    for key in extra or ():
-        try:
-            record.__dict__[key] = _kept_scrubbed(key, record.__dict__[key])
-        except Exception:  # logging must never raise into the caller
-            record.__dict__[key] = _UNPRINTABLE
-    return record
+def _scrubs(hook: object) -> bool:
+    """Whether `hook` is one of the runtime's scrubbing wrappers."""
+    return getattr(hook, _SCRUBS, False) is True
+
+
+def _scrubbing_make_record(
+    make_record: Callable[..., logging.LogRecord],
+) -> Callable[..., logging.LogRecord]:
+    """`make_record`, then the `extra=` fields it attached, scrubbed."""
+
+    def make_scrubbed_record(
+        self: logging.Logger,
+        name: str,
+        level: int,
+        fn: str,
+        lno: int,
+        msg: object,
+        args: Any,
+        exc_info: Any,
+        func: str | None = None,
+        extra: Mapping[str, object] | None = None,
+        sinfo: str | None = None,
+    ) -> logging.LogRecord:
+        record = make_record(self, name, level, fn, lno, msg, args, exc_info, func, extra, sinfo)
+        for key in extra or ():
+            try:
+                record.__dict__[key] = _kept_scrubbed(key, record.__dict__[key])
+            except Exception:  # logging must never raise into the caller
+                record.__dict__[key] = _UNPRINTABLE
+        return record
+
+    setattr(make_scrubbed_record, _SCRUBS, True)
+    return make_scrubbed_record
 
 
 def _kept_scrubbed(key: str, value: object) -> object:
     """`value` with credentials removed and its type kept, so `%(count)d` still formats.
 
     Credential-named keys are masked, strings and nested containers are scrubbed, and any other
-    object is replaced by its scrubbed text only when its text held a credential.
+    object is replaced by its scrubbed text only when its text held a credential. A container
+    with nothing to remove is kept as it is, whatever its type.
     """
     if is_credential_key(key):
         return REDACTED
@@ -174,23 +194,40 @@ def _kept_scrubbed(key: str, value: object) -> object:
         case bool() | int() | float() | None:
             return value
         case Mapping():
-            items = cast(Mapping[object, object], value).items()
-            return {
+            mapping = cast(Mapping[object, object], value)
+            items = mapping.items()
+            kept = {
                 (scrub(k) if isinstance(k, str) else k): _kept_scrubbed(str(k), item)
                 for k, item in items
             }
+            unchanged = len(kept) == len(items) and all(
+                k in kept and _same(kept[k], item) for k, item in items
+            )
+            return mapping if unchanged else kept
         case list() | tuple() | set() | frozenset():
             members = cast(list[object], value)
-            kind = cast(type[Any], type(members))
             kept = [_kept_scrubbed("", item) for item in members]
-            try:
-                return kind(kept)
-            except TypeError:  # a tuple subclass such as a namedtuple
-                return kept
+            return (
+                members if all(map(_same, kept, members, strict=True)) else _rebuilt(members, kept)
+            )
         case _:
             text = _text(value)
             clean = scrub(text)
             return value if clean == text else clean
+
+
+def _same(kept: object, original: object) -> bool:
+    return kept is original or (type(kept) is str and kept == original)
+
+
+def _rebuilt(original: object, members: list[object]) -> object:
+    """A container of `original`'s type holding `members`, or a plain tuple or list."""
+    kind = cast(type[Any], type(original))
+    make = getattr(kind, "_make", None)  # a namedtuple takes its fields one by one
+    try:
+        return make(members) if callable(make) else kind(members)
+    except Exception:
+        return tuple(members) if isinstance(original, tuple) else members
 
 
 def _scrubbed_args(args: object) -> tuple[object, ...] | Mapping[str, object] | None:
@@ -209,8 +246,20 @@ def _scrubbed_argument(argument: object) -> object:
     return argument if clean == text else clean
 
 
-def _scrubbed_record(*args: Any, **kwargs: Any) -> logging.LogRecord:
-    """A record that holds no credential, left exactly as made when there was none to remove.
+def _scrubbing_factory(
+    factory: Callable[..., logging.LogRecord],
+) -> Callable[..., logging.LogRecord]:
+    """A record factory making each record with `factory`, then scrubbing it."""
+
+    def scrubbed_record(*args: Any, **kwargs: Any) -> logging.LogRecord:
+        return _scrub_record(factory(*args, **kwargs))
+
+    setattr(scrubbed_record, _SCRUBS, True)
+    return scrubbed_record
+
+
+def _scrub_record(record: logging.LogRecord) -> logging.LogRecord:
+    """`record` holding no credential, left exactly as made when there was none to remove.
 
     Formatters other libraries install may read `record.args` (uvicorn's access log does), so
     the arguments keep their shape: only those that hold a credential are replaced by their
@@ -219,7 +268,6 @@ def _scrubbed_record(*args: Any, **kwargs: Any) -> logging.LogRecord:
     the message and an argument, or when the record could not be rendered. Logging must never
     raise into the caller, so every rendering step is guarded.
     """
-    record = _make_record(*args, **kwargs)
     rendered, fits = _rendered(record)
     scrubbed = scrub(rendered)
     needs_scrubbing = scrubbed != rendered or not fits
