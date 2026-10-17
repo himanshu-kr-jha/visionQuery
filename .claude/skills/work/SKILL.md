@@ -29,19 +29,23 @@ Give the user a short status: what is merged, what is in flight and at which ste
 Several issues may be in flight at once.
 Go through every in-flight item, open PRs oldest first and then pushed issue branches without a PR, and apply the first matching rule to each:
 
-1. **An open PR:** read the comments on both the PR and its issue, count its fix rounds (the `developer` hand-backs answering `tester` or `pr-reviewer` findings; build, rebase and CI-fix hand-backs do not count), and decide by the latest activity on the PR head:
-   - CI failed on the PR head and no `developer` hand-back is newer than the failure: send the failing run to `developer`;
-   - the latest commit has a review verdict that is "ready to merge" or, once two fix rounds are done, that has no security or correctness finding, and CI is green (or the pre-CI rule below is met): if fewer than two fix rounds are done and the verdict lists non-blocking findings within the issue's scope, send them to `developer`; otherwise file every open non-security, non-correctness finding (blocking or not), if any, as the PR's one follow-up issue (step 3), then merge;
-   - a `tester` verdict "not ready" for the latest commit and no newer hand-back: if fewer than two fix rounds have happened, send its findings to `developer`; otherwise stop and report to the user if any is a security or correctness defect, and run `pr-reviewer` if none is;
-   - a builder or `developer` hand-back newer than the last verdict: run `tester` then `pr-reviewer` if code changed, or `pr-reviewer` alone for a docs-only or config-only change;
+1. **An open PR:** read the comments on both the PR and its issue, count its fix rounds (the `developer` hand-backs answering `tester` or `pr-reviewer` findings; build, rebase and CI-fix hand-backs do not count), and decide by the latest activity on the PR head, first match wins:
+   - a real CI run failed on the PR head and no `developer` hand-back is newer than the failure (the pre-CI tester stand-in below is not a CI run): send the failing run to `developer`; if two CI-fix hand-backs already answered that same failing check, stop and report to the user instead;
+   - the latest commit has a review verdict "do not merge", or a finding that needs a design change, and no newer hand-back: stop and report to the user, in any round;
+   - the latest commit has a review verdict that is "ready to merge" or, once two fix rounds are done, that has no security or correctness finding, and the head has no `tester` verdict "not ready" (once two rounds are done, a "not ready" with no security or correctness finding does not block): if CI is still running, wait for it (`gh pr checks <n> --watch`); once CI is green (or the pre-CI rule below is met: after two rounds the stand-in is "the tester's full local suite passed", not the tester's overall verdict), then, if fewer than two fix rounds are done and the verdict lists non-blocking findings within the issue's scope, send them to `developer`; otherwise file every open finding (blocking or not, from `pr-reviewer` and `tester`), if any, as the PR's one follow-up issue (step 3), then merge;
+   - the latest review verdict has blocking findings and no newer hand-back: if fewer than two fix rounds have happened, send them to `developer`; otherwise stop and report to the user;
+   - the latest commit has a `tester` verdict "not ready" and no newer hand-back: if fewer than two fix rounds have happened, send its findings to `developer`; otherwise stop and report to the user if any is a security or correctness defect, and, if none is and the head has no review verdict yet, run `pr-reviewer`;
+   - a builder or `developer` hand-back newer than the last verdict: run `tester` if code changed, then `pr-reviewer` only after `tester` says "ready for PR"; for a docs-only or config-only change run `pr-reviewer` alone;
    - a docs-only or config-only PR with no review verdict on its head: run `pr-reviewer`;
    - a `tester` verdict "ready for PR" for the latest commit but no review verdict: run `pr-reviewer`;
-   - the latest review verdict has blocking findings and no newer hand-back: if fewer than two fix rounds have happened, send them to `developer`; otherwise stop and report to the user, because a security or correctness defect remains after two rounds;
    - none of the above, with CI still running on the head: wait for it (`gh pr checks <n> --watch`).
-2. **A pushed issue branch whose hand-back names an unmerged parent branch, while it still carries the parent's commits:** it does while the parent PR's final head (`<parent head>`, from `gh pr view <parent> --json headRefOid`) is an ancestor of the branch, or, for a branch cut before the parent's last commits, while `git merge-base origin/<branch> <parent head>` is not an ancestor of `origin/develop`.
+2. **A pushed issue branch whose hand-back names an unmerged parent branch, while it still carries the parent's commits:** first `git fetch origin pull/<parent PR>/head` so the parent's head exists even when its branch is pruned.
+   It carries them while the parent PR's final head (`<parent head>`, from `gh pr view <parent> --json headRefOid`) is an ancestor of the branch, or, for a branch cut before the parent's last commits, while `git merge-base origin/<branch> <parent head>` is not an ancestor of `origin/develop`.
    While the parent's PR is open, leave it (the tester diffs it against the parent branch if it is tested early); once the parent's PR is merged, send it to `developer` to run `git rebase --onto origin/develop <parent head>` and push.
    If its builder is still running, wait for the hand-back.
    A branch that no longer carries the parent's commits has been moved already and falls to the rule below.
+   A branch whose parent itself depends on unmerged work breaks the one-level limit: stop and report to the user.
+
 3. **A pushed issue branch without a PR:** if a builder hand-back, or a `developer` rebase hand-back, for its latest commit exists as a comment on the issue, continue from the tester stage (or open the PR straight away for a docs-only or config-only change); otherwise send it back to its builder to finish, chosen by the issue's label (`senior-developer` for `task` and `spike`, `developer` for `bug`).
 
 Then, if no `senior-developer` is building, start the next issue (or `$ARGUMENTS`): the lowest-numbered open sub-issue of the earliest open milestone, preferring one that does not depend on unmerged work.
@@ -63,7 +67,7 @@ Keep the pipeline full: as soon as `senior-developer` hands an issue back, start
    If GitHub did not auto-close it, close it with a comment linking the merged PR.
    Until CI exists (issue #8), "CI is green" means the tester ran the full local suite and it passed.
    When no checks exist for the change, the tester's verdict on the final commit stands in for CI; for a docs-only or config-only change, the `pr-reviewer` verdict on the final commit does.
-   Merge when the verdict is "ready to merge", or when two fix rounds are done and no security or correctness finding remains.
+   Merge when the verdict is "ready to merge", or when two fix rounds are done and no security or correctness finding remains; never over a "do not merge" verdict, a design-change finding, or a `tester` "not ready" on the head (after two rounds, only one with a security or correctness finding blocks).
    The PR title is a Conventional Commit `type(scope): subject`; the squash body is a short summary plus `Closes #<n>`, without the template checklist.
 6. The `docs/plan/v1.md` status marker is part of the issue's own PR: the builder marks the milestone `[~]` in its first PR and `[x]` in the PR that closes its last sub-issue.
    The tech lead updates the GitHub wiki (a separate repo) directly when a milestone completes or setup changes.
@@ -71,7 +75,7 @@ Keep the pipeline full: as soon as `senior-developer` hands an issue back, start
 Post each builder hand-back, tester verdict and reviewer verdict as a comment on the PR if one exists, otherwise on the issue.
 After posting a builder hand-back, the tech lead (you) unlocks and removes the builder's worktree (`git worktree unlock <path>; git worktree remove --force <path>`; agent worktrees are locked), after confirming the worktree has no uncommitted changes and `git rev-parse <branch>` equals `origin/<branch>`, so the branch is free for `developer`; do the same for stale builder worktrees found when resuming.
 Tell `tester` and `pr-reviewer` which fix round they are judging.
-A PR gets at most one follow-up issue: before filing it, look for it with `gh issue list --state all --search "Follow-up to #<pr>"` and file none if it exists; a new one goes under the same milestone and its body starts with `Follow-up to #<pr>`.
+A PR gets at most one follow-up issue: before filing it, look for it with `gh issue list --state all --search '"Follow-up to #<pr>" in:body'` and file none if it exists; a new one goes under the same milestone and its body starts with `Follow-up to #<pr>`.
 Give each agent everything it needs in its prompt: the issue number, the branch, and the full report it must act on.
 
 ## 4. Continue or stop

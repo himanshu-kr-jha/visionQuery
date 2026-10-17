@@ -80,7 +80,7 @@ Lifecycle of one issue:
 4. **Tech lead** opens the PR from the template, with `Closes #<n>` and a Conventional Commit title.
 5. **`pr-reviewer`** reviews the PR, running `make check` and reading the change; it runs stack tests only when it suspects a defect there.
    Blocking findings go to `developer`, then back through `tester` (if code changed) and `pr-reviewer`.
-6. **Tech lead** squash-merges (`gh pr merge --squash --delete-branch`) once CI is green and either the verdict is "ready to merge" or, after two fix rounds, no security or correctness finding remains; it confirms the issue closed.
+6. **Tech lead** squash-merges (`gh pr merge --squash --delete-branch`) once CI is green and either the verdict is "ready to merge" or, after two fix rounds, no security or correctness finding remains (never over "do not merge", a design-change finding, or a `tester` "not ready" on the head, except after two rounds when it has no security or correctness finding); it confirms the issue closed.
    If GitHub did not auto-close the issue, close it with a comment linking the merged PR.
    The tech lead updates the GitHub wiki (a separate repo) directly when a milestone completes or setup changes.
    After the user approves a milestone's demo, the tech lead closes the milestone issue with a comment summarising what shipped.
@@ -92,17 +92,19 @@ Rules for the loop:
   After the second round only security or correctness defects block; before merging, the tech lead files every other open finding, blocking or not, as one follow-up issue under the same milestone (once), and the PR merges.
   The tech lead tells `tester` and `pr-reviewer` which round they are judging.
   If a security or correctness defect remains after two rounds, the tech lead stops and brings it to the user.
-- A "do not merge" verdict, or a finding that needs a design change, goes to the user.
+- A "do not merge" verdict, or a finding that needs a design change, goes to the user in any round.
+- A real CI failure goes to `developer`; after a second CI-fix hand-back on the same failing check, the tech lead stops and brings it to the user.
 - Non-blocking findings in a "ready to merge" verdict are fixed in the same PR, as a fix round, while fewer than two rounds are done and the fix stays within the issue's scope.
   Any finding still unfixed at the merge is filed before it as one follow-up issue.
 - A follow-up issue filed before a merge goes under the same milestone, and its body starts with `Follow-up to #<pr>`.
-  Before filing one, the tech lead looks for it with `gh issue list --state all --search "Follow-up to #<pr>"` and files none if it exists, so a PR gets at most one.
+  Before filing one, the tech lead looks for it with `gh issue list --state all --search '"Follow-up to #<pr>" in:body'` and files none if it exists, so a PR gets at most one.
 - Escalate to the user, rather than deciding alone, anything that would change an ADR, the glossary's meaning of an existing term, or an issue's acceptance criteria.
 - Post each builder hand-back, tester verdict and reviewer verdict as a comment on the PR if one exists, otherwise on the issue, so the history is visible on GitHub, without agent attribution.
 - Work is pipelined: once `senior-developer` hands back an issue it never returns to it, and starts the next issue straight away while `tester`, `developer` and `pr-reviewer` finish the previous one.
   Every builder runs with `isolation: "worktree"`, and so does `developer` whenever another agent is using the main checkout, so no two agents share a working tree.
   The next issue is the lowest-numbered open sub-issue of the earliest open milestone, preferring one that does not depend on unmerged work.
-  If every candidate depends on unmerged work, the builder cuts its branch from the unmerged branch; once that merges, `developer` moves it onto develop with `git rebase --onto origin/develop <parent head>`, where `<parent head>` is the parent PR's final head (`gh pr view <parent> --json headRefOid`), and its PR is opened only after that.
+  If every candidate depends on unmerged work, the builder cuts its branch from the unmerged branch, never from a branch that itself depends on unmerged work (one level of dependency at most); once that merges, `developer` moves it onto develop with `git rebase --onto origin/develop <parent head>`, where `<parent head>` is the parent PR's final head (`gh pr view <parent> --json headRefOid`), and its PR is opened only after that.
+  Before computing the merge-base, `git fetch origin pull/<parent PR>/head` makes the parent's head available even if its branch was pruned.
   The move happens only while the branch still carries the parent's commits: while `<parent head>` is an ancestor of the branch, or, for a branch cut before the parent's last commits, while `git merge-base origin/<branch> <parent head>` is not an ancestor of `origin/develop`.
   Once moved, the branch is treated like any other.
 - Stack tests are isolated per Compose project, so agents may run them at the same time.
