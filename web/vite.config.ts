@@ -8,7 +8,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     // `/health` is readiness, for infrastructure; every Operator operation is under `/api`.
-    proxy: { "/health": api, "/api": api },
+    // A key starting with ^ is a regular expression: these forward those paths and no others
+    // (not /apiary, nor /healthz, nor the app's own /src/api/ modules).
+    proxy: { "^/health$": api, "^/api/": api },
   },
   test: {
     environment: "jsdom",

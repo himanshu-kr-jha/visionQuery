@@ -89,6 +89,25 @@ def test_make_sync_installs_the_web_app_from_its_lockfile() -> None:
     assert "npm --prefix web ci" in dry
 
 
-def test_the_dev_server_forwards_health_and_every_operator_operation_to_the_api() -> None:
+def _proxy_patterns() -> list[str]:
     config = (WEB / "vite.config.ts").read_text()
-    assert re.search(r'proxy:\s*\{\s*"/health":\s*api,\s*"/api":\s*api\s*\}', config)
+    block = re.search(r"proxy:\s*\{(.*?)\}", config, re.DOTALL)
+    assert block, "the dev server has no proxy"
+    return re.findall(r'"([^"]+)":\s*api', block.group(1))
+
+
+def test_the_dev_server_forwards_health_and_every_operator_operation_to_the_api() -> None:
+    forwarded = [re.compile(pattern.removeprefix("^")) for pattern in _proxy_patterns()]
+    assert len(forwarded) == 2
+    for path in ["/health", "/api/cameras", "/api/"]:
+        assert any(p.match(path) for p in forwarded), path
+
+
+def test_the_dev_server_forwards_exact_prefixes_not_every_path_that_starts_with_them() -> None:
+    # Vite reads a key starting with ^ as a regular expression; a bare "/api" would also
+    # forward /apiary and /api-docs, and a bare "/health" would forward /healthz.
+    patterns = _proxy_patterns()
+    assert all(p.startswith("^") for p in patterns), patterns
+    forwarded = [re.compile(p) for p in patterns]
+    for path in ["/apiary", "/api-docs", "/healthz", "/health/x", "/src/api/health.ts", "/"]:
+        assert not any(p.search(path) for p in forwarded), path
