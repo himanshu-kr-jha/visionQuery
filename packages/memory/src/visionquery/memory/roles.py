@@ -32,8 +32,8 @@ def enable_logins(url: str, passwords: Mapping[str, str], *, connect_timeout: in
     """Let each of the Deployment's roles in `passwords` log in, with its password.
 
     Run as a role that may alter them (the superuser that migrates). A role's previous password
-    stops working. Raises `ValueError`, changing nothing, when asked about any other role or for an empty
-    password (which would leave the role without one).
+    stops working. Raises `ValueError`, changing nothing, when asked about any other role or for
+    an empty password (which would leave the role without one).
     """
     if unknown := sorted(set(passwords) - set(ROLES)):
         raise ValueError(f"only {', '.join(ROLES)} are given logins, not {', '.join(unknown)}")
