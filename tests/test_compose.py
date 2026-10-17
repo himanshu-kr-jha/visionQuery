@@ -22,6 +22,7 @@ import pytest
 import yaml
 from fake_cameras import SYNTHETIC, parse_cameras
 from fetch_samples import MANIFEST, load_manifest
+from visionquery.memory.roles import MONITORING, RUNTIME
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ROOT / "compose.yaml"
@@ -203,7 +204,9 @@ def test_the_secrets_are_the_passwords() -> None:
     assert _secrets() == [
         "VISIONQUERY_GRAFANA_ADMIN_PASSWORD",
         "VISIONQUERY_MEDIAMTX_API_PASSWORD",
+        "VISIONQUERY_POSTGRES_MONITORING_PASSWORD",
         "VISIONQUERY_POSTGRES_PASSWORD",
+        "VISIONQUERY_POSTGRES_RUNTIME_PASSWORD",
     ]
 
 
@@ -355,21 +358,81 @@ def test_every_service_built_from_our_image_waits_for_the_migrations_to_succeed(
         assert condition == "service_completed_successfully", name
 
 
+#: The variable holding the password of each role a service connects to Postgres as.
+PASSWORD_OF = {
+    "visionquery": "VISIONQUERY_POSTGRES_PASSWORD",
+    RUNTIME: "VISIONQUERY_POSTGRES_RUNTIME_PASSWORD",
+    MONITORING: "VISIONQUERY_POSTGRES_MONITORING_PASSWORD",
+}
+
+
+def _connecting(services: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
+    """The services that connect to the memory with a URL, as VisionQuery processes do."""
+    return {
+        n: s for n, s in services.items() if "VISIONQUERY_DATABASE__URL" in s.get("environment", {})
+    }
+
+
+def _user(service: Mapping[str, Any]) -> str:
+    url = service["environment"]["VISIONQUERY_DATABASE__URL"]
+    return url.removeprefix("postgresql://").split("@", 1)[0]
+
+
 def test_the_database_password_is_not_part_of_the_url() -> None:
     # A password with `@`, `/`, `:` or `#` in it would break a URL; libpq reads it from
     # PGPASSWORD instead, so any password works.
-    password = "p@ss/w:rd#1"
-    services = _services(_config(env={"VISIONQUERY_POSTGRES_PASSWORD": password}))
-    connecting = {
-        n: s for n, s in services.items() if "VISIONQUERY_DATABASE__URL" in s.get("environment", {})
-    }
+    passwords = {variable: f"p@ss/w:rd#{n}" for n, variable in enumerate(PASSWORD_OF.values())}
+    services = _services(_config(env=passwords))
+    connecting = _connecting(services)
     assert set(connecting) >= {"migrate", "api"}
     for name, service in connecting.items():
         environment = service["environment"]
+        password = passwords[PASSWORD_OF[_user(service)]]
+        assert ":" not in _user(service), name
         assert password not in environment["VISIONQUERY_DATABASE__URL"], name
-        assert "@" in environment["VISIONQUERY_DATABASE__URL"], name
-        assert "visionquery:" not in environment["VISIONQUERY_DATABASE__URL"], name
         assert environment["PGPASSWORD"] == password, name
+
+
+def test_only_migrate_connects_as_the_superuser() -> None:
+    # Every other VisionQuery process, today's and those later milestones add, connects as the
+    # runtime role, which reads and writes the memory's rows and nothing more (ADR 0016).
+    config = _config()
+    users = {name: _user(service) for name, service in _connecting(_services(config)).items()}
+    assert users.pop("migrate") == "visionquery"
+    assert users
+    assert set(users.values()) == {RUNTIME}
+    for name, service in _long_running(config).items():
+        if _is_visionquery_process(service):
+            assert name in users, f"{name} runs our image and does not say how it connects"
+
+
+def test_only_postgres_and_migrate_are_given_the_superusers_password() -> None:
+    password = "the-superusers-own-password"
+    config = _config(env={"VISIONQUERY_POSTGRES_PASSWORD": password})
+    given = {
+        name
+        for name, service in _services(config).items()
+        if password in json.dumps(service.get("environment", {}))
+    }
+    assert given == {"postgres", "migrate"}
+
+
+def test_migrate_gives_the_runtime_and_monitoring_roles_their_passwords() -> None:
+    environment = _services(_config())["migrate"]["environment"]
+    runtime = "test-visionquery_postgres_runtime_password"
+    monitoring = "test-visionquery_postgres_monitoring_password"
+    assert environment["VISIONQUERY_RUNTIME_PASSWORD"] == runtime
+    assert environment["VISIONQUERY_MONITORING_PASSWORD"] == monitoring
+
+
+def test_the_postgres_exporter_connects_as_the_monitoring_role_once_it_can_log_in() -> None:
+    exporter = _services(_config())["postgres-exporter"]
+    environment = exporter["environment"]
+    assert environment["DATA_SOURCE_USER"] == MONITORING
+    assert environment["DATA_SOURCE_PASS"] == "test-visionquery_postgres_monitoring_password"
+    # migrate gives the role its login.
+    condition = exporter["depends_on"]["migrate"]["condition"]
+    assert condition == "service_completed_successfully"
 
 
 def test_the_api_serves_on_its_own_port_and_is_healthy_only_when_health_says_so() -> None:
