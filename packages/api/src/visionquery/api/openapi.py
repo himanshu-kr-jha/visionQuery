@@ -13,13 +13,16 @@ import json
 from pathlib import Path
 
 from visionquery.api.app import create_app
+from visionquery.api.probe import DatabaseHealth
 
 __all__ = ["main", "render"]
 
 
 def render() -> str:
     """The schema as the file holds it: indented JSON in the api's order, ending in a newline."""
-    return json.dumps(create_app().openapi(), indent=2, ensure_ascii=False) + "\n"
+    # The schema does not depend on any dependency, so a stub stands in for each.
+    app = create_app(database_health=lambda: DatabaseHealth(None))
+    return json.dumps(app.openapi(), indent=2, ensure_ascii=False) + "\n"
 
 
 def main() -> None:

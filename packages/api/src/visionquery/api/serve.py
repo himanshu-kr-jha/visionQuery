@@ -5,7 +5,7 @@ from typing import Annotated
 
 import uvicorn
 from pydantic import Field
-from visionquery.api.app import create_app, database_health
+from visionquery.api.app import create_app
 from visionquery.api.probe import DatabaseProbe
 from visionquery.memory.health import check_database
 from visionquery.memory.settings import DatabaseSettings
@@ -27,9 +27,10 @@ class ApiSettings(Settings):
 def main() -> None:
     """The `visionquery-api` command."""
     settings = start("api", ApiSettings).settings
-    app = create_app()
-    app.dependency_overrides[database_health] = DatabaseProbe(
-        partial(check_database, settings.database.url.get_secret_value())
+    app = create_app(
+        database_health=DatabaseProbe(
+            partial(check_database, settings.database.url.get_secret_value())
+        )
     )
     uvicorn.run(
         app,

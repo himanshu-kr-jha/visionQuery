@@ -13,14 +13,12 @@ from urllib.parse import quote, urlsplit
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from visionquery.api.app import create_app, database_health, operator_router
+from visionquery.api.app import create_app, current_database_health, operator_router
 from visionquery.memory.health import DatabaseHealth, check_database
 
 
 def _app(check: Callable[[], DatabaseHealth]) -> FastAPI:
-    app = create_app()
-    app.dependency_overrides[database_health] = check
-    return app
+    return create_app(database_health=check)
 
 
 def _health(url: str) -> tuple[int, dict[str, Any]]:
@@ -107,6 +105,14 @@ def test_health_is_at_the_root_and_operator_operations_will_be_under_api() -> No
         assert "/health" in client.get("/openapi.json").json()["paths"]
 
 
-def test_without_a_provided_check_the_app_fails_loudly_not_healthy() -> None:
-    with TestClient(create_app(), raise_server_exceptions=False) as client:
-        assert client.get("/health").status_code == 500
+def test_an_app_cannot_be_made_without_its_database_check() -> None:
+    # A forgotten dependency is an error where the app is made, not a 500 on one route later.
+    with pytest.raises(TypeError, match="database_health"):
+        create_app()  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
+
+
+def test_tests_may_still_override_the_dependency_on_a_made_app() -> None:
+    app = _app(lambda: DatabaseHealth(None))
+    app.dependency_overrides[current_database_health] = lambda: DatabaseHealth("timed out")
+    with TestClient(app) as client:
+        assert client.get("/health").status_code == 503

@@ -1,14 +1,20 @@
 """The HTTP api a Deployment's web app and Operators talk to."""
 
+from collections.abc import Callable
 from importlib.metadata import version
 from typing import Annotated, Literal
 
-from fastapi import APIRouter, Depends, FastAPI, Response, status
+from fastapi import APIRouter, Depends, FastAPI, Request, Response, status
 from pydantic import BaseModel
-from visionquery.memory.connection import ConnectionProblem
-from visionquery.memory.health import DatabaseHealth
+from visionquery.api.probe import ConnectionProblem, DatabaseHealth
 
-__all__ = ["DatabaseStatus", "Health", "create_app", "database_health", "operator_router"]
+__all__ = [
+    "DatabaseStatus",
+    "Health",
+    "create_app",
+    "current_database_health",
+    "operator_router",
+]
 
 
 class DatabaseStatus(BaseModel):
@@ -26,13 +32,10 @@ class Health(BaseModel):
     database: DatabaseStatus
 
 
-def database_health() -> DatabaseHealth:
-    """The dependency that looks at the database; the process provides it.
-
-    Provide it with `app.dependency_overrides[database_health] = ...`, as `visionquery-api` does
-    and as tests do. Later endpoints receive what they need the same way, with `Depends`.
-    """
-    raise RuntimeError("no database check was provided: set app.dependency_overrides")
+def current_database_health(request: Request) -> DatabaseHealth:
+    """The dependency that looks at the database: the check `create_app` was given."""
+    check: Callable[[], DatabaseHealth] = request.app.state.database_health
+    return check()
 
 
 #: Every Operator operation lives under `/api` (ADR 0009: they go through `tools`). `/health`
@@ -40,13 +43,20 @@ def database_health() -> DatabaseHealth:
 operator_router = APIRouter(prefix="/api")
 
 
-def create_app() -> FastAPI:
-    """The api, with no dependency provided yet; see `database_health`."""
+def create_app(*, database_health: Callable[[], DatabaseHealth]) -> FastAPI:
+    """The api over the dependencies it is given, which it keeps on `app.state`.
+
+    Every dependency is an argument, so one that is forgotten is an error here and now, not a
+    500 on one route later. Routes read them through `Depends` on `request.app.state` (see
+    `current_database_health`), so a test may still replace one with `app.dependency_overrides`.
+    Later endpoints (the `tools` they call) are arguments the same way.
+    """
     # No interactive docs: FastAPI's load Swagger UI and ReDoc from a CDN, and a Deployment is
     # closed (ADR 0001). The schema is still served at /openapi.json.
     app = FastAPI(
         title="VisionQuery", version=version("visionquery-api"), docs_url=None, redoc_url=None
     )
+    app.state.database_health = database_health
     app.include_router(operator_router)
 
     @app.get(
@@ -56,7 +66,7 @@ def create_app() -> FastAPI:
         summary="Whether the Deployment is ready to serve: its database can be reached",
     )
     def health(
-        response: Response, database: Annotated[DatabaseHealth, Depends(database_health)]
+        response: Response, database: Annotated[DatabaseHealth, Depends(current_database_health)]
     ) -> Health:
         """Readiness, not liveness: 200 only while the api can do its work.
 

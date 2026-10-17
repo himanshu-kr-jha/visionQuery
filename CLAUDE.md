@@ -168,11 +168,12 @@ Its API types are generated, never written: `visionquery-openapi` writes the api
 It is not part of the Compose stack yet; the api will serve it later.
 
 **The api** (`visionquery-api`) is FastAPI served by uvicorn with `log_config=None`, so its logs are the runtime's JSON lines, and with no access log (it would be mostly the healthcheck's).
-`GET /health` reports readiness, not just that the process runs: 200 when the database can be reached and 503 otherwise, naming the problem only by category (`visionquery.memory.connection.ConnectionProblem`), never with any part of the URL.
+`GET /health` reports readiness, not just that the process runs: 200 when the database can be reached and 503 otherwise, naming the problem only by category (`visionquery.memory.connection.ConnectionProblem`, plus "still checking" while the first check runs), never with any part of the URL.
 The Compose healthcheck asks it, so an api that could answer nothing is not marked healthy.
 It stays at the root, for infrastructure; every Operator operation goes under `/api` (`visionquery.api.app.operator_router`) and calls `tools` (ADR 0009), never the memory.
 The health probe is the one exception: `visionquery.api.probe.DatabaseProbe` asks the memory whether the database can be reached, reuses its answer for a second, and logs one WARNING (the problem category only) when the database turns unreachable and one INFO when it is back.
-The api gets what it needs through FastAPI dependencies (`database_health`, provided in `visionquery.api.serve` and overridden with `app.dependency_overrides` in tests), and later endpoints receive their tools the same way.
+The api gets what it needs as arguments to `create_app` (`database_health` today, the `tools` later), stored on `app.state` and read by routes through `Depends` on `request.app.state`, so a forgotten dependency is an error where the app is made; only `visionquery.api.serve` wires real ones, and tests pass fakes to `create_app` (`app.dependency_overrides` remains available).
+The api imports the memory only in `visionquery.api.probe` and `serve` (import-linter enforces it); the rest takes `DatabaseHealth` and `ConnectionProblem` from the probe module.
 It listens on `127.0.0.1` unless `VISIONQUERY_HTTP_HOST` says otherwise; Compose sets `0.0.0.0` for the container, and `VISIONQUERY_BIND_ADDRESS` decides who can reach the published port.
 FastAPI's interactive docs are off, because they load their scripts from a CDN; the schema is served at `/openapi.json`.
 

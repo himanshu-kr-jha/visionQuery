@@ -5,8 +5,7 @@ import threading
 import time
 from collections.abc import Callable
 
-from visionquery.memory.connection import ConnectionProblem
-from visionquery.memory.health import DatabaseHealth
+from visionquery.memory.health import ConnectionProblem, DatabaseHealth
 
 # The probe is the api's one window onto the memory (with `serve`, which wires it), so the rest
 # of the api takes these types from here and imports nothing from the memory itself.

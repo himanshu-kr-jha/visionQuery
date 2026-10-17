@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 import pytest
 from fastapi.testclient import TestClient
-from visionquery.api.app import create_app, database_health
+from visionquery.api.app import create_app
 from visionquery.api.probe import CACHE_SECONDS, CHECKING, STUCK_SECONDS, DatabaseProbe
 from visionquery.memory.health import DatabaseHealth
 
@@ -41,8 +41,7 @@ def _probe(check: Callable[[], DatabaseHealth], clock: _Clock) -> DatabaseProbe:
 
 def test_a_flood_of_requests_checks_the_database_once_a_second() -> None:
     check, clock = _Check(UP), _Clock()
-    app = create_app()
-    app.dependency_overrides[database_health] = _probe(check, clock)
+    app = create_app(database_health=_probe(check, clock))
     with TestClient(app) as client:
         assert [client.get("/health").status_code for _ in range(50)] == [200] * 50
         assert check.calls == 1

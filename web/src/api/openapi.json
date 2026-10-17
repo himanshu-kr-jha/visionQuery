@@ -47,7 +47,8 @@
           "host name could not be resolved",
           "timed out",
           "connection refused or host unreachable",
-          "other connection failure"
+          "other connection failure",
+          "still checking"
         ]
       },
       "DatabaseStatus": {
