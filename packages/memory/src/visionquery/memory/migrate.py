@@ -294,7 +294,8 @@ def _seal(connection: psycopg.Connection) -> None:
         )
 
 
-#: The record's columns and types, as `format_type` names them.
+#: The record's columns and types, as `format_type` names them. A migration that changes the
+#: record's own columns must change this list with it, or every database would look foreign.
 _RECORD_COLUMNS = [
     ("number", "integer"),
     ("name", "text"),

@@ -7,12 +7,13 @@ The guarantee that libpq's text never reaches a log line is the connection layer
 """
 
 import ipaddress
+import os
 import re
 from urllib.parse import urlsplit
 
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
-from pydantic import BaseModel, SecretStr, field_validator
+from pydantic import BaseModel, SecretStr, field_validator, model_validator
 
 __all__ = ["DatabaseSettings"]
 
@@ -107,6 +108,15 @@ class DatabaseSettings(BaseModel):
         if problem:
             raise ValueError(problem)
         return url
+
+    @model_validator(mode="after")
+    def _pgconnect_timeout_is_an_integer(self) -> DatabaseSettings:
+        # libpq's own variable, which connecting reads when the URL sets no timeout; an empty
+        # one is unset and 0 waits forever, as in libpq. libpq would quote a bad one back.
+        value = os.environ.get("PGCONNECT_TIMEOUT", "")
+        if value and not _DIGITS.fullmatch(value):
+            raise ValueError("PGCONNECT_TIMEOUT must be a non-negative whole number of seconds")
+        return self
 
 
 def _invalid_option(options: dict[str, str]) -> str | None:

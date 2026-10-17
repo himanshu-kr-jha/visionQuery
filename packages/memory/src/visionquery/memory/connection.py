@@ -99,7 +99,8 @@ def connect(
     """An autocommit connection, or `ConnectionFailedError` without a word of libpq's text.
 
     Connecting gives up after the URL's `connect_timeout`, else libpq's `PGCONNECT_TIMEOUT`
-    from the environment, else `connect_timeout` seconds.
+    from the environment (empty means unset, and 0 waits forever, as in libpq), else
+    `connect_timeout` seconds.
 
     With `statement_timeout_ms` the connection is also bounded once made: the server cancels a
     statement that runs longer (unless the URL sets its own `options`), and the kernel drops a
@@ -110,7 +111,7 @@ def connect(
         parameters = conninfo_to_dict(url)
         # A setting in the URL wins, then libpq's environment variable; `None` leaves the
         # keyword out, so libpq (and psycopg, which enforces the timeout) reads them.
-        ours = "connect_timeout" not in parameters and "PGCONNECT_TIMEOUT" not in os.environ
+        ours = "connect_timeout" not in parameters and not os.environ.get("PGCONNECT_TIMEOUT")
         extra: dict[str, str | int | None] = {"connect_timeout": connect_timeout if ours else None}
         if statement_timeout_ms is not None:
             if "options" not in parameters:

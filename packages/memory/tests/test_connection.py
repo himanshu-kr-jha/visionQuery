@@ -108,3 +108,17 @@ def test_a_connect_timeout_in_the_url_wins_over_pgconnect_timeout(
         with pytest.raises(ConnectionFailedError, match="timed out"):
             connect(f"postgresql://u:p@127.0.0.1:{server.getsockname()[1]}/d?connect_timeout=2", 60)
     assert time.monotonic() - started < 10
+
+
+def test_an_empty_pgconnect_timeout_is_unset_so_the_default_applies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # libpq ignores an empty variable, so leaving the keyword out would wait forever.
+    monkeypatch.setenv("PGCONNECT_TIMEOUT", "")
+    with socket.socket() as server:
+        server.bind(("127.0.0.1", 0))
+        server.listen(8)
+        started = time.monotonic()
+        with pytest.raises(ConnectionFailedError, match="timed out"):
+            connect(f"postgresql://u:p@127.0.0.1:{server.getsockname()[1]}/d", 2)
+    assert time.monotonic() - started < 10

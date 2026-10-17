@@ -189,6 +189,18 @@ def test_status_refuses_a_database_that_is_not_a_memory(database: str) -> None:
     (refused,) = [line for line in lines if line["level"] == "CRITICAL"]
     assert refused["error"] == "ForeignDatabaseError"
     assert "public.invoices" in refused["message"]
+    # It reports what a run would do; nothing was applied by this command either way.
+    assert "a run would be refused" in refused["message"]
+
+
+def test_a_pgconnect_timeout_that_is_not_a_number_is_a_settings_error_naming_it(
+    database: str,
+) -> None:
+    status, lines, stderr = _run({"PGCONNECT_TIMEOUT": "soon"}, database__url=database)
+    assert (status, stderr) == (2, "")
+    (line,) = lines
+    assert "PGCONNECT_TIMEOUT" in line["message"]
+    assert "soon" not in line["message"]
 
 
 def test_status_of_an_unreachable_database_fails_without_its_password() -> None:

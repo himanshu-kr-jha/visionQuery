@@ -9,6 +9,7 @@ packages/conftest.py), in a database of its own, with a role made for the test.
 import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Literal
 
 import psycopg
 import pytest
@@ -123,7 +124,7 @@ def test_a_grant_passed_on_with_grant_option_is_taken_back_down_the_chain(
 
 @pytest.mark.parametrize("privilege", ["UPDATE", "INSERT"])
 def test_a_column_level_grant_is_taken_back(
-    database: str, migrations: Path, privilege: str
+    database: str, migrations: Path, privilege: Literal["UPDATE", "INSERT"]
 ) -> None:
     role = f"column_{uuid.uuid4().hex[:8]}"
     _role(database, role)
