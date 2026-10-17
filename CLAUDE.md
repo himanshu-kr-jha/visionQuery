@@ -293,7 +293,10 @@ A process that uses the memory also declares `database: DatabaseSettings` (from 
 
 Import contracts (enforced with import-linter from `.importlinter`, each proven by `tests/test_import_contracts.py`):
 
-- `perception` and `recorder` never import `reasoner` or `api`.
+- The packages are layered `api | reasoner > tools > linker > memory > runtime`: a package may import any layer below its own and never one above it, and `api` and `reasoner` never import each other.
+  Every chain counts, not only a direct import, so `tools -> api`, `linker -> tools` or `memory -> linker` through any number of modules is a violation.
+  The layers are exhaustive: a new package is placed in a layer or beside them.
+- `perception` and `recorder` sit beside the layers: they import only `memory` and `runtime`, never each other, and nothing imports them.
 - Only `memory` imports the database driver.
 - `reasoner` reaches the memory only through `tools`.
 - `api` reaches the memory and the `linker` only through `tools` (ADR 0009), except for the health probe and settings it names (`ignore_imports` in `.importlinter`).

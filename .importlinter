@@ -11,19 +11,68 @@
 root_package = visionquery
 include_external_packages = True
 
-; Perception and recording run on every frame of every camera. Nothing they do may
-; depend on asking questions or serving them, so a slow or broken Reasoner or api can
-; never stall what is being remembered.
+; The layering, highest first: a package may import any layer below its own, never one
+; above it, so no cycle can form and the Reasoner has no route to the api. api and reasoner
+; share the top layer and are independent of each other (`|`). Every chain counts, not
+; only a direct import: the forbidden contracts below tolerate indirect imports, which
+; alone would let tools -> api or linker -> tools through. Exhaustive: a new package must
+; be placed in a layer here, or beside the layers with perception and the recorder.
+
+[importlinter:contract:layers]
+name = Each package imports only the layers below its own
+type = layers
+containers =
+    visionquery
+layers =
+    api | reasoner
+    tools
+    linker
+    memory
+    runtime
+exhaustive = True
+exhaustive_ignores =
+    perception
+    recorder
+
+; Perception and recording run on every frame of every camera, beside the layers. They
+; write to the memory and start with the runtime, and depend on nothing else, so a slow
+; or broken tool, Reasoner or api can never stall what is being remembered.
 
 [importlinter:contract:no-reaching-up]
-name = Perception and the recorder never import the reasoner or the api
+name = Perception and the recorder import only the memory and the runtime
 type = forbidden
 source_modules =
     visionquery.perception
     visionquery.recorder
 forbidden_modules =
+    visionquery.tools
+    visionquery.linker
     visionquery.reasoner
     visionquery.api
+
+; Nothing depends on a Perception Worker or the recorder: what they produce is read from
+; the memory.
+
+[importlinter:contract:nothing-imports-perception-or-the-recorder]
+name = Nothing imports perception or the recorder
+type = forbidden
+source_modules =
+    visionquery.runtime
+    visionquery.memory
+    visionquery.linker
+    visionquery.tools
+    visionquery.reasoner
+    visionquery.api
+forbidden_modules =
+    visionquery.perception
+    visionquery.recorder
+
+[importlinter:contract:perception-and-recorder-independent]
+name = Perception and the recorder import neither other
+type = independence
+modules =
+    visionquery.perception
+    visionquery.recorder
 
 ; ADR 0006 - one Postgres, and memory is the only code that talks to it. The common
 ; Postgres drivers and adapters are listed (a driver not listed here needs adding), so
