@@ -11,7 +11,6 @@ from urllib.parse import quote, urlsplit
 
 import psycopg
 import pytest
-from visionquery.memory import health as health_module
 from visionquery.memory.connection import connect
 from visionquery.memory.health import DatabaseHealth, check_database
 
@@ -62,7 +61,7 @@ def test_a_query_that_never_finishes_is_cancelled_and_reported_as_timed_out(
 ) -> None:
     # `SELECT 1` has no client-side limit, so the server is asked to give up on a slow query.
     # A server that answers the handshake and then hangs is stood in for by a slow statement.
-    real_connect = health_module.connect
+    real_connect = connect
 
     def slow(url: str, timeout: int, **kwargs: Any) -> psycopg.Connection:
         connection = real_connect(url, timeout, **kwargs)
@@ -74,7 +73,7 @@ def test_a_query_that_never_finishes_is_cancelled_and_reported_as_timed_out(
         monkeypatch.setattr(connection, "execute", sleeping, raising=False)
         return connection
 
-    monkeypatch.setattr(health_module, "connect", slow)
+    monkeypatch.setattr("visionquery.memory.health.connect", slow)
     started = time.monotonic()
     health = check_database(postgres, timeout=1)
     assert health.problem == "timed out"

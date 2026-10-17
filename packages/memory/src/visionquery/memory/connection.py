@@ -8,7 +8,7 @@ SQLSTATE or the symptom and never quoted, plus the name of the error's class.
 from typing import Literal
 
 import psycopg
-from psycopg.conninfo import conninfo_to_dict
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 __all__ = ["ConnectionFailedError", "ConnectionProblem", "categorize", "connect"]
 
@@ -109,6 +109,6 @@ def connect(
                 "keepalives_count": 3,
             }
             extra |= {k: v for k, v in bounds.items() if k not in parameters}
-        return psycopg.connect(url, autocommit=True, **extra)
+        return psycopg.connect(make_conninfo(url, **extra), autocommit=True)
     except Exception as error:
         raise ConnectionFailedError(categorize(error), type(error).__name__) from None

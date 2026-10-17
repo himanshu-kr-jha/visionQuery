@@ -10,7 +10,9 @@ from visionquery.memory.connection import (
     connect,
 )
 
-__all__ = ["HEALTH_TIMEOUT", "DatabaseHealth", "check_database"]
+# `ConnectionProblem` is re-exported: it is what a DatabaseHealth holds, so those who read one
+# can name its type without importing the connection module.
+__all__ = ["HEALTH_TIMEOUT", "ConnectionProblem", "DatabaseHealth", "check_database"]
 
 #: Seconds a check waits for a connection, unless the URL sets `connect_timeout`; well inside
 #: the few seconds a container's healthcheck allows.
