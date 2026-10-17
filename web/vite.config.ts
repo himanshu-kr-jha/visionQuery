@@ -7,7 +7,8 @@ const api = `http://127.0.0.1:${process.env["VISIONQUERY_API_PORT"] ?? "8080"}`;
 export default defineConfig({
   plugins: [react()],
   server: {
-    proxy: { "/health": api },
+    // `/health` is readiness, for infrastructure; every Operator operation is under `/api`.
+    proxy: { "/health": api, "/api": api },
   },
   test: {
     environment: "jsdom",

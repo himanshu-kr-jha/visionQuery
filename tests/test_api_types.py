@@ -110,3 +110,19 @@ def test_the_check_fails_when_the_types_are_missing(tmp_path: Path) -> None:
     result = _check(schema, types)
     assert result.returncode != 0
     assert "make api-types" in result.stderr
+
+
+def test_only_the_generated_types_are_marked_generated_for_the_language_statistics() -> None:
+    # openapi.json is the api's schema, which people review; schema.d.ts is the generated one.
+    def attribute(path: Path) -> str:
+        done = subprocess.run(
+            ["git", "check-attr", "linguist-generated", "--", str(path.relative_to(ROOT))],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return done.stdout.rsplit(": ", 1)[1].strip()
+
+    assert attribute(TYPES) == "set"
+    assert attribute(SCHEMA) == "unspecified"

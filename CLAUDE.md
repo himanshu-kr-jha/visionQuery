@@ -140,10 +140,10 @@ Run everything from the repository root.
 | A single test | `uv run pytest tests/test_import_contracts.py::test_the_workspace_keeps_every_contract` |
 | Every check CI runs, the web app's and the API types' included | `make check` |
 | Apply the database migrations | `VISIONQUERY_DATABASE__URL=postgresql://... uv run visionquery-migrate` |
-| Run the api outside Compose (on port 8080; `VISIONQUERY_HTTP_PORT` moves it) | `VISIONQUERY_DATABASE__URL=postgresql://... uv run visionquery-api` |
+| Run the api outside Compose (on 127.0.0.1:8080; `VISIONQUERY_HTTP_HOST` and `VISIONQUERY_HTTP_PORT` move it) | `VISIONQUERY_DATABASE__URL=postgresql://... uv run visionquery-api` |
 | Web app: lint, type check, tests | `make web` (`make web-lint`, `make web-typecheck`, `make web-test`) |
 | One web test file | `npm --prefix web test -- src/DeploymentHealth.test.tsx` |
-| Web app dev server, forwarding `/health` to the api on `VISIONQUERY_API_PORT` (8080) | `npm --prefix web run dev` |
+| Web app dev server, forwarding `/health` and `/api` to the api on `VISIONQUERY_API_PORT` (8080) | `npm --prefix web run dev` |
 | Regenerate the web app's API types after changing the api, then commit both files | `make api-types` |
 | Check the API types are current (fails, changing nothing, when not) | `make api-types-check` |
 | Start the stack (Postgres, migrations, MediaMTX, the api); rebuilds what changed first, and fails if the migrations fail | `make up` |
@@ -168,7 +168,12 @@ Its API types are generated, never written: `visionquery-openapi` writes the api
 It is not part of the Compose stack yet; the api will serve it later.
 
 **The api** (`visionquery-api`) is FastAPI served by uvicorn with `log_config=None`, so its logs are the runtime's JSON lines, and with no access log (it would be mostly the healthcheck's).
-`GET /health` answers 200 when the database can be reached and 503 otherwise, naming the problem only by category (`visionquery.memory.connection.ConnectionProblem`), never with any part of the URL; the Compose healthcheck asks it.
+`GET /health` reports readiness, not just that the process runs: 200 when the database can be reached and 503 otherwise, naming the problem only by category (`visionquery.memory.connection.ConnectionProblem`), never with any part of the URL.
+The Compose healthcheck asks it, so an api that could answer nothing is not marked healthy.
+It stays at the root, for infrastructure; every Operator operation goes under `/api` (`visionquery.api.app.operator_router`) and calls `tools` (ADR 0009), never the memory.
+The health probe is the one exception: `visionquery.api.probe.DatabaseProbe` asks the memory whether the database can be reached, reuses its answer for a second, and logs one WARNING (the problem category only) when the database turns unreachable and one INFO when it is back.
+The api gets what it needs through FastAPI dependencies (`database_health`, provided in `visionquery.api.serve` and overridden with `app.dependency_overrides` in tests), and later endpoints receive their tools the same way.
+It listens on `127.0.0.1` unless `VISIONQUERY_HTTP_HOST` says otherwise; Compose sets `0.0.0.0` for the container, and `VISIONQUERY_BIND_ADDRESS` decides who can reach the published port.
 FastAPI's interactive docs are off, because they load their scripts from a CDN; the schema is served at `/openapi.json`.
 
 **The stack** is `compose.yaml` (Compose project `visionquery`), configured only through `.env`: copy `.env.example`, which documents every variable, and set the three passwords it leaves empty, or Compose refuses to start.
@@ -249,6 +254,7 @@ Import contracts (enforced with import-linter from `.importlinter`, each proven 
 - `perception` and `recorder` never import `reasoner` or `api`.
 - Only `memory` imports the database driver.
 - `reasoner` reaches the memory only through `tools`.
+- `api` reaches the memory and the `linker` only through `tools` (ADR 0009), except for the health probe and settings it names (`ignore_imports` in `.importlinter`).
 - `runtime` imports none of the other packages (every package may import it), and no database driver.
 
 ## Rules that are easy to break by accident

@@ -87,3 +87,8 @@ def test_make_sync_installs_the_web_app_from_its_lockfile() -> None:
         check=True,
     ).stdout.splitlines()
     assert "npm --prefix web ci" in dry
+
+
+def test_the_dev_server_forwards_health_and_every_operator_operation_to_the_api() -> None:
+    config = (WEB / "vite.config.ts").read_text()
+    assert re.search(r'proxy:\s*\{\s*"/health":\s*api,\s*"/api":\s*api\s*\}', config)

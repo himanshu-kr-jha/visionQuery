@@ -117,6 +117,10 @@ services:
     command: ["visionquery-api"]
     environment:
       VISIONQUERY_LOG_LEVEL: ${VISIONQUERY_LOG_LEVEL:-INFO}
+      # The api listens on loopback unless told otherwise; in a container that would be
+      # unreachable from outside it. Who can reach the published port is decided below
+      # (VISIONQUERY_BIND_ADDRESS), not here.
+      VISIONQUERY_HTTP_HOST: 0.0.0.0
       # As for migrate: the password is in PGPASSWORD, never in the URL.
       VISIONQUERY_DATABASE__URL: postgresql://visionquery@postgres:5432/visionquery
       PGPASSWORD: ${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}
@@ -126,8 +130,9 @@ services:
     ports:
       - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_API_PORT:-8080}:8080"
     healthcheck:
-      # The image has no curl or wget, so its own Python asks; urlopen fails on the 503 the api
-      # answers while it cannot reach the database, so the api is healthy only when it can serve.
+      # /health reports readiness, not just that the process runs: it answers 503 while the api
+      # cannot reach the database, so an api that could answer nothing is not marked healthy.
+      # The image has no curl or wget, so its own Python asks; urlopen fails on that 503.
       test:
         - CMD
         - python

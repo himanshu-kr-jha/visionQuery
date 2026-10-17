@@ -383,6 +383,15 @@ def test_the_api_serves_on_its_own_port_and_is_healthy_only_when_health_says_so(
     assert "http://127.0.0.1:8080/health" in test
 
 
+def test_the_api_listens_on_every_interface_of_its_container() -> None:
+    # Its default is loopback, which a published port cannot reach from outside the container;
+    # who can reach the published port is VISIONQUERY_BIND_ADDRESS's business.
+    api = _services(_config())["api"]
+    assert api["environment"]["VISIONQUERY_HTTP_HOST"] == "0.0.0.0"
+    [port] = api["ports"]
+    assert port["host_ip"] == "127.0.0.1"
+
+
 def _published(config: Mapping[str, Any]) -> list[tuple[str, str, str, str]]:
     return [
         (name, port.get("host_ip", ""), str(port["published"]), port.get("protocol", "tcp"))
