@@ -6,8 +6,9 @@
 The required checks are the jobs of .github/workflows/ci.yml, so a job added there is required
 as soon as this is applied again. GitHub can only require a check it has seen, and a required
 check that never reports blocks every merge, so `--apply` refuses, changing nothing, unless
-each check has passed on develop's latest commit. It replaces each ruleset whole, through the
-`gh` CLI of whoever runs it, which needs admin rights on the repository.
+each check has passed on develop's latest commit. It replaces each ruleset, through the `gh`
+CLI of whoever runs it (which needs admin rights on the repository), keeping the pull_request
+parameters it does not set itself, such as `require_extra_approval_for_unattributed_changes`.
 """
 
 import argparse
@@ -91,6 +92,17 @@ def _not_passed_on_develop(checks: list[str]) -> list[str]:
     return [check for check in checks if check not in passed]
 
 
+def _keeping_live_parameters(payload: dict[str, Any], live: dict[str, Any]) -> dict[str, Any]:
+    """The payload, with the live pull_request parameters it does not set kept as they are."""
+    kept: dict[str, Any] = next(
+        (r.get("parameters", {}) for r in live["rules"] if r["type"] == "pull_request"), {}
+    )
+    for rule in payload["rules"]:
+        if rule["type"] == "pull_request":
+            rule["parameters"] = kept | rule["parameters"]
+    return payload
+
+
 def apply() -> int:
     checks = required_checks()
     if missing := _not_passed_on_develop(checks):
@@ -102,8 +114,16 @@ def apply() -> int:
         )
         return 1
     existing = {r["name"]: r["id"] for r in _gh(f"{REPOSITORY}/rulesets")}
+    if absent := [name for name in RULESETS if name not in existing]:
+        print(
+            f"Not applied: no ruleset named {', '.join(absent)} exists in the repository. "
+            "Create it (Settings, Rules, Rulesets) and apply again.",
+            file=sys.stderr,
+        )
+        return 1
     for payload in rulesets():
         identifier = existing[payload["name"]]
+        payload = _keeping_live_parameters(payload, _gh(f"{REPOSITORY}/rulesets/{identifier}"))
         _gh(
             "--method", "PUT", f"{REPOSITORY}/rulesets/{identifier}", "--input", "-",
             stdin=json.dumps(payload),

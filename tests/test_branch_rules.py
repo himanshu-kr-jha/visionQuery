@@ -98,12 +98,29 @@ path = next(a for a in arguments if a.startswith("repos/"))
 if path.endswith("/rulesets"):
     rulesets = json.loads(os.environ["FAKE_RULESETS"])
     print(json.dumps([{"id": i, "name": n} for n, i in rulesets.items()]))
+elif "/rulesets/" in path and "PUT" not in arguments:
+    # The live ruleset: a pull_request rule carrying a parameter the script does not set.
+    print(os.environ["FAKE_LIVE"].replace("__ID__", path.rsplit("/", 1)[1]))
 elif "/check-runs" in path:
     print(os.environ["FAKE_CHECK_RUNS"])
 """
 
 
-def _fake_gh(tmp_path: Path, check_runs: list[dict[str, str]]) -> tuple[dict[str, str], Path]:
+#: A parameter GitHub has that the script does not manage, as the live rulesets have it.
+EXTRA = "require_extra_approval_for_unattributed_changes"
+LIVE = {
+    "id": "__ID__",
+    "rules": [
+        {"type": "pull_request", "parameters": {EXTRA: True, "required_approving_review_count": 3}}
+    ],
+}
+
+
+def _fake_gh(
+    tmp_path: Path,
+    check_runs: list[dict[str, str]],
+    rulesets: dict[str, int] = RULESETS,
+) -> tuple[dict[str, str], Path]:
     bin_directory = tmp_path / "bin"
     bin_directory.mkdir(parents=True)
     gh = bin_directory / "gh"
@@ -114,7 +131,8 @@ def _fake_gh(tmp_path: Path, check_runs: list[dict[str, str]]) -> tuple[dict[str
     environment = os.environ | {
         "PATH": f"{bin_directory}{os.pathsep}{os.environ['PATH']}",
         "FAKE_GH_LOG": str(log),
-        "FAKE_RULESETS": json.dumps(RULESETS),
+        "FAKE_RULESETS": json.dumps(rulesets),
+        "FAKE_LIVE": json.dumps(LIVE),
         "FAKE_CHECK_RUNS": json.dumps({"total_count": len(check_runs), "check_runs": check_runs}),
     }
     return environment, log
@@ -139,8 +157,25 @@ def test_applying_replaces_both_rulesets_once_every_check_has_passed_on_develop(
         name = next(
             n for n, i in RULESETS.items() if path == f"repos/{{owner}}/{{repo}}/rulesets/{i}"
         )
-        assert json.loads(put["stdin"]) == payloads[name]
+        sent = json.loads(put["stdin"])
+        # Ours, plus what the live ruleset has that the script does not manage.
+        expected = json.loads(json.dumps(payloads[name]))
+        _rules(expected)["pull_request"][EXTRA] = True
+        assert sent == expected
+        assert _rules(sent)["pull_request"]["required_approving_review_count"] == 0
         assert put["arguments"][put["arguments"].index("--input") + 1] == "-"
+
+
+def test_applying_without_a_ruleset_says_which_one_is_missing_and_changes_nothing(
+    tmp_path: Path,
+) -> None:
+    passed = [{"name": c, "conclusion": "success"} for c in sorted(_checks())]
+    environment, log = _fake_gh(tmp_path, passed, {"protect-develop": RULESETS["protect-develop"]})
+    result = _run("--apply", env=environment)
+    assert result.returncode == 1
+    assert "protect-main" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert not [c for c in _calls(log) if "PUT" in c["arguments"]]
 
 
 @pytest.mark.parametrize("missing", ["stack", "commits"])

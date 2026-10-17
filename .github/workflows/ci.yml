@@ -14,6 +14,9 @@ name: CI
 on:
   pull_request:
     branches: [develop, main]
+    # `edited` is a title, body or base change: fixing attribution in a PR's text re-runs the
+    # commits job (and, being cheap to accept, the rest).
+    types: [opened, edited, synchronize, reopened]
   push:
     branches: [develop, main]
   workflow_dispatch:
@@ -22,9 +25,10 @@ permissions:
   contents: read
 
 # A newer push to a PR makes the run for the older one pointless; runs on develop and main
-# always finish, so every commit there has a result.
+# always finish, so every commit there has a result. An edit of the title or body runs in a group
+# of its own, so that it never cancels a full run for the same head, nor is cancelled by one.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}${{ github.event.action == 'edited' && '-edited' || '' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:

@@ -54,6 +54,9 @@ def test_it_runs_on_prs_and_pushes_to_develop_and_main_and_by_hand() -> None:
     # PyYAML reads the bare key `on` as True.
     triggers = _workflow()[True]
     assert triggers["pull_request"]["branches"] == ["develop", "main"]
+    # `edited` re-runs the commits job when a title or body is fixed (or the base changed);
+    # the default types would leave a red check red after the edit that fixes it.
+    assert triggers["pull_request"]["types"] == ["opened", "edited", "synchronize", "reopened"]
     assert triggers["push"]["branches"] == ["develop", "main"]
     assert "workflow_dispatch" in triggers
 
@@ -167,6 +170,16 @@ def test_a_newer_push_to_a_pr_cancels_the_run_it_supersedes() -> None:
     concurrency = _workflow()["concurrency"]
     assert "github.event.pull_request.number" in concurrency["group"]
     assert concurrency["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+
+
+def test_editing_a_pr_neither_cancels_nor_is_cancelled_by_the_run_of_a_push() -> None:
+    # An `edited` run has a group of its own: editing the title mid-run must not cancel a
+    # full run for the same head (which would leave its checks cancelled), and a push cancels
+    # the full run, not the edit's.
+    group = _workflow()["concurrency"]["group"]
+    assert "github.event.action == 'edited'" in group
+    edited = group.index("github.event.action == 'edited'")
+    assert "-edited" in group[edited:]
 
 
 def test_make_lint_lints_the_workflows_too() -> None:
