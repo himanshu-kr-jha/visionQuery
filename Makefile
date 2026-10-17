@@ -5,7 +5,7 @@
 SHELL := bash
 .SHELLFLAGS := -euo pipefail -c
 
-.PHONY: sync lint format typecheck contracts test test-stack check up down fetch-samples
+.PHONY: sync lint format typecheck contracts test test-stack check branch-rules up down fetch-samples
 .PHONY: web web-lint web-typecheck web-test api-types api-types-check
 
 # The web app (web/) needs Node 24 (web/.nvmrc) and installs from its lockfile.
@@ -67,6 +67,12 @@ api-types-check:
 		echo "$(API_TYPES) is out of date with $(API_SCHEMA): run \`make api-types\` and commit the result" >&2; exit 1; }
 
 check: lint typecheck contracts test web api-types-check
+
+# Makes the develop and main rulesets require a PR and every job of .github/workflows/ci.yml,
+# through the gh CLI of a repository admin. It refuses until each job has passed on develop;
+# `uv run python scripts/branch_rules.py` prints what it would send.
+branch-rules:
+	uv run python scripts/branch_rules.py --apply
 
 # Starts the stack, and fails when the migrations did not succeed. `docker compose up --wait`
 # returns while `migrate` is still running, so a failed migration would go unnoticed, and on
