@@ -12,7 +12,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 import psycopg
 import pytest
@@ -39,6 +39,12 @@ def _run(
     return done.returncode, [json.loads(line) for line in done.stdout.splitlines()], done.stderr
 
 
+def _host(parts: SplitResult) -> str:
+    """The URL's host as a netloc needs it: an IPv6 address keeps its brackets."""
+    host = parts.hostname or ""
+    return f"[{host}]" if ":" in host else host
+
+
 def _messages(lines: list[dict[str, Any]]) -> list[str]:
     return [line["message"] for line in lines]
 
@@ -62,7 +68,7 @@ def test_the_password_may_come_from_pgpassword_instead_of_the_url(database: str)
     # How the Compose stack runs it: the URL names no password, so any password works.
     parts = urlsplit(database)
     assert parts.password is not None
-    bare = parts._replace(netloc=f"{parts.username}@{parts.hostname}:{parts.port}").geturl()
+    bare = parts._replace(netloc=f"{parts.username}@{_host(parts)}:{parts.port}").geturl()
     status, lines, stderr = _run(extra={"PGPASSWORD": parts.password}, database__url=bare)
     assert (status, stderr) == (0, "")
     assert any(m.startswith("migrated") for m in _messages(lines))
@@ -71,7 +77,7 @@ def test_the_password_may_come_from_pgpassword_instead_of_the_url(database: str)
 
 def test_a_wrong_pgpassword_fails_without_showing_it(database: str) -> None:
     parts = urlsplit(database)
-    bare = parts._replace(netloc=f"{parts.username}@{parts.hostname}:{parts.port}").geturl()
+    bare = parts._replace(netloc=f"{parts.username}@{_host(parts)}:{parts.port}").geturl()
     status, lines, stderr = _run(extra={"PGPASSWORD": "wrongPW9"}, database__url=bare)
     assert status == 1
     (failed,) = [line for line in lines if line["level"] == "CRITICAL"]
@@ -109,6 +115,16 @@ def test_a_database_that_is_not_a_memory_is_refused_and_left_alone(database: str
         # Not even the first migration's extensions were created.
         extensions = connection.execute("SELECT extname FROM pg_extension").fetchall()
     assert extensions == [("plpgsql",)]
+
+
+def test_a_url_with_several_hosts_migrates_through_the_one_that_answers(database: str) -> None:
+    # libpq's per-host port form: the first host refuses, the second is the database.
+    parts = urlsplit(database)
+    hosts = f"127.0.0.1:1,{_host(parts)}:{parts.port}"
+    url = parts._replace(netloc=f"{parts.username}:{parts.password}@{hosts}").geturl()
+    status, lines, stderr = _run(database__url=url)
+    assert (status, stderr) == (0, "")
+    assert "applied 0001_extensions.sql" in _messages(lines)
 
 
 # --- `visionquery-migrate status` ----------------------------------------------------------
@@ -200,7 +216,7 @@ def test_a_missing_database_url_is_named() -> None:
 def test_an_unreachable_database_is_reported_without_its_password(database: str) -> None:
     # A port nothing listens on, with a password that must not appear anywhere.
     parts = urlsplit(database)
-    unreachable = parts._replace(netloc=f"vq:hunter2@{parts.hostname}:1").geturl()
+    unreachable = parts._replace(netloc=f"vq:hunter2@{_host(parts)}:1").geturl()
     status, lines, stderr = _run(database__url=unreachable)
     assert status == 1
     (failed,) = [line for line in lines if line["level"] == "CRITICAL"]
@@ -305,7 +321,7 @@ def _failure(url: str) -> str:
 
 def test_a_wrong_password_is_reported_as_an_authentication_failure(database: str) -> None:
     parts = urlsplit(database)
-    wrong = parts._replace(netloc=f"{parts.username}:wrongPW9@{parts.hostname}:{parts.port}")
+    wrong = parts._replace(netloc=f"{parts.username}:wrongPW9@{_host(parts)}:{parts.port}")
     assert _failure(wrong.geturl()) == (
         "could not connect to the database: authentication failed (OperationalError)"
     )
