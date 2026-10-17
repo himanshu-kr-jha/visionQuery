@@ -45,6 +45,8 @@
           "server is not accepting connections",
           "server has too many connections",
           "host name could not be resolved",
+          "TLS required or failed",
+          "server rejected a startup option",
           "timed out",
           "connection refused or host unreachable",
           "other connection failure",

@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import time
 import uuid
+import warnings
 from collections.abc import Iterator
 from urllib.parse import quote, urlsplit
 
@@ -35,6 +36,8 @@ STARTED_LABEL = "visionquery-test-started"
 STALE_AFTER = 3600
 #: Pulling the image the first time is the slow part.
 START_TIMEOUT = 600
+#: Seconds any other docker command may take before the session gives up on it.
+DOCKER_TIMEOUT = 60
 
 
 def _sweep_stale_containers() -> None:
@@ -47,7 +50,7 @@ def _sweep_stale_containers() -> None:
         capture_output=True,
         text=True,
         check=False,
-        timeout=60,
+        timeout=DOCKER_TIMEOUT,
     )  # fmt: skip
     for line in listed.stdout.splitlines():
         identifier, _, started = line.partition(" ")
@@ -56,7 +59,7 @@ def _sweep_stale_containers() -> None:
                 ["docker", "rm", "--force", "--volumes", identifier],
                 capture_output=True,
                 check=False,
-                timeout=60,
+                timeout=DOCKER_TIMEOUT,
             )
 
 
@@ -112,7 +115,7 @@ def postgres() -> Iterator[str]:
             timeout=START_TIMEOUT,
         )  # fmt: skip
     except subprocess.TimeoutExpired:
-        subprocess.run(["docker", "rm", "--force", "--volumes", name], capture_output=True)
+        _remove(name)
         pytest.fail(
             f"starting {IMAGE} took over {START_TIMEOUT} s (pulling it the first time is slow): "
             f"pull it with `docker pull {IMAGE}`, or set {URL_VARIABLE}",
@@ -126,6 +129,7 @@ def postgres() -> Iterator[str]:
             check=True,
             capture_output=True,
             text=True,
+            timeout=DOCKER_TIMEOUT,
         ).stdout.splitlines()[0]
         host, port = published.rsplit(":", 1)
         url = f"postgresql://postgres:{quote(PASSWORD)}@{host}:{port}/postgres"
@@ -134,7 +138,24 @@ def postgres() -> Iterator[str]:
         _wait_until_ready(url, timeout=90)
         yield url
     finally:
-        subprocess.run(["docker", "rm", "--force", "--volumes", name], capture_output=True)
+        _remove(name)
+
+
+def _remove(name: str) -> None:
+    """Remove the session's container; one Docker cannot remove in time is left to the sweep."""
+    try:
+        subprocess.run(
+            ["docker", "rm", "--force", "--volumes", name],
+            capture_output=True,
+            check=False,
+            timeout=DOCKER_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        warnings.warn(
+            f"docker did not remove {name} within {DOCKER_TIMEOUT} s; a later session's sweep "
+            "removes it once it is an hour old",
+            stacklevel=1,
+        )
 
 
 @pytest.fixture

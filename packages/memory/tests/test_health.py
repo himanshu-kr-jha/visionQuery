@@ -7,12 +7,18 @@ for an unreachable one.
 import socket
 import time
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import SplitResult, quote, urlsplit
 
 import psycopg
 import pytest
 from visionquery.memory.connection import connect
 from visionquery.memory.health import DatabaseHealth, check_database
+
+
+def _host(parts: SplitResult) -> str:
+    """The URL's host as a netloc needs it: an IPv6 address keeps its brackets."""
+    host = parts.hostname or ""
+    return f"[{host}]" if ":" in host else host
 
 
 def test_a_reachable_database_is_connected(postgres: str) -> None:
@@ -24,7 +30,7 @@ def test_a_reachable_database_is_connected(postgres: str) -> None:
 def test_a_wrong_password_is_an_authentication_failure_and_nothing_else(postgres: str) -> None:
     parts = urlsplit(postgres)
     password = "not-the-password-@:/#"
-    netloc = f"{parts.username}:{quote(password, safe='')}@{parts.hostname}:{parts.port}"
+    netloc = f"{parts.username}:{quote(password, safe='')}@{_host(parts)}:{parts.port}"
     health = check_database(parts._replace(netloc=netloc).geturl())
     assert health == DatabaseHealth(problem="authentication failed")
     assert not health.connected

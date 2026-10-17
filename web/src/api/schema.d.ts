@@ -33,7 +33,7 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /** @enum {string} */
-        ConnectionProblem: "authentication failed" | "database does not exist" | "server is not accepting connections" | "server has too many connections" | "host name could not be resolved" | "timed out" | "connection refused or host unreachable" | "other connection failure" | "still checking";
+        ConnectionProblem: "authentication failed" | "database does not exist" | "server is not accepting connections" | "server has too many connections" | "host name could not be resolved" | "TLS required or failed" | "server rejected a startup option" | "timed out" | "connection refused or host unreachable" | "other connection failure" | "still checking";
         /**
          * DatabaseStatus
          * @description Whether the api can reach the Deployment's database, and if not, why.

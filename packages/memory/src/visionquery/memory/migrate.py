@@ -7,6 +7,8 @@ The schema is a directory of numbered SQL files, `NNNN_lowercase_words.sql`, num
 The row in `schema_migrations` that records a file is written in the same transaction as the
 file's statements, so a migration that fails leaves nothing behind and nothing recorded, while
 the ones before it stay applied. The record keeps the SHA-256 of the file's bytes.
+Only the record's owner, the role that migrates, may write it: every run takes back from any
+other role, and from PUBLIC, every privilege on it but `SELECT`.
 
 **A run refuses when the files and the record disagree, naming each file.**
 Migrations are append-only: an applied file that was edited, renamed, renumbered or removed
@@ -14,6 +16,12 @@ means the database and the files now describe different schemas, so the run appl
 and says which file is wrong. So does a gap or a repeat in the numbering, a file not named
 like a migration, a new file numbered at or before the last one applied, and a pending file
 with a statement that begins, commits or rolls back a transaction (it would escape its own).
+
+**A run writes only to an empty database or to a VisionQuery memory.**
+A database is a memory when its `public.schema_migrations` has the record's columns and at
+least one row. Any other database that holds a table, view or sequence of its own (not one an
+extension brought) belongs to something else, and so does one whose `schema_migrations` is not
+shaped like the record: the run refuses and writes nothing to it, not even the record.
 
 **Runners take turns.**
 The whole run holds a Postgres advisory lock, so two runners started at once against one
@@ -28,9 +36,16 @@ A connection that breaks mid-file leaves its outcome unknown; rerunning is safe.
 The command reads `VISIONQUERY_DATABASE__URL` and exits 0 when the schema is up to date, 1
 when a migration failed or the database could not be connected to (a fixed message by
 category, never libpq's text), 2 when its settings are
-missing or invalid, and 3 when it refused.
+missing or invalid, and 3 when it refused (the files and the record disagree, or the database
+is not a memory).
+
+`visionquery-migrate status` changes nothing: in one read-only transaction, without waiting for
+a run in progress, it logs each applied migration (with when it was applied and its SHA-256),
+each pending one, and what a run would refuse. It exits 0, or as a run would: 1 when the
+database cannot be reached, 2 for bad settings, and 3 when a run would refuse.
 """
 
+import argparse
 import hashlib
 import logging
 import re
@@ -38,10 +53,12 @@ import time
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, LiteralString
 
 import psycopg
+from psycopg import sql
 from psycopg.pq import TransactionStatus
 from pydantic import Field
 from visionquery.memory._sql import transaction_control
@@ -54,12 +71,16 @@ __all__ = [
     "LOCK_KEY",
     "LOCK_TIMEOUT",
     "MIGRATIONS",
+    "AppliedMigration",
     "ConnectionFailedError",
+    "ForeignDatabaseError",
     "MigrationFailedError",
     "MigrationRefusedError",
     "Problem",
+    "SchemaStatus",
     "main",
     "migrate",
+    "status",
 ]
 
 _log = logging.getLogger(__name__)
@@ -99,10 +120,24 @@ class Problem:
 class MigrationRefusedError(Exception):
     """The files and the record disagree, so nothing was applied."""
 
-    def __init__(self, problems: Sequence[Problem]) -> None:
+    def __init__(
+        self, problems: Sequence[Problem], lead: str = "migrations refused, nothing was applied"
+    ) -> None:
         self.problems = tuple(problems)
         details = "\n".join(f"  {problem.message}" for problem in self.problems)
-        super().__init__(f"migrations refused, nothing was applied:\n{details}")
+        super().__init__(f"{lead}:\n{details}")
+
+
+class ForeignDatabaseError(Exception):
+    """The database holds something and is not a VisionQuery memory, so nothing was applied."""
+
+    def __init__(self, reason: str, lead: str = "migrations refused, nothing was applied") -> None:
+        self.reason = reason
+        super().__init__(
+            f"{lead}: the database is not empty and is not a "
+            f"VisionQuery memory ({reason}); point the URL at an empty database or at this "
+            "Deployment's memory"
+        )
 
 
 class MigrationFailedError(Exception):
@@ -123,10 +158,44 @@ class _Migration:
 
 
 @dataclass(frozen=True)
-class _Applied:
+class AppliedMigration:
+    """One row of the record: a migration this database applied, and when."""
+
     number: int
     name: str
     sha256: bytes
+    applied_at: datetime
+
+
+@dataclass(frozen=True)
+class SchemaStatus:
+    """What `status` found: the applied migrations in number order, the pending ones by name,
+    and what a run would refuse (when there is anything, a run applies nothing)."""
+
+    applied: tuple[AppliedMigration, ...]
+    pending: tuple[str, ...]
+    problems: tuple[Problem, ...]
+
+
+def status(
+    url: str, directory: Path = MIGRATIONS, *, connect_timeout: int = CONNECT_TIMEOUT
+) -> SchemaStatus:
+    """What a run would do to the database at `url`, found without changing anything.
+
+    Reads in one read-only transaction and does not wait for a run in progress; what it finds
+    is what that run had committed when it looked. Raises `ForeignDatabaseError` when the
+    database holds something and is not a VisionQuery memory.
+    """
+    files, misnamed = _read(directory)
+    connection = connect(url, connect_timeout)
+    connection.read_only = True
+    connection.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
+    with connection, connection.transaction():
+        if reason := _foreign(connection):
+            raise ForeignDatabaseError(reason, "a run would be refused, and nothing was changed")
+        applied = _applied(connection)
+    pending, problems = _plan(files, misnamed, applied)
+    return SchemaStatus(tuple(applied), tuple(m.name for m in pending), tuple(problems))
 
 
 def migrate(
@@ -139,23 +208,22 @@ def migrate(
     """Apply every pending migration in `directory` to the database at `url`.
 
     Returns the names applied, in order, which is empty when the schema was up to date.
-    Raises `MigrationRefusedError` when the files and the record disagree, and
+    Raises `ForeignDatabaseError` when the database holds something and is not a VisionQuery
+    memory, `MigrationRefusedError` when the files and the record disagree, and
     `MigrationFailedError` when a migration's statements fail. Connecting gives up after
     `connect_timeout` seconds unless the URL sets its own, and a statement of a migration that
     waits `lock_timeout` seconds for a lock fails its file.
     """
-    files, problems = _read(directory)
+    files, misnamed = _read(directory)
     connection = connect(url, connect_timeout)
     with connection, _locked(connection):
         # Read under the lock, so what is pending is what nobody else is applying.
+        if reason := _foreign(connection):
+            raise ForeignDatabaseError(reason)
         connection.execute(_RECORD)
-        applied = _applied(connection)
-        problems = _disagreements(files, applied) + problems + _numbering(files, applied)
+        _seal(connection)
+        pending, problems = _plan(files, misnamed, _applied(connection))
         if problems:
-            raise MigrationRefusedError(problems)
-        recorded = {record.name for record in applied}
-        pending = [migration for migration in files if migration.name not in recorded]
-        if problems := _transaction_control(pending):
             raise MigrationRefusedError(problems)
         for migration in pending:
             _apply(connection, migration, lock_timeout)
@@ -173,9 +241,154 @@ CREATE TABLE IF NOT EXISTS public.schema_migrations (
 """
 
 
-#: What one file may have set on the session (`SET search_path`, `SET ROLE`...) must not reach
-#: the next, which a fresh run would not have seen. Not `DISCARD ALL`: it drops advisory locks.
-_RESET = b"RESET ALL; RESET ROLE; RESET SESSION AUTHORIZATION"
+#: Every privilege on the record, or on any of its columns, held by a role other than its
+#: owner, except `SELECT`; the grantee 0 is PUBLIC. A column's privilege is collected with the
+#: table's, and revoking the table's one takes the column's with it.
+_GRANTS = b"""
+SELECT DISTINCT r.rolname, a.privilege_type
+FROM pg_catalog.pg_class c
+CROSS JOIN LATERAL (
+    SELECT acl FROM (VALUES (c.relacl)) AS t(acl)
+    UNION ALL
+    SELECT attacl FROM pg_catalog.pg_attribute WHERE attrelid = c.oid AND NOT attisdropped
+) AS l(acl)
+CROSS JOIN LATERAL aclexplode(l.acl) a
+LEFT JOIN pg_catalog.pg_roles r ON r.oid = a.grantee
+WHERE c.oid = 'public.schema_migrations'::regclass
+  AND a.grantee <> c.relowner AND a.privilege_type <> 'SELECT'
+ORDER BY 1, 2
+"""
+
+
+#: The table privileges other than `SELECT`, as `aclexplode` names them and as SQL keywords.
+_PRIVILEGES: dict[str, LiteralString] = {
+    "INSERT": "INSERT",
+    "UPDATE": "UPDATE",
+    "DELETE": "DELETE",
+    "TRUNCATE": "TRUNCATE",
+    "REFERENCES": "REFERENCES",
+    "TRIGGER": "TRIGGER",
+    "MAINTAIN": "MAINTAIN",
+}
+
+
+def _seal(connection: psycopg.Connection) -> None:
+    """Take back from every other role what would let it write the record.
+
+    The runner trusts the record to say what was applied, so only its owner, the migrating
+    role, may change it. Grants made by hand or by default privileges (which a Deployment uses
+    to give its services the memory's tables) are revoked on every run; reading stays allowed.
+    A superuser, or a member of the owning role, can still write it: that is the owner.
+    """
+    held: dict[str | None, set[LiteralString]] = {}
+    for grantee, privilege in connection.execute(_GRANTS):
+        # A privilege this runner does not know of is taken back with everything else.
+        held.setdefault(grantee, set()).add(_PRIVILEGES.get(privilege, "ALL"))
+    for grantee, privileges in held.items():
+        keywords: list[LiteralString] = ["ALL"] if "ALL" in privileges else sorted(privileges)
+        connection.execute(
+            sql.SQL("REVOKE {} ON TABLE public.schema_migrations FROM {} CASCADE").format(
+                sql.SQL(", ").join(sql.SQL(keyword) for keyword in keywords),
+                sql.SQL("PUBLIC") if grantee is None else sql.Identifier(grantee),
+            )
+        )
+
+
+#: The record's columns and types, as `format_type` names them. A migration that changes the
+#: record's own columns must change this list with it, or every database would look foreign.
+_RECORD_COLUMNS = [
+    ("number", "integer"),
+    ("name", "text"),
+    ("sha256", "bytea"),
+    ("applied_at", "timestamp with time zone"),
+]
+
+_COLUMNS = b"""
+SELECT a.attname, format_type(a.atttypid, a.atttypmod)
+FROM pg_catalog.pg_attribute a JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+WHERE c.oid = to_regclass('public.schema_migrations') AND c.relkind = 'r'
+  AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+"""
+
+#: What someone made in the database, leaving out the record (when it is ours), what the
+#: catalogs and extensions bring (members of an extension depend on it with type `e`), and every
+#: session's temporary tables: relations, schemas other than `public`, types that are not
+#: implicit (a relation's row type, an array type, a multirange type), and functions,
+#: procedures and aggregates.
+_OBJECTS = b"""
+SELECT name FROM (
+    SELECT format('%%I.%%I', n.nspname, c.relname) AS name
+    FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND c.relpersistence <> 't'
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_toast'
+      AND NOT (%(ours)s AND c.oid = to_regclass('public.schema_migrations'))
+      AND NOT EXISTS (
+          SELECT FROM pg_catalog.pg_depend d
+          WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid
+            AND d.deptype = 'e'
+      )
+  UNION ALL
+    SELECT n.nspname
+    FROM pg_catalog.pg_namespace n
+    WHERE n.nspname <> 'public' AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+      AND NOT EXISTS (
+          SELECT FROM pg_catalog.pg_depend d
+          WHERE d.classid = 'pg_catalog.pg_namespace'::regclass AND d.objid = n.oid
+            AND d.deptype = 'e'
+      )
+  UNION ALL
+    SELECT format('%%I.%%I', n.nspname, t.typname)
+    FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+    WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
+      AND t.typcategory <> 'A' AND t.typtype <> 'm'
+      AND (t.typrelid = 0
+           OR (SELECT relkind FROM pg_catalog.pg_class WHERE oid = t.typrelid) = 'c')
+      AND NOT EXISTS (
+          SELECT FROM pg_catalog.pg_depend d
+          WHERE d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = t.oid
+            AND d.deptype = 'e'
+      )
+  UNION ALL
+    SELECT format('%%I.%%I', n.nspname, p.proname)
+    FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
+      AND NOT EXISTS (
+          SELECT FROM pg_catalog.pg_depend d
+          WHERE d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = p.oid
+            AND d.deptype = 'e'
+      )
+) AS found
+ORDER BY 1
+LIMIT 4
+"""
+
+
+def _foreign(connection: psycopg.Connection) -> str | None:
+    """Why the database is neither empty nor a VisionQuery memory, or None when it is one."""
+    columns = connection.execute(_COLUMNS).fetchall()
+    ours = columns == _RECORD_COLUMNS
+    if columns and not ours:
+        return "it has a schema_migrations table that VisionQuery did not create"
+    if ours:
+        row = connection.execute("SELECT EXISTS (SELECT FROM public.schema_migrations)").fetchone()
+        if row and row[0]:
+            return None
+    objects = [str(name) for (name,) in connection.execute(_OBJECTS, {"ours": ours})]
+    if not objects:
+        return None
+    named = ", ".join(objects[:3]) + (" and more" if len(objects) > 3 else "")
+    return f"it has objects and no record of VisionQuery migrations: {named}"
+
+
+#: What one file may have set or left on the session (`SET search_path`, `SET ROLE`, a temporary
+#: table, a prepared statement, a held cursor, a `LISTEN`, a sequence's `currval`...) must not
+#: reach the next, which a fresh run would not have seen. This is `DISCARD ALL` without the
+#: `pg_advisory_unlock_all()` it includes, because the run's advisory lock must stay held.
+_RESET = (
+    b"RESET ALL; RESET ROLE; RESET SESSION AUTHORIZATION; DISCARD TEMP; DISCARD PLANS; "
+    b"DISCARD SEQUENCES; DEALLOCATE ALL; CLOSE ALL; UNLISTEN *"
+)
 
 
 @contextmanager
@@ -223,14 +436,38 @@ def _read(directory: Path) -> tuple[list[_Migration], list[Problem]]:
     return files, problems
 
 
-def _applied(connection: psycopg.Connection) -> list[_Applied]:
+def _applied(connection: psycopg.Connection) -> list[AppliedMigration]:
+    """The record's rows in number order; none when there is no record yet."""
+    row = connection.execute("SELECT to_regclass('public.schema_migrations')").fetchone()
+    if row is None or row[0] is None:
+        return []
     rows = connection.execute(
-        "SELECT number, name, sha256 FROM public.schema_migrations ORDER BY number"
+        "SELECT number, name, sha256, applied_at FROM public.schema_migrations ORDER BY number"
     ).fetchall()
-    return [_Applied(number, name, bytes(sha256)) for number, name, sha256 in rows]
+    return [
+        AppliedMigration(number, name, bytes(sha256), applied_at)
+        for number, name, sha256, applied_at in rows
+    ]
 
 
-def _disagreements(files: Sequence[_Migration], applied: Sequence[_Applied]) -> list[Problem]:
+def _plan(
+    files: Sequence[_Migration], misnamed: Sequence[Problem], applied: Sequence[AppliedMigration]
+) -> tuple[list[_Migration], list[Problem]]:
+    """The files a run would apply, in order, and every reason it would refuse to."""
+    recorded = {record.name for record in applied}
+    pending = [migration for migration in files if migration.name not in recorded]
+    problems = [
+        *_disagreements(files, applied),
+        *misnamed,
+        *_numbering(files, applied),
+        *_transaction_control(pending),
+    ]
+    return pending, problems
+
+
+def _disagreements(
+    files: Sequence[_Migration], applied: Sequence[AppliedMigration]
+) -> list[Problem]:
     """Each applied migration whose file is no longer exactly what was applied."""
     by_name = {migration.name: migration for migration in files}
     recorded = {record.name for record in applied}
@@ -263,7 +500,7 @@ def _disagreements(files: Sequence[_Migration], applied: Sequence[_Applied]) -> 
     return problems
 
 
-def _numbering(files: Sequence[_Migration], applied: Sequence[_Applied]) -> list[Problem]:
+def _numbering(files: Sequence[_Migration], applied: Sequence[AppliedMigration]) -> list[Problem]:
     """Repeated or missing numbers, and new files numbered among the applied ones."""
     recorded = {record.name for record in applied}
     applied_digests = {record.sha256 for record in applied}
@@ -356,19 +593,42 @@ class MigrateSettings(Settings):
     connect_timeout: Annotated[int, Field(ge=1)] = CONNECT_TIMEOUT
 
 
-def main() -> None:
+def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="visionquery-migrate",
+        description=(
+            "Bring the memory's schema up to date, or with `status` list the applied and "
+            "pending migrations and what a run would refuse, changing nothing. Reads "
+            "VISIONQUERY_DATABASE__URL. Exits 0 when done, 1 when a migration failed or the "
+            "database could not be reached, 2 when the settings are missing or invalid, and 3 "
+            "when a run refuses (or, for `status`, would refuse)."
+        ),
+    )
+    parser.add_argument(
+        "command", nargs="?", choices=["status"], help="only report, change nothing"
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> None:
     """The `visionquery-migrate` command."""
+    only_report = _arguments(argv).command == "status"
     process = start("migrate", MigrateSettings)
     try:
         settings = process.settings
+        url = settings.database.url.get_secret_value()
+        if only_report:
+            _report(status(url, connect_timeout=settings.connect_timeout))
+            return
         applied = migrate(
-            settings.database.url.get_secret_value(),
-            connect_timeout=settings.connect_timeout,
-            lock_timeout=settings.lock_timeout,
+            url, connect_timeout=settings.connect_timeout, lock_timeout=settings.lock_timeout
         )
     except MigrationRefusedError as error:
         files = [problem.file for problem in error.problems]
         _log.critical("%s", error, extra={"error": type(error).__name__, "files": files})
+        raise SystemExit(REFUSED) from None
+    except ForeignDatabaseError as error:
+        _log.critical("%s", error, extra={"error": type(error).__name__})
         raise SystemExit(REFUSED) from None
     except ConnectionFailedError as error:
         _log.critical(
@@ -396,3 +656,32 @@ def main() -> None:
     finally:
         process.close()
     _log.info("migrated: %d applied", len(applied), extra={"applied": list(applied)})
+
+
+def _report(found: SchemaStatus) -> None:
+    """Log what `status` found, one line per migration; raise when a run would refuse."""
+    for record in found.applied:
+        _log.info(
+            "applied %s at %s",
+            record.name,
+            record.applied_at.isoformat(),
+            extra={
+                "migration": record.name,
+                "state": "applied",
+                "applied_at": record.applied_at.isoformat(),
+                "sha256": record.sha256.hex(),
+            },
+        )
+    for name in found.pending:
+        _log.info("pending %s", name, extra={"migration": name, "state": "pending"})
+    _log.info(
+        "status: %d applied, %d pending",
+        len(found.applied),
+        len(found.pending),
+        extra={
+            "applied": [record.name for record in found.applied],
+            "pending": list(found.pending),
+        },
+    )
+    if found.problems:
+        raise MigrationRefusedError(found.problems, "a run would refuse and apply nothing")

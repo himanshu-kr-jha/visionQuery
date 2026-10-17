@@ -144,6 +144,8 @@ Run everything from the repository root.
 | A single test | `uv run pytest tests/test_import_contracts.py::test_the_workspace_keeps_every_contract` |
 | Every check CI runs, the web app's and the API types' included | `make check` |
 | Apply the database migrations | `VISIONQUERY_DATABASE__URL=postgresql://... uv run visionquery-migrate` |
+| List applied and pending migrations, and what a run would refuse, changing nothing | `VISIONQUERY_DATABASE__URL=postgresql://... uv run visionquery-migrate status` |
+| ...against the running stack | `docker compose run --rm migrate visionquery-migrate status` |
 | Run the api outside Compose (on 127.0.0.1:8080; `VISIONQUERY_HTTP_HOST` and `VISIONQUERY_HTTP_PORT` move it) | `VISIONQUERY_DATABASE__URL=postgresql://... uv run visionquery-api` |
 | Web app: lint, type check, tests | `make web` (`make web-lint`, `make web-typecheck`, `make web-test`) |
 | One web test file | `npm --prefix web test -- src/DeploymentHealth.test.tsx` |
@@ -224,8 +226,17 @@ Without either, those tests are skipped with the reason (and fail in CI, which r
 **Migrations** (ADR 0011) are numbered SQL files in `packages/memory/src/visionquery/memory/migrations/`, shipped inside the `visionquery-memory` wheel.
 A schema change is a new file numbered one after the last (`NNNN_lowercase_words.sql`); an applied file is never edited, renamed, renumbered or removed.
 `visionquery-migrate` applies each pending file in its own transaction under an advisory lock and records its SHA-256 in `schema_migrations`.
-It exits 0 when the schema is up to date, 1 when a migration failed (it is rolled back; the ones before it stay) or the database could not be reached, 2 when `VISIONQUERY_DATABASE__URL` is missing or invalid, and 3 when it refused because the files and the database's record disagree, naming each file at fault.
+It exits 0 when the schema is up to date, 1 when a migration failed (it is rolled back; the ones before it stay) or the database could not be reached, 2 when `VISIONQUERY_DATABASE__URL` is missing or invalid, and 3 when it refused because the files and the database's record disagree, naming each file at fault, or because the database is not a VisionQuery memory.
+It writes only to an empty database (extensions allowed) or to a memory, one whose `public.schema_migrations` has the record's columns and at least one row; any other table, view, sequence, schema besides `public`, type (a relation's row type and array types do not count) or function that no extension owns, or a `schema_migrations` of another shape, makes it refuse and write nothing.
+Every run takes back every privilege on `schema_migrations`, table-level or column-level, but `SELECT` from every role other than its owner (and from PUBLIC), `CASCADE`-ing to what those roles passed on, so only the migrating role can change the record.
+The seal cannot reach a superuser, a member of the owning role, or a member of `pg_write_all_data` or `pg_maintain`; they can still write the record.
+It also protects only a record the migrating role owns, so the Deployment's setup (#74) must make that role its owner (`ALTER TABLE public.schema_migrations OWNER TO ...`) before relying on it.
+`visionquery-migrate status` changes nothing: it logs each applied migration (with `applied_at` and `sha256`), each pending one and a `status: N applied, M pending` line, in one read-only transaction and without waiting for a run in progress, and exits 0, or 3 when a run would refuse (1 and 2 as above).
 The role it connects as must be able to create the `timescaledb` and `vector` extensions.
+
+Connecting gives up after the URL's `connect_timeout`, else libpq's `PGCONNECT_TIMEOUT` (empty is unset, `0` waits forever as in libpq, and anything but a whole number is a settings error, exit 2, naming it), else `VISIONQUERY_CONNECT_TIMEOUT` (10 s).
+Validating `VISIONQUERY_DATABASE__URL` (`visionquery.memory.settings`) is best effort: it turns the values libpq would quote back into exit 2 before anything connects, and accepts libpq's multi-host forms (`h1,h2`, `h1:5432,h2:5433`, `?port=,5433`) and IPv6 zones, but not a non-ASCII host name (write its `xn--` form).
+The guarantee that no libpq text reaches a log line is the connection layer's (`visionquery.memory.connection`), which names a failure only by a fixed category, and the runtime keeps the `psycopg` logger at WARNING or above at any level, because psycopg logs failed attempts at DEBUG with libpq's text.
 
 ## Architecture
 

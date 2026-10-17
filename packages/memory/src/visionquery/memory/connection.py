@@ -2,9 +2,11 @@
 
 libpq's own messages quote back the parts of a URL they could not use, so they may hold the
 password. A failure to connect is therefore reported only as a fixed category, chosen from the
-SQLSTATE or the symptom and never quoted, plus the name of the error's class.
+symptom and never quoted, plus the name of the error's class. This layer is the guarantee;
+validating the URL in `visionquery.memory.settings` is best effort.
 """
 
+import os
 from typing import Literal
 
 import psycopg
@@ -19,6 +21,8 @@ type ConnectionProblem = Literal[
     "server is not accepting connections",
     "server has too many connections",
     "host name could not be resolved",
+    "TLS required or failed",
+    "server rejected a startup option",
     "timed out",
     "connection refused or host unreachable",
     "other connection failure",
@@ -42,20 +46,29 @@ class ConnectionFailedError(Exception):
         super().__init__(f"could not connect to the database: {category} ({cause})")
 
 
-#: libpq's SQLSTATE for a server that answered and refused.
-_BY_SQLSTATE: dict[str, ConnectionProblem] = {
-    "28P01": "authentication failed",
-    "28000": "authentication failed",
-    "3D000": "database does not exist",
-    "57P03": "server is not accepting connections",
-    "53300": "server has too many connections",
-    # A statement the server gave up on after `statement_timeout`.
-    "57014": "timed out",
-}
-#: What a client-side failure says, read only to choose a category and never repeated.
+#: What a failure says, read only to choose a category and never repeated. A failure to connect
+#: carries no SQLSTATE, even when the server answered: only libpq's text, with any FATAL in it.
 _BY_SYMPTOM: tuple[tuple[ConnectionProblem, tuple[str, ...]], ...] = (
-    # A server that answered: a connection failure carries no SQLSTATE, only the FATAL text.
     ("authentication failed", ("authentication failed", "pg_hba.conf", 'role "')),
+    (
+        "server rejected a startup option",
+        ("unrecognized configuration parameter", "invalid value for parameter"),
+    ),
+    # Phrases, never one word: libpq's text quotes the host, which may be `sslproxy.example`.
+    (
+        "TLS required or failed",
+        (
+            "does not support ssl",
+            "ssl error",
+            "ssl syscall",
+            "ssl connection",
+            "ssl negotiation",
+            "establish ssl",
+            "server certificate",
+            "root certificate",
+            "certificate verify",
+        ),
+    ),
     ("database does not exist", ("does not exist",)),
     ("server is not accepting connections", ("starting up", "shutting down", "recovery mode")),
     ("server has too many connections", ("too many clients", "remaining connection slots")),
@@ -69,10 +82,10 @@ _BY_SYMPTOM: tuple[tuple[ConnectionProblem, tuple[str, ...]], ...] = (
 
 
 def categorize(error: Exception) -> ConnectionProblem:
-    """A fixed description of why connecting failed, from the SQLSTATE or the symptom."""
-    sqlstate = getattr(error, "sqlstate", None)
-    if sqlstate in _BY_SQLSTATE:
-        return _BY_SQLSTATE[sqlstate]
+    """A fixed description of why connecting, or a connected session, failed."""
+    if isinstance(error, psycopg.errors.QueryCanceled):
+        # A connected session's statement the server gave up on after `statement_timeout`.
+        return "timed out"
     text = str(error).lower()
     for category, symptoms in _BY_SYMPTOM:
         if any(symptom in text for symptom in symptoms):
@@ -85,7 +98,9 @@ def connect(
 ) -> psycopg.Connection:
     """An autocommit connection, or `ConnectionFailedError` without a word of libpq's text.
 
-    Connecting gives up after `connect_timeout` seconds unless the URL sets its own.
+    Connecting gives up after the URL's `connect_timeout`, else libpq's `PGCONNECT_TIMEOUT`
+    from the environment (empty means unset, and 0 waits forever, as in libpq), else
+    `connect_timeout` seconds.
 
     With `statement_timeout_ms` the connection is also bounded once made: the server cancels a
     statement that runs longer (unless the URL sets its own `options`), and the kernel drops a
@@ -94,10 +109,10 @@ def connect(
     """
     try:
         parameters = conninfo_to_dict(url)
-        # A setting in the URL wins; `None` leaves the keyword out.
-        extra: dict[str, str | int | None] = {
-            "connect_timeout": None if "connect_timeout" in parameters else connect_timeout
-        }
+        # A setting in the URL wins, then libpq's environment variable; `None` leaves the
+        # keyword out, so libpq (and psycopg, which enforces the timeout) reads them.
+        ours = "connect_timeout" not in parameters and not os.environ.get("PGCONNECT_TIMEOUT")
+        extra: dict[str, str | int | None] = {"connect_timeout": connect_timeout if ours else None}
         if statement_timeout_ms is not None:
             if "options" not in parameters:
                 extra["options"] = f"-c statement_timeout={statement_timeout_ms}"
@@ -110,5 +125,9 @@ def connect(
             }
             extra |= {k: v for k, v in bounds.items() if k not in parameters}
         return psycopg.connect(make_conninfo(url, **extra), autocommit=True)
+    # Every exception, not only psycopg's: whatever parsing or connecting raised may quote the
+    # URL (psycopg's own ProgrammingError for a bad timeout does), and a traceback would print
+    # it. Secrecy is worth more than the traceback, so the caller gets a category, the class
+    # name, and `from None` drops the original from the chain.
     except Exception as error:
         raise ConnectionFailedError(categorize(error), type(error).__name__) from None

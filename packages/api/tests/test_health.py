@@ -8,13 +8,19 @@ import socket
 from collections.abc import Callable
 from functools import partial
 from typing import Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import SplitResult, quote, urlsplit
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from visionquery.api.app import create_app, current_database_health, operator_router
 from visionquery.memory.health import DatabaseHealth, check_database
+
+
+def _host(parts: SplitResult) -> str:
+    """The URL's host as a netloc needs it: an IPv6 address keeps its brackets."""
+    host = parts.hostname or ""
+    return f"[{host}]" if ":" in host else host
 
 
 def _app(check: Callable[[], DatabaseHealth]) -> FastAPI:
@@ -38,7 +44,7 @@ def test_a_wrong_password_is_unhealthy_and_the_body_holds_nothing_of_the_url(
 ) -> None:
     parts = urlsplit(postgres)
     password = "not-the-password-hunter2"
-    netloc = f"{parts.username}:{quote(password)}@{parts.hostname}:{parts.port}"
+    netloc = f"{parts.username}:{quote(password)}@{_host(parts)}:{parts.port}"
     status, body = _health(parts._replace(netloc=netloc).geturl())
     assert status == 503
     assert body == {

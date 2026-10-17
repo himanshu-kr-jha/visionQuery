@@ -67,6 +67,28 @@ def test_records_below_the_level_are_dropped() -> None:
     assert [line["message"] for line in _lines(stream)] == ["loud"]
 
 
+def test_the_database_driver_never_logs_below_warning_even_at_debug() -> None:
+    # psycopg logs each failed connection attempt at DEBUG with libpq's text, which can quote
+    # the URL; it pins its own logger at WARNING only if nothing set a level first.
+    driver = logging.getLogger("psycopg")
+    driver.setLevel(logging.DEBUG)
+    stream = io.StringIO()
+    configure_logging("migrate", "DEBUG", stream=stream)
+    driver.debug("connection attempt failed: host: 'h' password=x")
+    driver.info("still quiet")
+    logging.getLogger("visionquery.memory").debug("ours")
+    driver.warning("loud")
+    assert [line["message"] for line in _lines(stream)] == ["ours", "loud"]
+
+
+def test_the_database_driver_follows_a_level_above_warning() -> None:
+    stream = io.StringIO()
+    configure_logging("migrate", "ERROR", stream=stream)
+    logging.getLogger("psycopg").warning("quiet")
+    logging.getLogger("psycopg").error("loud")
+    assert [line["message"] for line in _lines(stream)] == ["loud"]
+
+
 def test_configuring_twice_does_not_write_twice() -> None:
     first, second = io.StringIO(), io.StringIO()
     configure_logging("recorder", "INFO", stream=first)

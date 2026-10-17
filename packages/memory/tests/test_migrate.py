@@ -390,6 +390,33 @@ def test_session_settings_of_one_file_do_not_leak_into_the_next(
     assert _recorded(database) == ["0001_settings.sql", "0002_table.sql", "0003_sleep.sql"]
 
 
+def test_session_objects_of_one_file_do_not_reach_the_next(database: str, migrations: Path) -> None:
+    # Each of these outlives its transaction, so a fresh run of 0002 alone would not see it.
+    _write(
+        migrations,
+        "0001_leftovers.sql",
+        "CREATE TEMP TABLE scratch (id int);\n"
+        "PREPARE probe AS SELECT 1;\n"
+        "DECLARE kept CURSOR WITH HOLD FOR SELECT 1;\n"
+        "LISTEN migrations;\n"
+        "CREATE SEQUENCE counter;\nSELECT nextval('counter');\n",
+    )
+    _write(
+        migrations,
+        "0002_again.sql",
+        # Each statement fails if what 0001 made is still there.
+        "CREATE TEMP TABLE scratch (id int);\n"
+        "PREPARE probe AS SELECT 2;\n"
+        "DECLARE kept CURSOR WITH HOLD FOR SELECT 2;\n"
+        "CREATE TABLE listening AS SELECT * FROM pg_listening_channels();\n"
+        "DO $$ BEGIN PERFORM currval('counter'); RAISE EXCEPTION 'currval survived';\n"
+        "EXCEPTION WHEN object_not_in_prerequisite_state THEN NULL; END $$;\n",
+    )
+
+    assert migrate(database, migrations) == ("0001_leftovers.sql", "0002_again.sql")
+    assert _query(database, "SELECT * FROM listening") == []
+
+
 def test_the_advisory_lock_is_still_held_after_the_session_is_reset(
     database: str, migrations: Path
 ) -> None:
@@ -451,9 +478,9 @@ def test_a_connect_timeout_in_the_url_wins_over_the_default(migrations: Path) ->
 def test_a_blocked_statement_fails_naming_its_file_instead_of_stalling(
     database: str, migrations: Path
 ) -> None:
-    with psycopg.connect(database, autocommit=True) as setup:
-        setup.execute("CREATE TABLE busy (id int)")
-    _write(migrations, "0001_alter.sql", "ALTER TABLE busy ADD COLUMN extra int;")
+    _write(migrations, "0001_busy.sql", "CREATE TABLE busy (id int);")
+    migrate(database, migrations)
+    _write(migrations, "0002_alter.sql", "ALTER TABLE busy ADD COLUMN extra int;")
 
     outcome: list[BaseException] = []
 
@@ -477,9 +504,9 @@ def test_a_blocked_statement_fails_naming_its_file_instead_of_stalling(
     assert time.monotonic() - started < 15
     (error,) = outcome
     assert isinstance(error, MigrationFailedError)
-    assert "0001_alter.sql" in str(error)
+    assert "0002_alter.sql" in str(error)
     assert isinstance(error.__cause__, psycopg.errors.LockNotAvailable)
-    assert _recorded(database) == []
+    assert _recorded(database) == ["0001_busy.sql"]
 
 
 def test_waiting_for_the_advisory_lock_is_logged_until_it_is_free(
