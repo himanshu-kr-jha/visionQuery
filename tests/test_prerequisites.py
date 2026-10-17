@@ -81,3 +81,65 @@ def test_every_prerequisite_skip_in_the_workspace_says_what_it_needs() -> None:
     }
     for path, skip in sources.items():
         assert skip in (ROOT / path).read_text(), path
+
+
+COLLECTION_SKIPS = {
+    "test_module_level.py": """
+import pytest
+
+pytest.skip("needs a running Docker daemon", allow_module_level=True)
+
+def test_never_collected():
+    pass
+""",
+    "test_importorskip.py": """
+import pytest
+
+pytest.importorskip("a_module_that_is_not_installed_anywhere")
+
+def test_never_collected():
+    pass
+""",
+    "test_importorskip_with_reason.py": """
+import pytest
+
+pytest.importorskip("a_module_that_is_not_installed_anywhere", reason="needs the web app")
+
+def test_never_collected():
+    pass
+""",
+    "test_other_module_skip.py": """
+import pytest
+
+pytest.skip("this host has no IPv6 loopback", allow_module_level=True)
+
+def test_never_collected():
+    pass
+""",
+}
+
+
+@pytest.fixture
+def collection(pytester: pytest.Pytester) -> pytest.Pytester:
+    pytester.makeconftest((ROOT / "conftest.py").read_text())
+    for name, source in COLLECTION_SKIPS.items():
+        pytester.makepyfile(**{name.removesuffix(".py"): source})
+    return pytester
+
+
+def test_in_ci_a_module_that_skips_at_collection_for_a_prerequisite_fails(
+    collection: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("CI", "true")
+    result = collection.runpytest("-rA")
+    # Three modules fail to collect; the one skipped for another reason stays skipped.
+    result.assert_outcomes(errors=3, skipped=1)
+    assert result.ret != pytest.ExitCode.OK
+    result.stdout.fnmatch_lines(["*needs a running Docker daemon*", "*CI*"])
+
+
+def test_outside_ci_a_module_that_skips_at_collection_is_skipped(
+    collection: pytest.Pytester, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("CI", raising=False)
+    collection.runpytest().assert_outcomes(skipped=4)
