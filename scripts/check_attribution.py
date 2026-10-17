@@ -20,11 +20,16 @@ import sys
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
-# The three markers. The footer is matched across whitespace, hyphens and line breaks, with an
-# optional `[` for its markdown link (`Generated with [Claude Code](...)`). The words
-# "Claude Code" on their own, and role names, are ordinary prose and pass.
+# The markers: the co-author trailer and the session marker (across spaces or hyphens), a
+# session URL, the agent's no-reply address, and the generated-by footer, matched across
+# whitespace, hyphens, line breaks and markdown emphasis or link brackets (`Generated with
+# [**Claude Code**](...)`). The words "Claude Code" on their own, and role names, are ordinary
+# prose and pass.
 FORBIDDEN = re.compile(
-    r"co-authored-by|claude-session|generated[\s-]+with[\s-]+\[?claude[\s-]*code",
+    r"co[\s-]*authored[\s-]*by"
+    r"|claude[\s-]+session|claude[\s-]*\.ai/code/session"
+    r"|noreply@anthropic\.com"
+    r"|generated[\s*_`-]+with[\s*_`\[-]+claude[\s*_`-]*code",
     re.IGNORECASE,
 )
 SCISSORS = "# ------------------------ >8 ------------------------"

@@ -29,6 +29,25 @@ VARIANTS = [
     "GENERATED WITH [" + "CLAUDE CODE]",
 ]
 
+#: Other ways the markers appear: a bare session URL, the agent's no-reply address, the trailer
+#: and the session marker written with spaces, and emphasis around the tool name in the footer.
+OTHER_MARKERS = [
+    "See https://claude" + ".ai/code/session_01ABC for details",
+    "claude" + ".ai/code/session_01ABC",
+    "Someone <noreply" + "@anthropic.com>",
+    "by noreply" + "@ANTHROPIC.COM",
+    "Co " + "authored by: Someone",
+    "co" + "authored" + " by Someone",
+    "Co-" + "Authored" + " By Someone",
+    "Claude " + "Session: abc",
+    "claude  " + "session",
+    "Generated with **" + "Claude Code**",
+    "Generated with _" + "Claude Code_",
+    "Generated with `" + "Claude Code`",
+    "Generated with [**" + "Claude Code**](https://example.com)",
+    "Generated with *" + "Claude* *Code*",
+]
+
 
 def _check(
     *arguments: str, cwd: Path = ROOT, env: dict[str, str] | None = None
@@ -216,3 +235,34 @@ def test_a_range_git_cannot_resolve_is_an_error_not_a_pass(repository: Path) -> 
 
 def test_nothing_to_check_is_a_usage_error() -> None:
     assert _check().returncode == 2
+
+
+@pytest.mark.parametrize("marker", OTHER_MARKERS)
+def test_other_spellings_of_the_markers_fail_in_pr_text(marker: str) -> None:
+    environment = {"PATH": "/usr/bin:/bin", "PR_BODY": f"Closes #8\n\nSummary.\n\n{marker}\n"}
+    result = _check("--env", "PR_BODY", env=environment)
+    assert result.returncode == 1, marker
+    assert "PR_BODY:5" in result.stderr
+
+
+@pytest.mark.parametrize("marker", OTHER_MARKERS)
+def test_other_spellings_of_the_markers_fail_in_a_commit_message(
+    tmp_path: Path, marker: str
+) -> None:
+    message = _message(tmp_path, f"fix(api): one\n\n{marker}\n")
+    assert _check(str(message)).returncode == 1, marker
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Use a claude " + "model for the Reasoner",
+        "The session cookie is signed; Claude Code agents are described in CLAUDE.md",
+        "Written by the senior-developer, authored in the worktree",
+        "Send mail to noreply@example.com",
+    ],
+)
+def test_prose_near_the_markers_still_passes(tmp_path: Path, prose: str) -> None:
+    message = _message(tmp_path, f"docs(agents): describe the team\n\n{prose}\n")
+    result = _check(str(message))
+    assert result.returncode == 0, result.stderr
