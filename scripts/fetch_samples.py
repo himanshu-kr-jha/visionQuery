@@ -1,15 +1,15 @@
 """Download the sample videos the fake cameras loop (`make fetch-samples`).
 
-The clips are listed in `samples/manifest.toml`, each with its URL, SHA-256, size, license
+The samples are listed in `samples/manifest.toml`, each with its URL, SHA-256, size, license
 and attribution. Each is downloaded into `samples/` (which git ignores, except the manifest)
-through a `.part` file that is verified before it takes the clip's name, so a clip on disk is
-always the one the manifest describes. A clip already present and verified is skipped; one
+through a `.part` file that is verified before it takes the sample's name, so a sample on disk is
+always the one the manifest describes. A sample already present and verified is skipped; one
 that does not verify is downloaded again. Uses the standard library only.
 
     uv run scripts/fetch_samples.py [--manifest PATH] [--directory PATH]
 
-Exits 0 when every clip is present, 1 when one could not be fetched (the others still are),
-and 2 when the manifest is malformed. The clips are downloaded in parallel.
+Exits 0 when every sample is present, 1 when one could not be fetched (the others still are),
+and 2 when the manifest is malformed. The samples are downloaded in parallel.
 """
 
 import argparse
@@ -31,7 +31,7 @@ from typing import BinaryIO, cast
 SAMPLES = Path(__file__).resolve().parents[1] / "samples"
 MANIFEST = SAMPLES / "manifest.toml"
 
-#: Clips downloaded at once.
+#: Samples downloaded at once.
 PARALLEL = 4
 _CHUNK = 1 << 20
 _FILE = re.compile(r"[a-z0-9][a-z0-9._-]*")
@@ -39,7 +39,7 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 
 
 @dataclass(frozen=True)
-class Clip:
+class Sample:
     """One sample video, as the manifest describes it."""
 
     #: The name it is saved under in the samples directory, and that cameras refer to it by.
@@ -52,7 +52,7 @@ class Clip:
     license: str
     license_url: str
     attribution: str
-    #: Where the clip is described, for a person checking its license.
+    #: Where the sample is described, for a person checking its license.
     source: str
 
 
@@ -62,33 +62,33 @@ class Outcome(enum.Enum):
 
 
 class FetchError(Exception):
-    """A clip could not be downloaded, or what was downloaded is not the clip."""
+    """A sample could not be downloaded, or what was downloaded is not the sample."""
 
 
-def load_manifest(path: Path) -> list[Clip]:
-    """The clips the manifest lists; ValueError, naming the field, when one is malformed."""
-    names = [f.name for f in fields(Clip)]
-    entries: object = tomllib.loads(path.read_text()).get("clip", [])
+def load_manifest(path: Path) -> list[Sample]:
+    """The samples the manifest lists; ValueError, naming the field, when one is malformed."""
+    names = [f.name for f in fields(Sample)]
+    entries: object = tomllib.loads(path.read_text()).get("sample", [])
     if not isinstance(entries, list):
-        raise ValueError("clip must be an array of tables ([[clip]])")
-    clips: list[Clip] = []
+        raise ValueError("sample must be an array of tables ([[sample]])")
+    samples: list[Sample] = []
     for index, entry in enumerate(cast(list[object], entries), start=1):
         if not isinstance(entry, dict) or set(cast(dict[str, object], entry)) != set(names):
-            raise ValueError(f"clip {index} must have exactly the fields {names}")
+            raise ValueError(f"sample {index} must have exactly the fields {names}")
         values = cast(dict[str, object], entry)
         text = {n: v for n in names if n != "size" and isinstance(v := values[n], str) and v}
         if missing := [n for n in names if n != "size" and n not in text]:
-            raise ValueError(f"clip {index}: {', '.join(missing)} must be text")
+            raise ValueError(f"sample {index}: {', '.join(missing)} must be text")
         size = values["size"]
         if not isinstance(size, int) or size <= 0:
-            raise ValueError(f"clip {index}: size must be a positive number of bytes")
-        clip = Clip(**text, size=size)
-        if not _FILE.fullmatch(clip.file):
-            raise ValueError(f"clip {index}: file must be a plain lower-case file name")
-        if not _SHA256.fullmatch(clip.sha256):
-            raise ValueError(f"{clip.file}: sha256 must be 64 lower-case hex digits")
-        clips.append(clip)
-    return clips
+            raise ValueError(f"sample {index}: size must be a positive number of bytes")
+        sample = Sample(**text, size=size)
+        if not _FILE.fullmatch(sample.file):
+            raise ValueError(f"sample {index}: file must be a plain lower-case file name")
+        if not _SHA256.fullmatch(sample.sha256):
+            raise ValueError(f"{sample.file}: sha256 must be 64 lower-case hex digits")
+        samples.append(sample)
+    return samples
 
 
 def _digest(path: Path) -> str:
@@ -111,31 +111,31 @@ def _copy(response: BinaryIO, into: BinaryIO, cancelled: threading.Event) -> str
     return digest.hexdigest()
 
 
-def fetch(clip: Clip, directory: Path, cancelled: threading.Event | None = None) -> Outcome:
-    """Make `directory/clip.file` the clip the manifest describes, downloading it if needed.
+def fetch(sample: Sample, directory: Path, cancelled: threading.Event | None = None) -> Outcome:
+    """Make `directory/sample.file` the sample the manifest describes, downloading it if needed.
     Setting `cancelled` stops the download, which then fails."""
-    target = directory / clip.file
+    target = directory / sample.file
     # The fake cameras run as a user of their own, and read the directory (and, below, each
-    # clip) through a bind mount: a umask of 077 would otherwise lock them out.
+    # sample) through a bind mount: a umask of 077 would otherwise lock them out.
     directory.chmod(directory.stat().st_mode | 0o005)
-    if target.is_file() and _digest(target) == clip.sha256:
+    if target.is_file() and _digest(target) == sample.sha256:
         target.chmod(target.stat().st_mode | 0o004)
         return Outcome.PRESENT
     part = target.with_name(f"{target.name}.part")
     try:
-        with urllib.request.urlopen(clip.url, timeout=60) as response, part.open("wb") as file:
+        with urllib.request.urlopen(sample.url, timeout=60) as response, part.open("wb") as file:
             digest = _copy(response, file, cancelled or threading.Event())
-        if digest != clip.sha256:
+        if digest != sample.sha256:
             raise FetchError(
-                f"{clip.file}: the download's SHA-256 is {digest}, the manifest says "
-                f"{clip.sha256} ({part.stat().st_size} of {clip.size} bytes arrived)"
+                f"{sample.file}: the download's SHA-256 is {digest}, the manifest says "
+                f"{sample.sha256} ({part.stat().st_size} of {sample.size} bytes arrived)"
             )
     except _CancelledError:
         part.unlink(missing_ok=True)
-        raise FetchError(f"{clip.file}: cancelled") from None
+        raise FetchError(f"{sample.file}: cancelled") from None
     except (urllib.error.URLError, http.client.HTTPException, OSError) as error:
         part.unlink(missing_ok=True)
-        raise FetchError(f"{clip.file}: could not download {clip.url}: {error}") from error
+        raise FetchError(f"{sample.file}: could not download {sample.url}: {error}") from error
     except BaseException:
         # A mismatch, or an interrupted run: never leave a partial file behind.
         part.unlink(missing_ok=True)
@@ -151,42 +151,41 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--directory", type=Path, default=SAMPLES)
     arguments = parser.parse_args(argv)
     try:
-        clips = load_manifest(arguments.manifest)
+        samples = load_manifest(arguments.manifest)
     except (ValueError, TypeError, tomllib.TOMLDecodeError) as error:
         print(f"fetch-samples: {arguments.manifest} is malformed: {error}", file=sys.stderr)
         return 2
-    total = sum(clip.size for clip in clips)
+    total = sum(sample.size for sample in samples)
     print(
-        f"Fetching {len(clips)} clips ({total / 1e6:.0f} MB) into {arguments.directory}", flush=True
+        f"Fetching {len(samples)} samples ({total / 1e6:.0f} MB) into {arguments.directory}",
+        flush=True,
     )
     failed = 0
     # In parallel: one download from a dataset's bucket can be slow, several are faster.
     cancelled = threading.Event()
     with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
         downloads = {
-            pool.submit(fetch, clip, arguments.directory, cancelled): clip for clip in clips
+            pool.submit(fetch, sample, arguments.directory, cancelled): sample for sample in samples
         }
         try:
             for download in as_completed(downloads):
-                clip = downloads[download]
+                sample = downloads[download]
                 try:
                     outcome = download.result()
                 except FetchError as error:
                     print(f"fetch-samples: {error}", file=sys.stderr, flush=True)
                     failed += 1
                     continue
-                print(
-                    f"{clip.file} ({clip.size / 1e6:.0f} MB, {clip.license}): {outcome.value}",
-                    flush=True,
-                )
+                size, license_ = f"{sample.size / 1e6:.0f} MB", sample.license
+                print(f"{sample.file} ({size}, {license_}): {outcome.value}", flush=True)
         except KeyboardInterrupt:
             # Every download stops and removes its partial file before the pool is left.
             cancelled.set()
             raise
     if failed:
-        print(f"fetch-samples: {failed} of {len(clips)} clips failed", file=sys.stderr)
+        print(f"fetch-samples: {failed} of {len(samples)} samples failed", file=sys.stderr)
         return 1
-    print(f"Every clip is in {arguments.directory.resolve()}; the manifest credits each.")
+    print(f"Every sample is in {arguments.directory.resolve()}; the manifest credits each.")
     return 0
 
 

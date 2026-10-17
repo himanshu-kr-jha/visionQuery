@@ -272,7 +272,7 @@ services:
       mediamtx:
         condition: service_healthy
     healthcheck:
-      # Every camera's ffmpeg sent a frame in the last 5 s. A clip being prepared is replaced
+      # Every camera's ffmpeg sent a frame in the last 5 s. A sample being prepared is replaced
       # by the test pattern meanwhile, so the cameras are up within seconds even the first time.
       test: ["CMD", "fake-cameras", "health"]
       interval: 10s

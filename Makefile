@@ -80,6 +80,6 @@ down:
 	$(COMPOSE) --profile '*' down --remove-orphans $(if $(VOLUMES),--volumes)
 
 # Downloads the sample videos samples/manifest.toml lists into samples/ (git ignores them),
-# verifying each against its SHA-256 and skipping those already present. About 300 MB.
+# verifying each against its SHA-256 and skipping those already present. About 400 MB.
 fetch-samples:
 	uv run scripts/fetch_samples.py

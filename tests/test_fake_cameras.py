@@ -40,11 +40,11 @@ SCRIPT = Path(__file__).resolve().parents[1] / "docker" / "fake-cameras" / "fake
 
 
 def test_each_entry_is_a_camera_named_for_its_path_and_its_source() -> None:
-    cameras = parse_cameras("gate-2=meva-school-g299.avi, lobby=synthetic,yard=clips/yard.mp4")
+    cameras = parse_cameras("gate-2=meva-school-g299.avi, lobby=synthetic,yard=samples/yard.mp4")
     assert cameras == [
         Camera("gate-2", "meva-school-g299.avi"),
         Camera("lobby", SYNTHETIC),
-        Camera("yard", "clips/yard.mp4"),
+        Camera("yard", "samples/yard.mp4"),
     ]
 
 
@@ -71,7 +71,7 @@ def test_one_source_can_feed_several_cameras() -> None:
         ("a/b=synthetic", "a/b"),
         ("a=/etc/passwd", "/etc/passwd"),
         ("a=../outside.mp4", "../outside.mp4"),
-        ("a=clips/../../outside.mp4", "outside.mp4"),
+        ("a=samples/../../outside.mp4", "outside.mp4"),
     ],
 )
 def test_a_malformed_configuration_is_refused_saying_why(spec: str, complaint: str) -> None:
@@ -88,7 +88,7 @@ def _after(command: list[str], option: str) -> str:
     return command[command.index(option) + 1]
 
 
-def test_a_camera_loops_a_prepared_clip_in_real_time_without_transcoding() -> None:
+def test_a_camera_loops_a_prepared_sample_in_real_time_without_transcoding() -> None:
     command = publish_command(Path("/cache/abc.mp4"), URL)
     assert command[0] == "ffmpeg"
     assert _after(command, "-stream_loop") == "-1"
@@ -130,15 +130,15 @@ def _camera_like(command: list[str]) -> None:
     assert "-an" in command
 
 
-def test_preparing_a_clip_makes_it_camera_like() -> None:
+def test_preparing_a_sample_makes_it_camera_like() -> None:
     command = prepare_command(Path("/samples/a.avi"), Path("/cache/a.part"))
     assert _after(command, "-i") == "/samples/a.avi"
     _camera_like(command)
     assert command[-3:] == ["-f", "mp4", "/cache/a.part"]
 
 
-def test_the_test_pattern_is_a_clip_prepared_like_any_other() -> None:
-    # Encoded once and looped, so that many synthetic cameras cost no more than many clips.
+def test_the_test_pattern_is_a_sample_prepared_like_any_other() -> None:
+    # Encoded once and looped, so that many synthetic cameras cost no more than many samples.
     command = prepare_command(None, Path("/cache/b.part"))
     assert _after(command, "-f") == "lavfi"
     assert _after(command, "-i").startswith("testsrc2=")
@@ -147,12 +147,12 @@ def test_the_test_pattern_is_a_clip_prepared_like_any_other() -> None:
     assert command[-3:] == ["-f", "mp4", "/cache/b.part"]
 
 
-def test_a_clip_is_prepared_again_only_when_its_content_changes(tmp_path: Path) -> None:
-    clip = tmp_path / "walk.mp4"
-    clip.write_bytes(b"one")
-    first = cache_key(clip)
+def test_a_sample_is_prepared_again_only_when_its_content_changes(tmp_path: Path) -> None:
+    sample = tmp_path / "walk.mp4"
+    sample.write_bytes(b"one")
+    first = cache_key(sample)
     renamed = tmp_path / "renamed.mp4"
-    clip.rename(renamed)
+    sample.rename(renamed)
     assert cache_key(renamed) == first
     renamed.write_bytes(b"two")
     assert cache_key(renamed) != first
@@ -174,7 +174,7 @@ def test_a_camera_is_publishing_while_its_frames_keep_coming() -> None:
 
 #: Stands in for ffmpeg: logs its arguments, reports progress like `-progress pipe:1` until
 #: told to stop, or exits at once when the file named by FAKE_FFMPEG_FAIL exists. Preparing a
-#: clip (not the test pattern) takes until the file named by FAKE_FFMPEG_HOLD is gone.
+#: sample (not the test pattern) takes until the file named by FAKE_FFMPEG_HOLD is gone.
 FAKE_FFMPEG = textwrap.dedent(
     """\
     import json, os, sys, time
@@ -299,7 +299,7 @@ def _inputs(calls: list[list[str]]) -> set[str]:
 
 
 def _prepared(calls: list[list[str]]) -> list[list[str]]:
-    """Every ffmpeg started so far to prepare a clip, not the test pattern."""
+    """Every ffmpeg started so far to prepare a sample, not the test pattern."""
     return [c for c in calls if c[-2] == "mp4" and "lavfi" not in c]
 
 
@@ -341,7 +341,7 @@ def test_a_camera_that_fails_is_restarted_and_is_unhealthy_meanwhile(
     assert "Could not write header" not in output
 
 
-def test_a_clip_is_prepared_once_then_looped_from_the_cache(
+def test_a_sample_is_prepared_once_then_looped_from_the_cache(
     publisher: Callable[[str], Publisher],
 ) -> None:
     p = publisher("a=walk.avi,b=walk.avi")
@@ -358,7 +358,7 @@ def test_a_clip_is_prepared_once_then_looped_from_the_cache(
     assert sorted(p.cache.iterdir()) == sorted([cached, p.pattern])
 
     # Started again (in a new container, whose /tmp is new), nothing is prepared again and
-    # the clip is looped from the start.
+    # the sample is looped from the start.
     p.calls.unlink()
     p.status.unlink()
     p.start()
@@ -369,10 +369,10 @@ def test_a_clip_is_prepared_once_then_looped_from_the_cache(
     assert _inputs(calls) == {str(cached)}
 
 
-def test_a_camera_shows_the_test_pattern_while_its_clip_is_prepared(
+def test_a_camera_shows_the_test_pattern_while_its_sample_is_prepared(
     publisher: Callable[[str], Publisher],
 ) -> None:
-    # Preparing a long clip takes a minute or more, and `make up` waits for health meanwhile.
+    # Preparing a long sample takes a minute or more, and `make up` waits for health meanwhile.
     p = publisher("a=walk.avi")
     (p.samples / "walk.avi").write_bytes(b"a video")
     p.hold.touch()
@@ -387,11 +387,11 @@ def test_a_camera_shows_the_test_pattern_while_its_clip_is_prepared(
     assert "test pattern until walk.avi is prepared" in output
 
 
-def test_a_clip_no_longer_configured_leaves_the_cache(
+def test_a_sample_no_longer_configured_leaves_the_cache(
     publisher: Callable[[str], Publisher],
 ) -> None:
     p = publisher("a=synthetic")
-    (p.cache / "0123-old.mp4").write_bytes(b"from a clip no camera uses now")
+    (p.cache / "0123-old.mp4").write_bytes(b"from a sample no camera uses now")
     (p.cache / "0123-old.mp4.part").write_bytes(b"from a killed preparation")
     p.start()
     _eventually(lambda: p.health().returncode == 0)
@@ -400,7 +400,7 @@ def test_a_clip_no_longer_configured_leaves_the_cache(
     assert list(p.cache.iterdir()) == [p.pattern]
 
 
-def test_a_clip_not_fetched_yet_falls_back_to_the_test_pattern_and_says_so(
+def test_a_sample_not_fetched_yet_falls_back_to_the_test_pattern_and_says_so(
     publisher: Callable[[str], Publisher],
 ) -> None:
     p = publisher("gate=meva-school-g299.avi")

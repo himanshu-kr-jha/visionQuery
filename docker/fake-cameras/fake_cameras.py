@@ -43,7 +43,7 @@ SYNTHETIC_RATE = 15
 SYNTHETIC_SECONDS = 60
 #: A camera whose ffmpeg last reported a frame longer ago than this is not publishing.
 STALE_AFTER = 5.0
-#: Changes whenever prepare_command does, so that clips prepared the old way are redone.
+#: Changes whenever prepare_command does, so that samples prepared the old way are redone.
 PREPARATION = "1"
 #: Seconds before restarting an ffmpeg that exited: doubled after each failure, up to the last.
 BACKOFF = (1, 2, 4, 8)
@@ -128,7 +128,7 @@ def _quiet(ffmpeg: str) -> list[str]:
 
 
 def publish_command(source: Path, url: str, ffmpeg: str = "ffmpeg") -> list[str]:
-    """Loop a prepared clip into MediaMTX in real time, as it is, reporting progress."""
+    """Loop a prepared sample into MediaMTX in real time, as it is, reporting progress."""
     return [
         *_quiet(ffmpeg),
         "-progress", "pipe:1", "-stats_period", "1",
@@ -141,7 +141,7 @@ def publish_command(source: Path, url: str, ffmpeg: str = "ffmpeg") -> list[str]
 
 
 def prepare_command(source: Path | None, output: Path, ffmpeg: str = "ffmpeg") -> list[str]:
-    """Encode a clip (None for the test pattern) as a camera sends video, so that looping it
+    """Encode a sample (None for the test pattern) as a camera sends video, so that looping it
     needs no transcoding."""
     if source is None:
         pattern = (
@@ -275,7 +275,7 @@ class Publisher:
         return found if isinstance(found, Path) else None
 
     async def _prune_cache(self) -> None:
-        """Delete prepared clips no camera uses now, and preparations a kill interrupted."""
+        """Delete prepared samples no camera uses now, and preparations a kill interrupted."""
         videos = {v for c in self._settings.cameras if (v := self._video(c)) is not None}
         keys = {await asyncio.to_thread(cache_key, v) for v in videos} | {self._pattern.stem}
         for path in self._settings.cache.iterdir():

@@ -64,9 +64,9 @@ By default these are three cameras of the [MEVA](https://mevadata.org/) dataset'
 Any number of cameras can be listed, several may loop the same video, `synthetic` is a test pattern that needs no video, and any video file in `VISIONQUERY_FAKE_CAMERA_SAMPLES` (`samples/` by default) can be used.
 Each camera reconnects by itself whenever MediaMTX restarts.
 
-The clips are changed from the originals: each is re-encoded for streaming (H.264 without B-frames, a keyframe a second, no audio), as CC BY 4.0 asks to be said.
-A camera that starts on the test pattern switches to its prepared clip once the clip is ready, which disconnects a viewer once: reconnect it (play the URL again, or reload the page) to see the clip.
-A video that exists but that the container cannot read (as after `umask 077`) is reported as such in `docker compose logs fake-cameras`; `make fetch-samples` makes the directory and the clips world-readable, or run `chmod -R a+rX samples`.
+The samples are changed from the originals: each is re-encoded for streaming (H.264 without B-frames, a keyframe a second, no audio), as CC BY 4.0 asks to be said.
+A camera that starts on the test pattern switches to its prepared sample once the sample is ready, which disconnects a viewer once: reconnect it (play the URL again, or reload the page) to see the sample.
+A video that exists but that the container cannot read (as after `umask 077`) is reported as such in `docker compose logs fake-cameras`; `make fetch-samples` makes the directory and the samples world-readable, or run `chmod -R a+rX samples`.
 
 Every port listens on loopback only unless `VISIONQUERY_BIND_ADDRESS` (or, for the camera-facing ports of MediaMTX alone, `VISIONQUERY_MEDIAMTX_BIND_ADDRESS`) says otherwise, and each can be moved with its own variable when something on the machine already uses it.
 

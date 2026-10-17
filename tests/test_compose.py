@@ -658,7 +658,7 @@ def test_the_samples_are_read_from_a_directory_the_environment_names() -> None:
     assert elsewhere["source"] == "/srv/videos"
 
 
-def test_prepared_clips_are_kept_in_a_volume_of_their_own() -> None:
+def test_prepared_samples_are_kept_in_a_volume_of_their_own() -> None:
     cache = _mount(_fake_cameras(), "/cache")
     assert (cache["type"], cache["source"]) == ("volume", "fake-cameras")
 
@@ -669,9 +669,9 @@ def test_fake_cameras_are_healthy_only_while_every_camera_publishes() -> None:
 
 def test_the_default_cameras_loop_the_fetched_samples() -> None:
     cameras = parse_cameras(_example()["VISIONQUERY_FAKE_CAMERAS"])
-    clips = {clip.file for clip in load_manifest(MANIFEST)}
+    samples = {sample.file for sample in load_manifest(MANIFEST)}
     assert len(cameras) >= 3
-    assert {c.source for c in cameras} - {SYNTHETIC} == clips
+    assert {c.source for c in cameras} - {SYNTHETIC} == samples
 
 
 def test_make_fetch_samples_runs_the_script_with_uv() -> None:
