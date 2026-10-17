@@ -355,7 +355,13 @@ def test_the_api_logs_json_lines_only(default_stack: Stack) -> None:
 def test_the_api_says_when_the_database_is_down_and_recovers(default_stack: Stack) -> None:
     default_stack.compose("stop", "postgres")
     try:
-        status, body = _health(default_stack)
+        # The api reuses its last database answer for a second, and one check in flight for up
+        # to five (DatabaseProbe), so it may say 200 for a moment after the database stops.
+        def unhealthy() -> tuple[tuple[int, dict[str, Any]] | None, str]:
+            status, body = _health(default_stack)
+            return ((status, body), "") if status == 503 else (None, f"/health answered {status}")
+
+        status, body = wait_for(unhealthy, timeout=15)
         assert status == 503, body
         assert body["status"] == "unhealthy"
         assert body["database"]["status"] == "unreachable"
