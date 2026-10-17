@@ -276,7 +276,9 @@ A nested model is set with a double underscore (`VISIONQUERY_DATABASE__URL`), a 
 In `compose.yaml` every VisionQuery service merges `<<: *runtime-environment` into its `environment`, which sets the log level and `VISIONQUERY_METRICS_HOST=0.0.0.0` so Prometheus can scrape it (`tests/test_compose.py` checks it).
 Each service has its own env file, never one shared by all, so a service sees only the variables it declares.
 Secrets are declared as `SecretStr`.
-Camera credentials live in the camera registry, never in the environment.
+Camera credentials live in the camera registry (`visionquery.memory.cameras`), never in the environment.
+A pulled Camera's `CameraUrl` shows, logs and serialises only its redacted form (`rtsp://***@host/path`) and gives the full URL only through `get_secret_value()`; a URL is refused unless the logs' scrubber turns it into exactly that form.
+pydantic cannot read a `CameraUrl` from input, because its validation errors quote the input: an api reads a camera URL as a `SecretStr` and then makes the `CameraUrl`.
 Log through `logging.getLogger(__name__)` with structured fields in `extra=`; never print.
 A service that embeds uvicorn must run it with `log_config=None`, because uvicorn otherwise installs its own non-JSON handlers and its access lines bypass the runtime's formatter.
 
