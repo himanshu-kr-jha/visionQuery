@@ -7,6 +7,7 @@ checks, the Node.js major `web/.nvmrc` pins, the camera and port `.env.example` 
 make targets and tests that CLAUDE.md's Commands table names.
 """
 
+import copy
 import re
 import subprocess
 from pathlib import Path
@@ -113,7 +114,9 @@ def test_the_quick_start_checks_the_health_the_api_publishes() -> None:
     port = _example()["VISIONQUERY_API_PORT"]
     # --fail-with-body: exits non-zero on the 503 of an api that cannot reach the database,
     # printing the problem it names.
-    assert health == (f"curl --silent --show-error --fail-with-body http://127.0.0.1:{port}/health")
+    assert health == (
+        f"curl --silent --show-error --fail-with-body --max-time 10 http://127.0.0.1:{port}/health"
+    )
 
 
 def test_the_quick_start_reads_a_frame_from_a_camera_the_example_lists() -> None:
@@ -126,6 +129,9 @@ def test_the_quick_start_reads_a_frame_from_a_camera_the_example_lists() -> None
     # check needs nothing installed on the host; one decoded frame proves the camera plays.
     assert read.startswith("docker compose --profile dev exec fake-cameras ffmpeg ")
     assert "-frames:v 1 -f null -" in read
+    # A camera that does not answer must fail the check, not hang it: the socket timeout is
+    # in microseconds.
+    assert re.search(r"-timeout \d+ ", read)
 
 
 def test_every_make_target_the_readme_runs_exists() -> None:
@@ -169,6 +175,46 @@ def test_the_setup_guide_job_runs_the_readme_commands_as_written() -> None:
         assert condition in (None, "always()", "failure()"), run
     # The stack is taken down even when a step before failed.
     assert runs[-1] == (commands[-1], "always()")
+
+
+#: What a step that runs a command may carry: nothing that changes how it runs.
+RUN_KEYS = {"name", "run", "if"}
+
+
+def _job_surprises(job: dict[str, Any]) -> list[str]:
+    """What a job has beyond the checkout, the setup action and the README's commands."""
+    surprises = [key for key in ("env", "defaults", "container", "services") if key in job]
+    steps = job["steps"]
+    uses = [step["uses"] for step in steps if "uses" in step]
+    if len(uses) != 2 or "uses" not in steps[0] or "uses" not in steps[1]:
+        surprises.append(f"uses steps: {uses}")
+    for step in steps:
+        if "run" in step:
+            surprises += [f"{key} on {step['run']!r}" for key in step if key not in RUN_KEYS]
+    return surprises
+
+
+def _mutations() -> dict[str, dict[str, Any]]:
+    jobs = {
+        name: copy.deepcopy(_job())
+        for name in ("env", "defaults", "container", "uses", "step", "dir")
+    }
+    jobs["env"]["env"] = {"X": "1"}
+    jobs["defaults"]["defaults"] = {"run": {"shell": "sh"}}
+    jobs["container"]["container"] = "ubuntu"
+    jobs["uses"]["steps"].insert(2, {"uses": "actions/cache@v4"})
+    jobs["step"]["steps"][2]["env"] = {"X": "1"}
+    jobs["dir"]["steps"][-2]["working-directory"] = "web"
+    return jobs
+
+
+def test_the_setup_guide_job_has_nothing_but_the_readme_commands_around_it() -> None:
+    assert _job_surprises(_job()) == []
+
+
+@pytest.mark.parametrize("name", list(_mutations()))
+def test_a_setup_guide_job_that_changes_how_the_commands_run_is_noticed(name: str) -> None:
+    assert _job_surprises(_mutations()[name]), name
 
 
 def test_the_setup_guide_job_starts_from_the_prerequisites_alone() -> None:
