@@ -97,6 +97,13 @@ def test_never_logs_the_database_password() -> None:
     stdout, stderr = process.communicate()
     assert status == 503
     assert password not in stdout + stderr
+    # One WARNING says the database is unreachable, by category, however often it is asked.
+    warnings = [
+        json.loads(line)["message"]
+        for line in stdout.splitlines()
+        if json.loads(line)["level"] == "WARNING"
+    ]
+    assert warnings == ["the database is unreachable: connection refused or host unreachable"]
 
 
 def test_without_a_database_url_it_exits_naming_the_variable() -> None:

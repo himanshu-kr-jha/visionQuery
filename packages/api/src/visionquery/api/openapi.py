@@ -13,18 +13,13 @@ import json
 from pathlib import Path
 
 from visionquery.api.app import create_app
-from visionquery.memory.health import DatabaseHealth
 
 __all__ = ["main", "render"]
 
 
-def _not_served() -> DatabaseHealth:
-    raise AssertionError("the schema is rendered without serving a request")
-
-
 def render() -> str:
     """The schema as the file holds it: indented JSON in the api's order, ending in a newline."""
-    return json.dumps(create_app(_not_served).openapi(), indent=2, ensure_ascii=False) + "\n"
+    return json.dumps(create_app().openapi(), indent=2, ensure_ascii=False) + "\n"
 
 
 def main() -> None:

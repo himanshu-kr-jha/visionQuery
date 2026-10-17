@@ -11,7 +11,14 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Whether the Deployment's database can be reached */
+        /**
+         * Whether the Deployment is ready to serve: its database can be reached
+         * @description Readiness, not liveness: 200 only while the api can do its work.
+         *
+         *     A running api that cannot reach the database answers 503 here, so the Compose
+         *     healthcheck (which asks this) marks it unhealthy rather than letting an api that
+         *     can answer nothing look fine. The body names the problem by category only.
+         */
         get: operations["health"];
         put?: never;
         post?: never;
@@ -41,7 +48,7 @@ export interface components {
         };
         /**
          * Health
-         * @description Whether the api can serve: healthy only when everything it depends on is reachable.
+         * @description Whether the api is ready to serve: ready only when everything it depends on is reachable.
          */
         Health: {
             /**

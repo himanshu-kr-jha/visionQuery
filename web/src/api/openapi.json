@@ -7,7 +7,8 @@
   "paths": {
     "/health": {
       "get": {
-        "summary": "Whether the Deployment's database can be reached",
+        "summary": "Whether the Deployment is ready to serve: its database can be reached",
+        "description": "Readiness, not liveness: 200 only while the api can do its work.\n\nA running api that cannot reach the database answers 503 here, so the Compose\nhealthcheck (which asks this) marks it unhealthy rather than letting an api that\ncan answer nothing look fine. The body names the problem by category only.",
         "operationId": "health",
         "responses": {
           "200": {
@@ -98,7 +99,7 @@
           "database"
         ],
         "title": "Health",
-        "description": "Whether the api can serve: healthy only when everything it depends on is reachable."
+        "description": "Whether the api is ready to serve: ready only when everything it depends on is reachable."
       }
     }
   }

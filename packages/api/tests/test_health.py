@@ -5,18 +5,26 @@ packages/conftest.py), or an address where none answers.
 """
 
 import socket
+from collections.abc import Callable
 from functools import partial
 from typing import Any
 from urllib.parse import quote, urlsplit
 
 import pytest
 from fastapi.testclient import TestClient
-from visionquery.api.app import create_app
+from fastapi import FastAPI
+from visionquery.api.app import create_app, database_health
 from visionquery.memory.health import DatabaseHealth, check_database
 
 
+def _app(check: Callable[[], DatabaseHealth]) -> FastAPI:
+    app = create_app()
+    app.dependency_overrides[database_health] = check
+    return app
+
+
 def _health(url: str) -> tuple[int, dict[str, Any]]:
-    with TestClient(create_app(partial(check_database, url))) as client:
+    with TestClient(_app(partial(check_database, url))) as client:
         response = client.get("/health")
     return response.status_code, response.json()
 
@@ -61,21 +69,21 @@ def test_an_unreachable_database_is_unhealthy_with_the_reason(nobody_listening: 
 
 def test_no_part_of_the_url_is_ever_in_the_answer(nobody_listening: str) -> None:
     parts = urlsplit(nobody_listening)
-    with TestClient(create_app(partial(check_database, nobody_listening))) as client:
+    with TestClient(_app(partial(check_database, nobody_listening))) as client:
         text = client.get("/health").text
     for secret in ("hunter2", "visionquery", str(parts.port), "127.0.0.1", "postgresql"):
         assert secret not in text
 
 
-def test_each_request_checks_again() -> None:
-    # A health answer is the database's state now, not when the api started.
+def test_each_request_asks_the_provided_check() -> None:
+    # The api itself does not cache: the provided check decides (see test_probe.py).
     calls: list[int] = []
 
     def check() -> DatabaseHealth:
         calls.append(1)
         return check_database("postgresql://u@127.0.0.1:1/db")
 
-    with TestClient(create_app(check)) as client:
+    with TestClient(_app(check)) as client:
         client.get("/health")
         client.get("/health")
     assert len(calls) == 2
@@ -84,7 +92,23 @@ def test_each_request_checks_again() -> None:
 def test_serves_no_page_that_loads_scripts_from_the_internet() -> None:
     # FastAPI's interactive docs load Swagger UI and ReDoc from a CDN; a Deployment is closed
     # (ADR 0001), so they are off. The schema itself is still served.
-    with TestClient(create_app(lambda: DatabaseHealth(None))) as client:
+    with TestClient(_app(lambda: DatabaseHealth(None))) as client:
         assert client.get("/docs").status_code == 404
         assert client.get("/redoc").status_code == 404
         assert client.get("/openapi.json").status_code == 200
+
+
+def test_health_is_at_the_root_and_operator_operations_will_be_under_api() -> None:
+    # /health is for infrastructure (the Compose healthcheck); Operator operations get /api.
+    from visionquery.api.app import operator_router
+
+    assert operator_router.prefix == "/api"
+    with TestClient(_app(lambda: DatabaseHealth(None))) as client:
+        assert client.get("/health").status_code == 200
+        assert client.get("/api/health").status_code == 404
+        assert "/health" in client.get("/openapi.json").json()["paths"]
+
+
+def test_without_a_provided_check_the_app_fails_loudly_not_healthy() -> None:
+    with TestClient(create_app(), raise_server_exceptions=False) as client:
+        assert client.get("/health").status_code == 500

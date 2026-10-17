@@ -1,15 +1,14 @@
 """The HTTP api a Deployment's web app and Operators talk to."""
 
-from collections.abc import Callable
 from importlib.metadata import version
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import FastAPI, Response, status
+from fastapi import APIRouter, Depends, FastAPI, Response, status
 from pydantic import BaseModel
 from visionquery.memory.connection import ConnectionProblem
 from visionquery.memory.health import DatabaseHealth
 
-__all__ = ["DatabaseStatus", "Health", "create_app"]
+__all__ = ["DatabaseStatus", "Health", "create_app", "database_health", "operator_router"]
 
 
 class DatabaseStatus(BaseModel):
@@ -21,28 +20,50 @@ class DatabaseStatus(BaseModel):
 
 
 class Health(BaseModel):
-    """Whether the api can serve: healthy only when everything it depends on is reachable."""
+    """Whether the api is ready to serve: ready only when everything it depends on is reachable."""
 
     status: Literal["healthy", "unhealthy"]
     database: DatabaseStatus
 
 
-def create_app(check_database: Callable[[], DatabaseHealth]) -> FastAPI:
-    """The api, asking `check_database` for the database's state on every health request."""
+def database_health() -> DatabaseHealth:
+    """The dependency that looks at the database; the process provides it.
+
+    Provide it with `app.dependency_overrides[database_health] = ...`, as `visionquery-api` does
+    and as tests do. Later endpoints receive what they need the same way, with `Depends`.
+    """
+    raise RuntimeError("no database check was provided: set app.dependency_overrides")
+
+
+#: Every Operator operation lives under `/api` (ADR 0009: they go through `tools`). `/health`
+#: is the one route at the root: it is for infrastructure (the Compose healthcheck), not Operators.
+operator_router = APIRouter(prefix="/api")
+
+
+def create_app() -> FastAPI:
+    """The api, with no dependency provided yet; see `database_health`."""
     # No interactive docs: FastAPI's load Swagger UI and ReDoc from a CDN, and a Deployment is
     # closed (ADR 0001). The schema is still served at /openapi.json.
     app = FastAPI(
         title="VisionQuery", version=version("visionquery-api"), docs_url=None, redoc_url=None
     )
+    app.include_router(operator_router)
 
     @app.get(
         "/health",
         operation_id="health",
         responses={status.HTTP_503_SERVICE_UNAVAILABLE: {"model": Health}},
-        summary="Whether the Deployment's database can be reached",
+        summary="Whether the Deployment is ready to serve: its database can be reached",
     )
-    def health(response: Response) -> Health:
-        database = check_database()
+    def health(
+        response: Response, database: Annotated[DatabaseHealth, Depends(database_health)]
+    ) -> Health:
+        """Readiness, not liveness: 200 only while the api can do its work.
+
+        A running api that cannot reach the database answers 503 here, so the Compose
+        healthcheck (which asks this) marks it unhealthy rather than letting an api that
+        can answer nothing look fine. The body names the problem by category only.
+        """
         if not database.connected:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
             return Health(
