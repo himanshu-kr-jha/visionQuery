@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
+import { FETCH_TIMEOUT_MS } from "./api/health";
 import { DeploymentHealth } from "./DeploymentHealth";
 
 function answer(status: number, body: unknown) {
@@ -99,6 +100,59 @@ describe("DeploymentHealth", () => {
     ).toBeInTheDocument();
     expect(report().state).toBe("error");
     expect(report().text).not.toMatch(/undefined|Database/);
+  });
+
+  it.each([
+    ["a 200 whose body says unhealthy", () => Response.json(UNHEALTHY, { status: 200 })],
+    ["a 503 whose body says healthy", () => Response.json(HEALTHY, { status: 503 })],
+    [
+      "a healthy report that names a problem",
+      () =>
+        Response.json({
+          status: "healthy",
+          database: { status: "connected", problem: "authentication failed" },
+        }),
+    ],
+    [
+      "a healthy report with an unreachable database",
+      () =>
+        Response.json({ status: "healthy", database: { status: "unreachable", problem: null } }),
+    ],
+  ])("rejects a status that contradicts its body: %s", async (_name, response) => {
+    vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(response())));
+
+    render(<DeploymentHealth />);
+
+    expect(
+      await screen.findByText("The Deployment answered with something that is not a health report"),
+    ).toBeInTheDocument();
+    expect(report().state).toBe("error");
+  });
+
+  it("gives up on an api that never answers and shows the error, not Checking forever", async () => {
+    // The deadline is AbortSignal.timeout; the test fires it by hand instead of waiting 5 s.
+    const deadline = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(deadline.signal);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_url: string, init: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () => {
+              reject(new DOMException("The operation timed out", "TimeoutError"));
+            });
+          }),
+      ),
+    );
+
+    render(<DeploymentHealth />);
+    expect(report().state).toBe("checking");
+    expect(timeout).toHaveBeenCalledWith(FETCH_TIMEOUT_MS);
+
+    deadline.abort();
+
+    expect(await screen.findByText("The Deployment could not be reached")).toBeInTheDocument();
+    expect(report().state).toBe("error");
   });
 
   it("tells the four states apart by words and marks, not by colour alone", async () => {

@@ -31,8 +31,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
-/** The body as a `Health`, or a `HealthError` saying it is not one. */
-export function parseHealth(body: unknown): Health {
+/** How long the api has to answer before the page stops waiting and says it cannot be reached. */
+export const FETCH_TIMEOUT_MS = 5000;
+
+function agrees(
+  httpStatus: number,
+  status: "healthy" | "unhealthy",
+  databaseStatus: "connected" | "unreachable",
+  problem: string | null,
+): boolean {
+  if (status === "healthy") {
+    return httpStatus === 200 && databaseStatus === "connected" && problem === null;
+  }
+  return httpStatus === 503;
+}
+
+/**
+ * The body as a `Health`, or a `HealthError` saying it is not one. The HTTP status must agree
+ * with the body: 200 is a healthy report with a connected database and no problem, 503 an
+ * unhealthy one, so a report that contradicts its own status is not trusted either way.
+ */
+export function parseHealth(body: unknown, httpStatus: number): Health {
   if (isRecord(body) && isRecord(body["database"])) {
     const status = body["status"];
     const database = body["database"];
@@ -41,7 +60,8 @@ export function parseHealth(body: unknown): Health {
     if (
       (status === "healthy" || status === "unhealthy") &&
       (databaseStatus === "connected" || databaseStatus === "unreachable") &&
-      (problem === null || typeof problem === "string")
+      (problem === null || typeof problem === "string") &&
+      agrees(httpStatus, status, databaseStatus, problem)
     ) {
       return { status, database: { status: databaseStatus, problem } };
     }
@@ -54,7 +74,11 @@ export function parseHealth(body: unknown): Health {
  * health report came back, and with the network's own error when the api could not be reached.
  */
 export async function fetchHealth(signal: AbortSignal): Promise<Health> {
-  const response = await fetch("/health", { signal, headers: { Accept: "application/json" } });
+  // The page's own signal (it is leaving) or the deadline (the api is stalled) ends the request.
+  const response = await fetch("/health", {
+    signal: AbortSignal.any([signal, AbortSignal.timeout(FETCH_TIMEOUT_MS)]),
+    headers: { Accept: "application/json" },
+  });
   if (!ANSWERED.has(response.status)) {
     throw new HealthError("The Deployment could not be reached");
   }
@@ -64,5 +88,5 @@ export async function fetchHealth(signal: AbortSignal): Promise<Health> {
   } catch {
     throw new HealthError(NOT_A_REPORT);
   }
-  return parseHealth(body);
+  return parseHealth(body, response.status);
 }
