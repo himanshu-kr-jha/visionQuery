@@ -12,6 +12,29 @@ Metrics are exposed in Prometheus text format on `/metrics`, on a port of the pr
 
 `runtime` imports none of the other packages, so every package may import it without creating a cycle; it holds no domain terms and no database driver.
 
+## Where the record layer is installed, and what it misses
+
+The record layer is two process-wide hooks, installed by `configure_logging`.
+The record factory (`logging.setLogRecordFactory`) scrubs the message, its arguments, the exception text and the stack.
+`Logger.makeRecord` is replaced on the class itself, for every logger in the process including those that already exist, to scrub the `extra=` fields, because the standard library attaches them only after the factory has run.
+Both wrap whatever factory and `makeRecord` are in place when `configure_logging` is called, rather than replacing them, so a library that installed its own first (OpenTelemetry's logging instrumentor adds trace ids this way) keeps the fields it adds.
+The runtime remembers the wrapper functions it made and recognises them by identity, not by a marker attribute, because `functools.wraps` copies a marker onto a library's own wrapper around ours.
+Configuring again with one of ours in place does not wrap it a second time.
+Any other hook in place is wrapped, including a library's wrapper around ours: whatever that library adds after calling ours is then scrubbed too, and a library that saved the hook it found before ours and later restores it (OpenTelemetry's uninstrument does) has removed ours, so the next `configure_logging` installs it again.
+After every chained hook has run, the wrappers scrub every field on the record that is not a standard `LogRecord` attribute, so fields a chained factory or `makeRecord` adds outside `extra=` (a `record.request_url`, say) are scrubbed as `extra=` fields are.
+A container in `extra=` is left as it is when there is nothing to remove.
+When something in it has to be scrubbed, a namedtuple, list, tuple or set keeps its type if it can be rebuilt, and a mapping becomes a dict.
+
+Records that reach a handler without passing through both hooks are not scrubbed by this layer:
+
+- records made by a `Logger` subclass that overrides `makeRecord` without calling `super()`, whose `extra=` fields are not scrubbed;
+- records made by `logging.makeLogRecord`, which calls the factory on an empty record and then overlays the given fields, so none of them is scrubbed, as when records arrive over a socket from another process;
+- records built directly with `logging.LogRecord(...)` and passed to `Logger.handle`, which bypass both hooks;
+- fields that a filter adds to a record after it was made, since a filter runs when the record is handled.
+
+On the runtime's own handler all four are still scrubbed, by the JSON formatter.
+On a handler a library installed for itself, with a formatter of its own, they are not: a service that installs such a handler with such a filter or logger class must scrub what it adds.
+
 ## What never passes through logging
 
 Three kinds of output do not go through the logging module, so neither layer sees them: the stderr of subprocesses (such as the recorder's ffmpeg), the stderr written directly by C libraries (such as grpc or NVDEC), and `print`.

@@ -5,7 +5,7 @@ description = "What every process starts with: env settings, scrubbed JSON logs 
 requires-python = "==3.14.*"
 dependencies = [
     "prometheus-client>=0.26.0",
-    "pydantic-settings>=2.16.0",
+    "pydantic-settings>=2.16,<3",
 ]
 
 [build-system]

@@ -1,5 +1,6 @@
 """`scrub` removes the credentials a URL can carry from any text, wherever the URL sits in it."""
 
+import contextlib
 import json
 import subprocess
 import sys
@@ -194,14 +195,16 @@ _ADVERSARIAL = {
     "scheme_chars": ("", "a.b-c+d"),
 }
 
-#: Times `scrub` on 100 KB and on 1 MB of one adversarial text, best of three each.
-_TIMING = """
+_SMALL, _LARGE = 20_000, 200_000
+
+#: Times `scrub` on a small and a large size of each adversarial text, best of three each,
+#: writing `started <text>` before each text and its timings as soon as they are known, so a
+#: text that hangs is known by name.
+_TIMING = f"""
 import json, sys, time
 from visionquery.runtime import scrub
 
-prefix, unit = json.loads(sys.argv[1])
-
-def best(size):
+def best(prefix, unit, size):
     text = prefix + unit * (size // len(unit))
     times = []
     for _ in range(3):
@@ -210,30 +213,56 @@ def best(size):
         times.append(time.perf_counter() - started)
     return min(times)
 
-print(json.dumps([best(100_000), best(1_000_000)]))
+for name, (prefix, unit) in json.loads(sys.argv[1]).items():
+    print("started " + name, flush=True)
+    timed = [best(prefix, unit, {_SMALL}), best(prefix, unit, {_LARGE})]
+    print(json.dumps([name, timed]), flush=True)
 """
 
-#: Linear work grows 10x from 100 KB to 1 MB and quadratic work 100x; this sits between.
+#: Linear work grows 10x from the small size to the large and quadratic work 100x; this
+#: sits between.
 _GROWTH_LIMIT = 40
-#: Below this a 100 KB run is too quick to compare against.
-_FLOOR_SECONDS = 0.005
-#: A quadratic scrub of a megabyte would run for hours; it must fail the test, not hang it.
-_HARD_TIMEOUT_SECONDS = 30
+#: Below this a small run is too quick to compare against.
+_FLOOR_SECONDS = 0.001
+#: A quadratic scrub of the large size would run for many minutes; it must fail, not hang.
+#: The texts that were timed before it are still judged.
+_HARD_TIMEOUT_SECONDS = 60
 
 
-@pytest.mark.parametrize("name", list(_ADVERSARIAL))
-def test_scrubbing_adversarial_text_grows_linearly_with_its_size(name: str) -> None:
-    try:
-        run = subprocess.run(
-            [sys.executable, "-c", _TIMING, json.dumps(_ADVERSARIAL[name])],
-            capture_output=True,
-            text=True,
+@pytest.fixture(scope="module")
+def timings(tmp_path_factory: pytest.TempPathFactory) -> dict[str, tuple[float, float] | str]:
+    """How long each adversarial text took at each size, timed in one child process.
+
+    A child process, so that a quadratic scrub can be stopped; one, so that the interpreter
+    starts once rather than once per text. A text that was started and did not finish is
+    "hung", and each one after it "not reached".
+    """
+    output = tmp_path_factory.mktemp("scrub") / "timings.jsonl"
+    with output.open("w") as stream, contextlib.suppress(subprocess.TimeoutExpired):
+        subprocess.run(
+            [sys.executable, "-c", _TIMING, json.dumps(_ADVERSARIAL)],
+            stdout=stream,
             timeout=_HARD_TIMEOUT_SECONDS,
             check=True,
         )
-    except subprocess.TimeoutExpired:
-        pytest.fail(f"scrubbing {name} did not finish in {_HARD_TIMEOUT_SECONDS} s: not linear")
-    small, large = json.loads(run.stdout)
+    timed: dict[str, tuple[float, float] | str] = dict.fromkeys(_ADVERSARIAL, "not reached")
+    for line in output.read_text().splitlines():
+        if line.startswith("started "):
+            timed[line.removeprefix("started ")] = "hung"
+        else:
+            name, (small, large) = json.loads(line)
+            timed[name] = (small, large)
+    return timed
+
+
+@pytest.mark.parametrize("name", list(_ADVERSARIAL))
+def test_scrubbing_adversarial_text_grows_linearly_with_its_size(
+    timings: dict[str, tuple[float, float] | str], name: str
+) -> None:
+    result = timings[name]
+    if isinstance(result, str):
+        pytest.fail(f"scrubbing {name} did not finish within {_HARD_TIMEOUT_SECONDS} s: {result}")
+    small, large = result
     assert large < max(small, _FLOOR_SECONDS) * _GROWTH_LIMIT, (small, large)
 
 
