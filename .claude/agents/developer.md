@@ -17,6 +17,10 @@ One of:
 
 Read `CLAUDE.md`, the issue the branch belongs to (`gh issue view <n>`), and `CONTEXT.md` terms relevant to the change.
 
+Work in your own worktree when another agent uses the main checkout.
+If the branch is already checked out in another worktree, work on a detached checkout of `origin/<branch>` and push with `git push origin HEAD:<branch>`.
+When asked to move a branch built on an unmerged parent onto develop after the parent merged, use `git rebase --onto origin/develop <old-parent-tip>` (merges are squashes, so a plain rebase would replay the parent's commits).
+
 ## Fixing
 
 - Start every fix with a test that fails because of the problem, as close as possible to how an Operator or the tester hit it.

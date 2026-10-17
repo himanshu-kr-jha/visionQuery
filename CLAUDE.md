@@ -51,6 +51,7 @@ The squash commit body is a short summary plus `Closes #<n>`, without the templa
 Required CI checks must pass before merging; nobody pushes directly to `main` or `develop`.
 Until CI exists (issue #8), "CI is green" is replaced by "the tester ran the full local suite and it passed".
 When no checks exist for the change, the tester's verdict on the final commit stands in for CI.
+For a docs-only or config-only change, which has no tester run, the `pr-reviewer` verdict on the final commit stands in for CI.
 
 ## The team
 
@@ -71,7 +72,7 @@ Lifecycle of one issue:
 
 1. **Tech lead** runs the session-start routine, picks the next issue, and assigns it: `senior-developer` for `task` and `spike` issues, `developer` for `bug` issues.
 2. **Builder** delivers a pushed branch and a criterion-by-criterion test map, and ends its run with that hand-back.
-   The tech lead posts each builder hand-back as a comment on the PR if one exists, otherwise on the issue.
+   The tech lead posts each builder hand-back as a comment on the PR if one exists, otherwise on the issue, and then removes the builder's worktree (`git worktree remove --force <path>`, after confirming the branch is pushed) so the branch is free for `developer`.
    The builder also updates the milestone's status marker in `docs/plan/v1.md` as part of the same PR: `[~]` in the first PR of a milestone, `[x]` in the PR that closes its last sub-issue.
 3. **`tester`** verifies the branch, and is the one agent that runs the full stack tests (`make test-stack`) on each PR head.
    If not ready, the report goes to `developer`, then back to `tester`.
@@ -79,22 +80,24 @@ Lifecycle of one issue:
 4. **Tech lead** opens the PR from the template, with `Closes #<n>` and a Conventional Commit title.
 5. **`pr-reviewer`** reviews the PR, running `make check` and reading the change; it runs stack tests only when it suspects a defect there.
    Blocking findings go to `developer`, then back through `tester` (if code changed) and `pr-reviewer`.
-6. **Tech lead** squash-merges (`gh pr merge --squash --delete-branch`) once CI is green and the verdict is "ready to merge", and confirms the issue closed.
+6. **Tech lead** squash-merges (`gh pr merge --squash --delete-branch`) once CI is green and either the verdict is "ready to merge" or, after two fix rounds, no security or correctness finding remains; it confirms the issue closed.
    If GitHub did not auto-close the issue, close it with a comment linking the merged PR.
    The tech lead updates the GitHub wiki (a separate repo) directly when a milestone completes or setup changes.
    After the user approves a milestone's demo, the tech lead closes the milestone issue with a comment summarising what shipped.
 
 Rules for the loop:
 
-- At most two fix rounds per issue (a round is one `developer` pass on findings from `tester` or `pr-reviewer`).
+- At most two fix rounds per issue (a round is one `developer` pass on findings from `tester` or `pr-reviewer`, counted by the `developer` hand-back comments on the PR and its issue).
   After the second round only security or correctness defects block; every other finding becomes a follow-up issue under the same milestone, and the PR merges.
+  The tech lead tells `tester` and `pr-reviewer` which round they are judging.
   If a security or correctness defect remains after two rounds, the tech lead stops and brings it to the user.
 - A "do not merge" verdict, or a finding that needs a design change, goes to the user.
 - Escalate to the user, rather than deciding alone, anything that would change an ADR, the glossary's meaning of an existing term, or an issue's acceptance criteria.
 - Post each builder hand-back, tester verdict and reviewer verdict as a comment on the PR if one exists, otherwise on the issue, so the history is visible on GitHub, without agent attribution.
 - Work is pipelined: once `senior-developer` hands back an issue it never returns to it, and starts the next issue straight away while `tester`, `developer` and `pr-reviewer` finish the previous one.
   Every builder runs with `isolation: "worktree"`, and so does `developer` whenever another agent is using the main checkout, so no two agents share a working tree.
-  The next issue is the lowest-numbered open sub-issue of the earliest open milestone that does not depend on unmerged work; when it does depend on it, the builder cuts its branch from the unmerged branch and rebases after that merges.
+  The next issue is the lowest-numbered open sub-issue of the earliest open milestone, preferring one that does not depend on unmerged work.
+  If every candidate depends on unmerged work, the builder cuts its branch from the unmerged branch; once that merges, `developer` moves it onto develop with `git rebase --onto origin/develop <old-parent-tip>`, and its PR is opened only after that.
 - Stack tests are isolated per Compose project, so agents may run them at the same time.
 
 ## Project state
