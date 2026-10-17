@@ -1270,6 +1270,7 @@ def test_a_video_that_goes_after_it_was_found_gets_the_test_pattern(
         video.unlink()
     else:
         video.chmod(0o000)
+
     def found(samples: Path, source: str) -> Path:
         return samples / source
 

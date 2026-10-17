@@ -18,13 +18,21 @@ the test pattern, with a warning saying which and how to fix it, until the publi
 `make up` then works before `make fetch-samples`. A video that cannot be prepared (a few
 attempts, FAKE_CAMERAS_PREPARE_ATTEMPTS) keeps its cameras on the test pattern, with one error.
 
-All the videos are cut to the same FAKE_CAMERAS_DURATION seconds (300), and every camera plays
-its video from the second the wall clock says, counted from the Unix epoch: at every start of an
-ffmpeg, and at every restart, a camera joins the timeline at the next whole second (where there
-is a keyframe). Videos recorded together are therefore in step on every camera, whenever each
-was prepared or restarted, and the same footage repeats every DURATION seconds, from the same
-minutes of every hour. An ffmpeg whose frame count has not moved for 15 s is hung (it goes on
-reporting the same count while its write blocks): it is killed and restarted.
+All the videos are cut to the same FAKE_CAMERAS_DURATION seconds (300), at their own frame rate
+rounded to a whole number, and every camera plays its video from the second the wall clock says,
+counted from the Unix epoch: at every start of an ffmpeg, and at every restart, a camera joins
+the timeline at the next whole second (where there is a keyframe). Videos recorded together are
+therefore in step on every camera, whenever each was prepared or restarted, and the same footage
+repeats every DURATION seconds, from the same minutes of every hour. Each ffmpeg sends its first
+half second at once and then paces itself, and starts a little sooner or later than another, so
+the cameras are a few tenths of a second ahead of the wall clock and differ by up to about 0.15 s,
+which shifts a little when one restarts.
+
+A camera playing a sample rejoins the timeline, disconnecting its viewers once, when its ffmpeg
+has played the day its playlist lasts (less for a very short DURATION), and when the wall clock
+steps (it is set, or the host was suspended), which every such camera does at the same moment.
+An ffmpeg whose frame count has not moved for 15 s is hung (it goes on reporting the same count
+while its write blocks): it is killed and restarted.
 
 `health` exits 0 when every camera's ffmpeg has sent a new frame in the last few seconds.
 """
