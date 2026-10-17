@@ -89,7 +89,6 @@ def test_a_pull_url_already_checked_is_taken_as_it_is(registry: CameraRegistry) 
         "http://10.0.0.7/stream1",
         "rtsp://10.0.0.7:70000/s",
         "rtsp://admin:p@ss@10.0.0.7/s",
-        "rtsp://10.0.0.7/s?password=x",
     ],
 )
 def test_an_invalid_pull_url_is_refused_and_nothing_is_added(
@@ -315,12 +314,12 @@ def test_removing_a_pulled_camera_forgets_its_credentials(
     camera = registry.add_pulled("Gate 2", "rtsp://admin:pw@10.0.0.7/s")
     registry.remove(camera.id)
     removed = registry.get(camera.id)
-    assert removed.pull_url == CameraUrl("rtsp://10.0.0.7/s")
+    assert removed.pull_url == CameraUrl("rtsp://10.0.0.7")
     with psycopg.connect(migrated) as connection:
         row = connection.execute(
-            "SELECT pull_credentials FROM cameras WHERE id = %s", (camera.id,)
+            "SELECT pull_credentials, pull_target FROM cameras WHERE id = %s", (camera.id,)
         ).fetchone()
-    assert row == (None,)
+    assert row == (None, None)
 
 
 def test_ids_are_never_reused(registry: CameraRegistry) -> None:

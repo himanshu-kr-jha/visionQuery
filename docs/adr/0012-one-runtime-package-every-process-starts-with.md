@@ -48,5 +48,7 @@ Scrubbing at the point of logging (as phyOS's recorder did around ffmpeg errors)
 
 ## Camera URLs
 
+_Superseded by [ADR 0014](0014-a-camera-urls-path-and-query-are-secret.md): the registry no longer refuses URLs for what the scrubber cannot scrub; a camera URL's path and query are secret like its password, and are stored apart and never logged. Only the scrubber's role as defence in depth below stands._
+
 The scrubber is best-effort defence in depth, and its known limits are listed in the docstring of `visionquery.runtime.scrub`.
 The camera registry (milestone 1) therefore rejects camera URLs it cannot scrub reliably, for example URLs without a scheme.

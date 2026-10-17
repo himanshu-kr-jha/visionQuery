@@ -26,11 +26,14 @@ from visionquery.memory.migrate import migrate
 
 USER = "operator-u53r"
 PASSWORD = "s3cr3t-Pa55"
-URL = f"rtsp://{USER}:{PASSWORD}@10.0.0.7:554/stream1"
+PATH_TOKEN = "Xk9aQ2bLm4ZtTq1R"
+QUERY_TOKEN = "q-t0k3n-77"
+URL = f"rtsp://{USER}:{PASSWORD}@10.0.0.7:554/{PATH_TOKEN}/stream1?sig={QUERY_TOKEN}"
+REDACTED = "rtsp://***@10.0.0.7:554/***"
 
 
 def _leaks(text: str) -> bool:
-    return USER in text or PASSWORD in text
+    return any(secret in text for secret in (USER, PASSWORD, PATH_TOKEN, QUERY_TOKEN, "stream1"))
 
 
 @pytest.fixture
@@ -78,9 +81,8 @@ def test_no_operation_logs_the_credentials(
     registry.remove(camera.id)
 
     logged = [_everything_in(record) for record in logs.records]
-    assert any("rtsp://***@10.0.0.7:554/stream1" in text for text in logged), (
-        "adding a camera is logged, with its URL redacted"
-    )
+    assert any("Gate 2" in text for text in logged), "adding a camera is logged"
+    assert not any("10.0.0.7" in text for text in logged), "the URL is not logged at all"
     assert not any(_leaks(text) for text in logged)
 
 
@@ -90,7 +92,7 @@ def test_a_camera_shows_no_credentials(registry: CameraRegistry) -> None:
     assert camera.pull_url.get_secret_value() == URL
     for shown in (repr(camera), str(camera), f"{camera}", repr(registry.list())):
         assert not _leaks(shown)
-        assert "rtsp://***@10.0.0.7:554/stream1" in shown
+        assert REDACTED in shown
 
 
 def test_serialised_as_the_api_will_serialise_it_a_camera_has_no_credentials(
@@ -99,7 +101,7 @@ def test_serialised_as_the_api_will_serialise_it_a_camera_has_no_credentials(
     camera = registry.add_pulled("Gate 2", URL)
     adapter = TypeAdapter(Camera)
     dumped = adapter.dump_python(camera, mode="json")
-    assert dumped["pull_url"] == "rtsp://***@10.0.0.7:554/stream1"
+    assert dumped["pull_url"] == REDACTED
     assert dumped["path"] == camera.path
     assert not _leaks(adapter.dump_json(camera).decode())
     assert not _leaks(TypeAdapter(list[Camera]).dump_json(registry.list()).decode())
@@ -139,3 +141,27 @@ def test_a_lost_connection_while_adding_does_not_quote_the_credentials(migrated:
     with pytest.raises(CameraRegistryError) as raised:
         registry.add_pulled("Gate 2", URL)
     assert not _leaks(_shown(raised.value))
+
+
+def test_removing_a_camera_leaves_neither_credentials_nor_path_nor_query(
+    registry: CameraRegistry, migrated: str
+) -> None:
+    camera = registry.add_pulled("Gate 2", URL)
+    registry.remove(camera.id)
+    removed = registry.get(camera.id)
+    assert removed.pull_url is not None
+    assert removed.pull_url.get_secret_value() == "rtsp://10.0.0.7:554"
+    with psycopg.connect(migrated) as connection:
+        rows = connection.execute("SELECT to_jsonb(cameras) FROM cameras").fetchall()
+    assert not _leaks(repr(rows))
+
+
+def test_the_database_keeps_the_path_and_query_apart_from_the_public_part(
+    registry: CameraRegistry, migrated: str
+) -> None:
+    camera = registry.add_pulled("Gate 2", URL)
+    with psycopg.connect(migrated) as connection:
+        row = connection.execute(
+            "SELECT pull_url FROM cameras WHERE id = %s", (camera.id,)
+        ).fetchone()
+    assert row == ("rtsp://10.0.0.7:554",)

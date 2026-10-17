@@ -277,7 +277,7 @@ In `compose.yaml` every VisionQuery service merges `<<: *runtime-environment` in
 Each service has its own env file, never one shared by all, so a service sees only the variables it declares.
 Secrets are declared as `SecretStr`.
 Camera credentials live in the camera registry (`visionquery.memory.cameras`), never in the environment.
-A pulled Camera's `CameraUrl` shows, logs and serialises only its redacted form (`rtsp://***@host/path`) and gives the full URL only through `get_secret_value()`; a URL is refused unless the logs' scrubber turns it into exactly that form.
+A pulled Camera's URL is secret in its user, password, path and query alike (ADR 0014): its `CameraUrl` shows, logs and serialises only the redacted form (`rtsps://***@host:7441/***`, with `***@` only when there is userinfo and `/***` only when there is a path or query) and gives the full URL only through `get_secret_value()`; the registry stores the path and query apart from the public part, clears them with the credentials when a Camera is removed, never logs a URL, and cannot pickle a `CameraUrl`.
 pydantic cannot read a `CameraUrl` from input, because its validation errors quote the input: an api reads a camera URL as a `SecretStr` and then makes the `CameraUrl`.
 Log through `logging.getLogger(__name__)` with structured fields in `extra=`; never print.
 A service that embeds uvicorn must run it with `log_config=None`, because uvicorn otherwise installs its own non-JSON handlers and its access lines bypass the runtime's formatter.

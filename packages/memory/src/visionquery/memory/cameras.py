@@ -5,18 +5,20 @@ A camera is added in one of two ways. A **pulled** camera is reached by its `rts
 to a MediaMTX path the Operator chose. Either way `Camera.path` is the MediaMTX path its video
 is on, unique among the cameras not removed.
 
-**Credentials never leave the registry by accident.** A camera's user and password live only
-in its `CameraUrl`, whose `str`, `repr` and pydantic serialisation are the redacted form
-(`rtsp://***@10.0.0.7/stream1`); only `CameraUrl.get_secret_value()` gives the full URL, for
-whatever has to connect. Errors never quote a URL, not even one that was refused, and no
-error of the database driver, which may repeat the row it refused, is passed on. A URL is
-accepted only when the logs' scrubber (`visionquery.runtime.scrub`) turns it into exactly its
-redacted form, so even a URL logged by mistake shows no credentials (ADR 0012): credentials
-go in the URL's user and password, never in its path or query.
+**A camera URL's user, password, path and query are all secret** (ADR 0014): cameras carry
+their credentials in any of them (a UniFi Protect token is the path, an XMEye login is in the
+path, many cameras take `?token=`). They live only in the `CameraUrl`, whose `str`, `repr` and
+pydantic serialisation are the redacted form, `rtsps://***@192.168.1.1:7441/***`: the `***@`
+stands for the user and password, present only when the URL has them, and the `/***` for the
+path and query, present only when the URL has any. Only `CameraUrl.get_secret_value()` gives
+the full URL, for whatever has to connect. The registry never logs a URL; a camera is
+identified in logs by its id, name and path. Errors never quote a URL, not even one that was
+refused, and no error of the database driver, which may repeat the row it refused, is passed on.
+Any URL of the right form is accepted, so none is refused for what its path or query holds.
 
 **A removed camera keeps its row** (and its id, which is never reused), because its Footage
-and Tracks outlive it; its name and push path are free again, and its credentials are
-forgotten.
+and Tracks outlive it; its name and push path are free again, and its secrets (credentials,
+path and query) are forgotten.
 
 The registry works on the connection it is given. Outside a transaction each operation commits
 on its own; inside one the caller opened (`with connection.transaction():`) each runs in a
@@ -35,7 +37,6 @@ from typing import Any, LiteralString
 import psycopg
 from pydantic import GetCoreSchemaHandler
 from pydantic_core import core_schema
-from visionquery.runtime import scrub
 
 __all__ = [
     "PULLED_PATHS",
@@ -101,23 +102,24 @@ class CameraRegistryError(CameraError):
 
 # --- pull URLs --------------------------------------------------------------------------------
 
-#: RFC 3986's characters, less `@` outside the user and password: the scrubber reads a URL's
-#: credentials as running to its last `@`, so one in the path would hide the host.
+#: RFC 3986's characters, less `@` outside the user and password: a URL's credentials run to
+#: its last `@`, so one in the path would make the host ambiguous.
 _UNRESERVED = r"A-Za-z0-9\-._~"
 _SUB_DELIMS = r"!$&'()*+,;="
 _ESCAPE = r"%[0-9A-Fa-f]{2}"
 _USER = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}]|{_ESCAPE})+"
 _PASSWORD = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}:]|{_ESCAPE})*"
+_PASSWORD_REQUIRED = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}:]|{_ESCAPE})+"
 _SEGMENT = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}:]|{_ESCAPE})*"
 _QUERY = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}:/?]|{_ESCAPE})*"
 _URL = re.compile(
     rf"(?P<scheme>(?i:rtsps?))://"
-    rf"(?:(?P<credentials>{_USER}(?::{_PASSWORD})?)@)?"
-    r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.\-]+)"
+    rf"(?:(?P<credentials>{_USER}(?::{_PASSWORD})?|:{_PASSWORD_REQUIRED})@)?"
+    r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9_.\-]+)"
     r"(?::(?P<port>[0-9]{1,5}))?"
     rf"(?P<rest>(?:/{_SEGMENT})*(?:\?{_QUERY})?)"
 )
-_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
+_LABEL = re.compile(r"[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?")
 _URL_FORM = (
     "must be rtsp:// or rtsps:// followed by [user[:password]@]host[:port][/path][?query], "
     "with any space, @, /, ?, # or % in the user or password percent-encoded"
@@ -128,41 +130,44 @@ class CameraUrl:
     """A pulled camera's URL, which shows only its redacted form.
 
     `str()`, `repr()` and pydantic's serialisation (what the api sends) give `redacted`, the URL
-    with its user and password replaced by `***`; `get_secret_value()` gives the full URL.
+    with its user and password replaced by `***@` and its path and query by `/***` (each only
+    when there is one); `get_secret_value()` gives the full URL. Pickling and copying it raise,
+    because they would carry the full URL; pass `get_secret_value()` explicitly.
     pydantic cannot read one from input, because its validation errors quote the input: a URL
     from a request is read as a secret (`SecretStr`) and then given to `CameraUrl`.
     """
 
-    __slots__ = ("_bare", "_credentials", "_redacted", "_url")
+    __slots__ = ("_bare", "_credentials", "_redacted", "_target", "_url")
 
     def __init__(self, url: str) -> None:
         parts = _parse(url)
         if parts is None:
             raise InvalidCameraError(f"the camera URL {_URL_FORM}")
         self._set(*parts)
-        if scrub(self._url) != self._redacted:
-            raise InvalidCameraError(
-                "the camera URL holds what looks like a credential outside its user and "
-                "password; put credentials in rtsp://user:password@host"
-            )
 
     @classmethod
-    def _stored(cls, bare: str, credentials: str | None) -> CameraUrl:
-        """A URL the registry stored, as its credential-free form and its credentials."""
+    def _stored(cls, bare: str, credentials: str | None, target: str | None) -> CameraUrl:
+        """A URL the registry stored, as its public part and its secrets (None once forgotten)."""
         url = cls.__new__(cls)
-        scheme, _, rest = bare.partition("://")
-        url._set(scheme, credentials, rest)
+        scheme, _, authority = bare.partition("://")
+        url._set(scheme, credentials, authority, target or "")
         return url
 
-    def _set(self, scheme: str, credentials: str | None, rest: str) -> None:
-        self._bare = f"{scheme}://{rest}"
+    def _set(self, scheme: str, credentials: str | None, authority: str, target: str) -> None:
+        self._bare = f"{scheme}://{authority}"
         self._credentials = credentials
-        self._url = f"{scheme}://{credentials}@{rest}" if credentials else self._bare
-        self._redacted = f"{scheme}://***@{rest}" if credentials else self._bare
+        self._target = target
+        userinfo = "" if credentials is None else f"{credentials}@"
+        self._url = f"{scheme}://{userinfo}{authority}{target}"
+        self._redacted = (
+            f"{scheme}://{'' if credentials is None else '***@'}{authority}"
+            f"{'/***' if target else ''}"
+        )
 
     @property
     def redacted(self) -> str:
-        """The URL with its user and password, if it has them, replaced by `***`."""
+        """The URL with its user and password, if it has them, replaced by `***@`, and its path
+        and query, if it has any, by `/***`."""
         return self._redacted
 
     @property
@@ -170,7 +175,7 @@ class CameraUrl:
         return self._credentials is not None
 
     def get_secret_value(self) -> str:
-        """The full URL, credentials included, for whatever has to connect to the camera."""
+        """The full URL, secrets included, for whatever has to connect to the camera."""
         return self._url
 
     def __str__(self) -> str:
@@ -186,7 +191,10 @@ class CameraUrl:
         return hash(self._url)
 
     def __reduce__(self) -> tuple[Any, ...]:
-        return (CameraUrl, (self._url,))
+        raise TypeError(
+            "a CameraUrl is not pickled or copied, because that would carry the full URL; "
+            "pass get_secret_value() explicitly"
+        )
 
     @classmethod
     def __get_pydantic_core_schema__(
@@ -204,8 +212,9 @@ def _redacted(url: CameraUrl) -> str:
     return url.redacted
 
 
-def _parse(url: object) -> tuple[str, str | None, str] | None:
-    """A URL's scheme, credentials and the rest, normalised, or None when it is not valid."""
+def _parse(url: object) -> tuple[str, str | None, str, str] | None:
+    """A URL's scheme, credentials, authority and path with query, normalised, or None when it
+    is not valid."""
     if not isinstance(url, str) or len(url) > URL_LIMIT or not url.isascii():
         return None
     found = _URL.fullmatch(url)
@@ -216,7 +225,7 @@ def _parse(url: object) -> tuple[str, str | None, str] | None:
     if host is None or (port is not None and not 0 < int(port) < 65536):
         return None
     authority = host if port is None else f"{host}:{int(port)}"
-    return found["scheme"].lower(), found["credentials"], authority + found["rest"]
+    return found["scheme"].lower(), found["credentials"], authority, found["rest"]
 
 
 def _host(host: str) -> str | None:
@@ -303,14 +312,16 @@ class Camera:
         return self.pull_url is None
 
 
-_COLUMNS: LiteralString = "id, name, pull_url, pull_credentials, push_path, added_at, removed_at"
+_COLUMNS: LiteralString = (
+    "id, name, pull_url, pull_credentials, pull_target, push_path, added_at, removed_at"
+)
 
 
 def _camera(row: tuple[Any, ...]) -> Camera:
-    camera_id, name, pull_url, credentials, push_path, added_at, removed_at = row
+    camera_id, name, pull_url, credentials, target, push_path, added_at, removed_at = row
     # The registry and `CameraUrl` are one module's, and only they see a URL's parts.
     stored = CameraUrl._stored  # pyright: ignore[reportPrivateUsage]
-    url = None if pull_url is None else stored(pull_url, credentials)
+    url = None if pull_url is None else stored(pull_url, credentials, target)
     path = push_path if push_path is not None else f"{PULLED_PATHS}{camera_id}"
     return Camera(camera_id, name, path, url, added_at, removed_at)
 
@@ -327,8 +338,9 @@ class CameraRegistry:
         if not isinstance(url, CameraUrl):
             url = CameraUrl(url)
         camera = self._write(
-            "INSERT INTO cameras (name, pull_url, pull_credentials) VALUES (%s, %s, %s)",
-            (name, url._bare, url._credentials),  # pyright: ignore[reportPrivateUsage]
+            "INSERT INTO cameras (name, pull_url, pull_credentials, pull_target) "
+            "VALUES (%s, %s, %s, %s)",
+            (name, url._bare, url._credentials, url._target),  # pyright: ignore[reportPrivateUsage]
             name=name,
         )
         self._report("camera added", camera)
@@ -372,9 +384,9 @@ class CameraRegistry:
 
     def remove(self, camera_id: int) -> None:
         """Remove a camera: it leaves the list, frees its name and path, and forgets its
-        credentials, but stays known by its id."""
+        credentials, path and query, but stays known by its id."""
         camera = self._write(
-            "UPDATE cameras SET removed_at = now(), pull_credentials = NULL "
+            "UPDATE cameras SET removed_at = now(), pull_credentials = NULL, pull_target = NULL "
             "WHERE id = %s AND removed_at IS NULL",
             (camera_id,),
             camera_id=camera_id,
@@ -438,6 +450,7 @@ class CameraRegistry:
 
     @staticmethod
     def _report(event: str, camera: Camera) -> None:
+        # Never the URL, whose path and query are secret: id, name and path identify a camera.
         _log.info(
             "%s: %s",
             event,
@@ -446,6 +459,5 @@ class CameraRegistry:
                 "camera_id": camera.id,
                 "camera_name": camera.name,
                 "camera_path": camera.path,
-                "camera_url": None if camera.pull_url is None else camera.pull_url.redacted,
             },
         )
