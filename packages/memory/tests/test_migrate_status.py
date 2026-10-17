@@ -121,6 +121,19 @@ def test_a_database_that_is_not_a_memory_is_refused(database: str, migrations: P
         status(database, migrations)
 
 
+def test_status_of_a_foreign_database_says_what_a_run_would_do_not_what_it_did(
+    database: str, migrations: Path
+) -> None:
+    with psycopg.connect(database, autocommit=True) as connection:
+        connection.execute(b"CREATE TABLE invoices (id int)")
+    with pytest.raises(ForeignDatabaseError) as refused:
+        status(database, migrations)
+    message = str(refused.value)
+    assert "a run would be refused" in message
+    assert "nothing was applied" not in message
+    assert "public.invoices" in message
+
+
 def test_status_does_not_wait_for_a_run_in_progress(database: str, migrations: Path) -> None:
     _write(migrations, "0001_people.sql", "CREATE TABLE people (id int);")
     with psycopg.connect(database, autocommit=True) as running:

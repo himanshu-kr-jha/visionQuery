@@ -98,6 +98,67 @@ def test_an_empty_database_is_migrated_even_with_extensions_installed(
     assert migrate(database, migrations) == ("0001_people.sql",)
 
 
+def test_extensions_alone_do_not_make_a_database_foreign(database: str, migrations: Path) -> None:
+    # Their schemas, types and functions are members of the extensions, not someone's objects.
+    _execute(
+        database,
+        "CREATE EXTENSION timescaledb",
+        "CREATE EXTENSION vector",
+        "CREATE EXTENSION pg_stat_statements",
+        "CREATE EXTENSION pgcrypto",
+        "CREATE EXTENSION hstore",
+    )
+    assert migrate(database, migrations) == ("0001_people.sql",)
+
+
+@pytest.mark.parametrize(
+    ("statements", "named"),
+    [
+        (["CREATE TYPE mood AS ENUM ('sad', 'ok')"], "public.mood"),
+        (["CREATE TYPE pair AS (a int, b int)"], "public.pair"),
+        (["CREATE DOMAIN positive AS int CHECK (VALUE > 0)"], "public.positive"),
+        (
+            ["CREATE FUNCTION twice(x int) RETURNS int LANGUAGE sql AS 'SELECT x * 2'"],
+            "public.twice",
+        ),
+        (["CREATE PROCEDURE noop() LANGUAGE sql AS 'SELECT 1'"], "public.noop"),
+        (["CREATE SCHEMA billing"], "billing"),
+    ],
+    ids=["enum", "composite", "domain", "function", "procedure", "schema"],
+)
+def test_a_lone_type_function_or_schema_makes_a_database_foreign_too(
+    database: str, migrations: Path, statements: list[str], named: str
+) -> None:
+    _execute(database, *statements)
+    message = _refused(database, migrations)
+    assert "it has objects and no record" in message
+    assert named in message
+
+
+def test_the_row_and_array_types_of_a_table_are_not_objects_of_their_own(
+    database: str, migrations: Path
+) -> None:
+    # Only the table is named, though it has a row type and an array type in pg_type.
+    _execute(database, "CREATE TABLE invoices (id int)")
+    message = _refused(database, migrations)
+    assert "public.invoices" in message
+    assert "invoices[]" not in message
+    assert "_invoices" not in message
+
+
+def test_a_memory_whose_migrations_made_types_and_functions_keeps_being_migrated(
+    database: str, migrations: Path
+) -> None:
+    (migrations / "0002_kinds.sql").write_text(
+        "CREATE SCHEMA extra;"
+        " CREATE TYPE extra.kind AS ENUM ('a', 'b');"
+        " CREATE FUNCTION extra.one() RETURNS int LANGUAGE sql AS 'SELECT 1';"
+    )
+    assert migrate(database, migrations) == ("0001_people.sql", "0002_kinds.sql")
+    (migrations / "0003_more.sql").write_text("CREATE TABLE more (id int);")
+    assert migrate(database, migrations) == ("0003_more.sql",)
+
+
 def test_another_sessions_temporary_tables_do_not_make_a_database_foreign(
     database: str, migrations: Path
 ) -> None:

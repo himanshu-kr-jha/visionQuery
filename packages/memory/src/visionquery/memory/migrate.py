@@ -131,10 +131,10 @@ class MigrationRefusedError(Exception):
 class ForeignDatabaseError(Exception):
     """The database holds something and is not a VisionQuery memory, so nothing was applied."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, lead: str = "migrations refused, nothing was applied") -> None:
         self.reason = reason
         super().__init__(
-            f"migrations refused, nothing was applied: the database is not empty and is not a "
+            f"{lead}: the database is not empty and is not a "
             f"VisionQuery memory ({reason}); point the URL at an empty database or at this "
             "Deployment's memory"
         )
@@ -192,7 +192,7 @@ def status(
     connection.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
     with connection, connection.transaction():
         if reason := _foreign(connection):
-            raise ForeignDatabaseError(reason)
+            raise ForeignDatabaseError(reason, "a run would be refused, and nothing was changed")
         applied = _applied(connection)
     pending, problems = _plan(files, misnamed, applied)
     return SchemaStatus(tuple(applied), tuple(m.name for m in pending), tuple(problems))
@@ -310,18 +310,54 @@ WHERE c.oid = to_regclass('public.schema_migrations') AND c.relkind = 'r'
 ORDER BY a.attnum
 """
 
-#: The relations someone made in the database, leaving out the record (when it is ours), what
-#: the catalogs and extensions bring, and every session's temporary tables.
-_RELATIONS = b"""
-SELECT format('%%I.%%I', n.nspname, c.relname)
-FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND c.relpersistence <> 't'
-  AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_toast'
-  AND NOT (%(ours)s AND c.oid = to_regclass('public.schema_migrations'))
-  AND NOT EXISTS (
-      SELECT FROM pg_catalog.pg_depend d
-      WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e'
-  )
+#: What someone made in the database, leaving out the record (when it is ours), what the
+#: catalogs and extensions bring (members of an extension depend on it with type `e`), and every
+#: session's temporary tables: relations, schemas other than `public`, types that are not
+#: implicit (a relation's row type, an array type, a multirange type), and functions,
+#: procedures and aggregates.
+_OBJECTS = b"""
+SELECT name FROM (
+    SELECT format('%%I.%%I', n.nspname, c.relname) AS name
+    FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+    WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND c.relpersistence <> 't'
+      AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_toast'
+      AND NOT (%(ours)s AND c.oid = to_regclass('public.schema_migrations'))
+      AND NOT EXISTS (
+          SELECT FROM pg_catalog.pg_depend d
+          WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid
+            AND d.deptype = 'e'
+      )
+  UNION ALL
+    SELECT n.nspname
+    FROM pg_catalog.pg_namespace n
+    WHERE n.nspname <> 'public' AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
+      AND NOT EXISTS (
+          SELECT FROM pg_catalog.pg_depend d
+          WHERE d.classid = 'pg_catalog.pg_namespace'::regclass AND d.objid = n.oid
+            AND d.deptype = 'e'
+      )
+  UNION ALL
+    SELECT format('%%I.%%I', n.nspname, t.typname)
+    FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+    WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
+      AND t.typcategory <> 'A' AND t.typtype <> 'm'
+      AND (t.typrelid = 0
+           OR (SELECT relkind FROM pg_catalog.pg_class WHERE oid = t.typrelid) = 'c')
+      AND NOT EXISTS (
+          SELECT FROM pg_catalog.pg_depend d
+          WHERE d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = t.oid
+            AND d.deptype = 'e'
+      )
+  UNION ALL
+    SELECT format('%%I.%%I', n.nspname, p.proname)
+    FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
+      AND NOT EXISTS (
+          SELECT FROM pg_catalog.pg_depend d
+          WHERE d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = p.oid
+            AND d.deptype = 'e'
+      )
+) AS found
 ORDER BY 1
 LIMIT 4
 """
@@ -337,10 +373,10 @@ def _foreign(connection: psycopg.Connection) -> str | None:
         row = connection.execute("SELECT EXISTS (SELECT FROM public.schema_migrations)").fetchone()
         if row and row[0]:
             return None
-    relations = [str(name) for (name,) in connection.execute(_RELATIONS, {"ours": ours})]
-    if not relations:
+    objects = [str(name) for (name,) in connection.execute(_OBJECTS, {"ours": ours})]
+    if not objects:
         return None
-    named = ", ".join(relations[:3]) + (" and more" if len(relations) > 3 else "")
+    named = ", ".join(objects[:3]) + (" and more" if len(objects) > 3 else "")
     return f"it has objects and no record of VisionQuery migrations: {named}"
 
 
