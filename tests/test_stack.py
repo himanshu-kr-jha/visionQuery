@@ -749,15 +749,17 @@ def _make_clip(directory: Path) -> None:
 
 
 def _probe(stack: Stack, camera: str, seconds: float) -> dict[str, Any]:
-    """Read `seconds` of the camera from MediaMTX over RTSP, as a client on the host would,
-    and say what its video is and how many frames were decoded."""
-    host, port = stack.address("mediamtx", 8554)
+    """Read `seconds` of the camera from MediaMTX over RTSP, as a client on the project's
+    network would (a container on it works on every host, unlike `--network host`, which
+    Docker Desktop does not give the host's network), and say what its video is and how many
+    frames were decoded."""
     probe = subprocess.run(
-        ["docker", "run", "--rm", "--network", "host", "--entrypoint", "/ffprobe",
+        ["docker", "run", "--rm", "--network", f"{stack.project}_default",
+         "--entrypoint", "/ffprobe",
          FFMPEG_IMAGE, "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
          "-count_frames", "-read_intervals", f"%+{seconds}",
          "-show_entries", "stream=codec_name,width,height,has_b_frames,nb_read_frames",
-         "-of", "json", f"rtsp://{host}:{port}/{camera}"],
+         "-of", "json", f"rtsp://mediamtx:8554/{camera}"],
         capture_output=True,
         text=True,
         check=False,

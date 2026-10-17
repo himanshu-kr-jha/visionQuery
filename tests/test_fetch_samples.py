@@ -182,6 +182,20 @@ def test_a_downloaded_clip_is_readable_by_the_fake_cameras_user(
     assert (tmp_path / "walk.mp4").stat().st_mode & 0o004
 
 
+def test_a_directory_and_clips_made_private_are_opened_to_the_fake_cameras_user(
+    server: Server, tmp_path: Path
+) -> None:
+    # As after `umask 077`: the clip is skipped, but would otherwise stay unreadable.
+    samples = tmp_path / "samples"
+    samples.mkdir(mode=0o700)
+    samples.chmod(0o700)
+    (samples / "walk.mp4").write_bytes(VIDEO)
+    (samples / "walk.mp4").chmod(0o600)
+    assert fetch(_clip(server.url("walk.mp4")), samples) is Outcome.PRESENT
+    assert samples.stat().st_mode & 0o005 == 0o005
+    assert (samples / "walk.mp4").stat().st_mode & 0o004
+
+
 def test_a_clip_already_present_is_not_downloaded_again(server: Server, tmp_path: Path) -> None:
     (tmp_path / "walk.mp4").write_bytes(VIDEO)
     assert fetch(_clip(server.url("walk.mp4")), tmp_path) is Outcome.PRESENT

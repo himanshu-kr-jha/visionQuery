@@ -13,8 +13,9 @@ to the samples directory. Each video, and the test pattern, is first prepared
 once into the cache as a camera would send it (H.264, no B-frames, a keyframe every second, no
 audio) and then looped in real time without transcoding, so a camera costs next to no CPU; a
 video is prepared again only when its content changes, and shows the test pattern meanwhile.
-A video that is not in the samples directory is replaced by the test pattern, with a warning,
-until the publisher restarts: `make up` then works before `make fetch-samples`.
+A video that is not in the samples directory, or that the publisher cannot read, is replaced by
+the test pattern, with a warning saying which and how to fix it, until the publisher restarts:
+`make up` then works before `make fetch-samples`.
 
 `health` exits 0 when every camera's ffmpeg has reported a frame in the last few seconds.
 """
@@ -29,7 +30,7 @@ import re
 import signal
 import sys
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import NoReturn
@@ -95,6 +96,33 @@ def cache_key(source: Path | None) -> str:
     return digest.hexdigest()[:32]
 
 
+def find_sample(samples: Path, source: str, uid: int | None = None) -> Path | str:
+    """The video `source` in the samples directory, or why it cannot be used: not there, there
+    but not readable by this user, or in a directory this user cannot look into."""
+    path = samples / source
+    uid = os.getuid() if uid is None else uid
+    try:
+        path.stat()
+    except FileNotFoundError:
+        return (
+            f"{source} is not in the samples directory, so it gets the test pattern instead; "
+            "run `make fetch-samples` (or add the video), then restart fake-cameras"
+        )
+    except PermissionError:
+        return (
+            f"the samples directory cannot be listed by uid {uid}, so {source} gets the test "
+            "pattern instead; run `chmod a+rX samples` (and `chmod a+r` on its videos), then "
+            "restart fake-cameras"
+        )
+    if not path.is_file() or not os.access(path, os.R_OK):
+        return (
+            f"{source} exists but is not readable by uid {uid}, so it gets the test pattern "
+            f"instead; run `chmod a+r samples/{source}` (or `chmod -R a+rX samples`), then "
+            "restart fake-cameras"
+        )
+    return path
+
+
 def _quiet(ffmpeg: str) -> list[str]:
     return [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error"]
 
@@ -132,6 +160,16 @@ def prepare_command(source: Path | None, output: Path, ffmpeg: str = "ffmpeg") -
         "-movflags", "+faststart",
         "-f", "mp4", str(output),
     ]  # fmt: skip
+
+
+def restart_failures(failures: int, published: float) -> int:
+    """The failures in a row after an ffmpeg that published for `published` seconds exited."""
+    return 0 if published > PUBLISHED_LONG_ENOUGH else failures + 1
+
+
+def restart_delay(failures: int) -> int:
+    """Seconds to wait before restarting after that many failures in a row."""
+    return BACKOFF[min(max(failures - 1, 0), len(BACKOFF) - 1)]
 
 
 def not_publishing(
@@ -203,8 +241,16 @@ async def _collect(stderr: asyncio.StreamReader, into: list[str]) -> None:
 class Publisher:
     """Runs and restarts one ffmpeg per camera, and records when each last sent a frame."""
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
         self._settings = settings
+        # Replaceable, so that tests need not wait out the restart backoff.
+        self._clock = clock
+        self._sleep = sleep
         self._pattern = settings.cache / f"{cache_key(None)}.mp4"
         self._progress: dict[str, float] = {}
         self._prepared: dict[Path, asyncio.Task[None]] = {}
@@ -225,8 +271,8 @@ class Publisher:
         """The camera's video, or None for the test pattern."""
         if camera.source == SYNTHETIC:
             return None
-        path = self._settings.samples / camera.source
-        return path if path.is_file() else None
+        found = find_sample(self._settings.samples, camera.source)
+        return found if isinstance(found, Path) else None
 
     async def _prune_cache(self) -> None:
         """Delete prepared clips no camera uses now, and preparations a kill interrupted."""
@@ -241,13 +287,8 @@ class Publisher:
         video = self._video(camera)
         if video is None:
             if camera.source != SYNTHETIC:
-                _LOG.warning(
-                    "%s: %s is not in the samples directory, so it gets the test pattern "
-                    "instead; run `make fetch-samples` (or add the video), then restart "
-                    "fake-cameras",
-                    camera.name,
-                    camera.source,
-                )
+                problem = find_sample(self._settings.samples, camera.source)
+                _LOG.warning("%s: %s", camera.name, problem)
             await self._keep_publishing(camera, self._pattern, url, "the test pattern")
         prepared = self._settings.cache / f"{await asyncio.to_thread(cache_key, video)}.mp4"
         if not prepared.exists():
@@ -273,13 +314,13 @@ class Publisher:
         command = publish_command(source, url, self._settings.ffmpeg)
         failures = 0
         while True:
-            started = time.monotonic()
+            started = self._clock()
             ended = await self._run(camera.name, command)
             self._progress.pop(camera.name, None)
-            failures = 0 if time.monotonic() - started > PUBLISHED_LONG_ENOUGH else failures + 1
-            delay = BACKOFF[min(max(failures - 1, 0), len(BACKOFF) - 1)]
+            failures = restart_failures(failures, self._clock() - started)
+            delay = restart_delay(failures)
             _LOG.warning("%s: ffmpeg %s; restarting in %d s", camera.name, ended, delay)
-            await asyncio.sleep(delay)
+            await self._sleep(delay)
 
     async def _prepare(self, source: Path | None, output: Path) -> None:
         """Prepare `source` (None for the test pattern) into `output`, once however many

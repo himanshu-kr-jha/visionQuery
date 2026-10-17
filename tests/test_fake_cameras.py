@@ -5,7 +5,10 @@ configuration, the ffmpeg commands it runs, and how it supervises them, with a s
 ffmpeg that reports progress the way the real one does.
 """
 
+import asyncio
+import contextlib
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -17,14 +20,19 @@ from pathlib import Path
 
 import pytest
 from fake_cameras import (
+    PUBLISHED_LONG_ENOUGH,
     SYNTHETIC,
     Camera,
+    Ended,
+    Settings,
     cache_key,
+    find_sample,
     not_publishing,
     parse_cameras,
     prepare_command,
     publish_command,
 )
+from fake_cameras import Publisher as RealPublisher
 
 SCRIPT = Path(__file__).resolve().parents[1] / "docker" / "fake-cameras" / "fake_cameras.py"
 
@@ -443,3 +451,134 @@ def test_the_test_pattern_is_prepared_once_for_every_camera_showing_it(
     assert len([c for c in calls if "lavfi" in c]) == 1
     assert sorted(_publishing(calls)) == [f"rtsp://mediamtx.test:8554/{n}" for n in "abc"]
     assert _inputs(calls) == {str(p.pattern)}
+
+
+# --- Videos that cannot be used ---------------------------------------------------------------
+
+needs_a_user_without_privileges = pytest.mark.skipif(
+    os.geteuid() == 0, reason="root reads whatever the mode says"
+)
+
+
+def test_a_video_that_is_there_is_found(tmp_path: Path) -> None:
+    (tmp_path / "gate.avi").write_bytes(b"x")
+    assert find_sample(tmp_path, "gate.avi") == tmp_path / "gate.avi"
+
+
+def test_a_missing_video_is_to_be_fetched(tmp_path: Path) -> None:
+    problem = find_sample(tmp_path, "gate.avi")
+    assert isinstance(problem, str)
+    assert "gate.avi is not in the samples directory" in problem
+    assert "make fetch-samples" in problem
+
+
+@needs_a_user_without_privileges
+def test_an_unreadable_video_is_not_called_missing(tmp_path: Path) -> None:
+    video = tmp_path / "gate.avi"
+    video.write_bytes(b"x")
+    video.chmod(0o000)
+    problem = find_sample(tmp_path, "gate.avi", uid=10001)
+    assert isinstance(problem, str)
+    assert "exists but is not readable by uid 10001" in problem
+    assert "chmod" in problem
+    assert "not in the samples directory" not in problem
+    assert "make fetch-samples" not in problem
+
+
+@needs_a_user_without_privileges
+def test_a_directory_that_cannot_be_listed_is_not_called_missing(tmp_path: Path) -> None:
+    samples = tmp_path / "samples"
+    samples.mkdir()
+    (samples / "gate.avi").write_bytes(b"x")
+    samples.chmod(0o000)
+    try:
+        problem = find_sample(samples, "gate.avi", uid=10001)
+    finally:
+        samples.chmod(0o755)
+    assert isinstance(problem, str)
+    assert "samples directory cannot be listed by uid 10001" in problem
+    assert "chmod a+rX samples" in problem
+    assert "make fetch-samples" not in problem
+
+
+@needs_a_user_without_privileges
+def test_an_unreadable_video_gets_the_test_pattern_and_the_right_advice(
+    publisher: Callable[[str], Publisher],
+) -> None:
+    p = publisher("gate=meva-school-g299.avi")
+    video = p.samples / "meva-school-g299.avi"
+    video.write_bytes(b"x")
+    video.chmod(0o000)
+    p.start()
+    _eventually(lambda: p.health().returncode == 0)
+    output = p.stop()
+    assert _inputs(p.ffmpeg_calls()) == {str(p.pattern)}
+    assert "exists but is not readable" in output
+    assert "make fetch-samples" not in output
+
+
+# --- Restarting an ffmpeg that exited ---------------------------------------------------------
+
+
+class _Time:
+    """A clock that moves only when an ffmpeg runs or the publisher sleeps."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        #: How long each ffmpeg to come ran before it exited.
+        self.runs: list[float] = []
+        self.delays: list[float] = []
+
+    async def sleep(self, seconds: float) -> None:
+        self.delays.append(seconds)
+        if not self.runs:
+            raise asyncio.CancelledError
+
+
+def _restart_delays(tmp_path: Path, runs: list[float]) -> list[float]:
+    """The delays before each restart of an ffmpeg that ran for `runs` seconds each."""
+    time_ = _Time()
+    time_.runs = list(runs)
+    settings = Settings(
+        cameras=[Camera("lobby", SYNTHETIC)],
+        rtsp="rtsp://mediamtx.test:8554",
+        ffmpeg="ffmpeg",
+        samples=tmp_path,
+        cache=tmp_path,
+        status=tmp_path / "status.json",
+    )
+    publisher = RealPublisher(settings, clock=lambda: time_.now, sleep=time_.sleep)
+
+    async def run(label: str, command: list[str]) -> Ended:
+        time_.now += time_.runs.pop(0)
+        return Ended(1, [])
+
+    publisher._run = run  # type: ignore[method-assign]
+    keep_publishing = publisher._keep_publishing  # pyright: ignore[reportPrivateUsage]
+    with contextlib.suppress(asyncio.CancelledError):
+        asyncio.run(keep_publishing(settings.cameras[0], tmp_path / "x.mp4", "u", "l"))
+    return time_.delays
+
+
+def test_a_camera_that_keeps_failing_waits_longer_each_time_up_to_the_last_backoff(
+    tmp_path: Path,
+) -> None:
+    assert _restart_delays(tmp_path, [0.1] * 6) == [1, 2, 4, 8, 8, 8]
+
+
+def test_a_camera_that_published_long_enough_starts_again_at_the_shortest_backoff(
+    tmp_path: Path,
+) -> None:
+    long = PUBLISHED_LONG_ENOUGH + 1
+    assert _restart_delays(tmp_path, [0.1, 0.1, 0.1, long, 0.1, 0.1]) == [1, 2, 4, 1, 1, 2]
+    # Exactly as long as it takes is not long enough.
+    assert _restart_delays(tmp_path, [0.1, PUBLISHED_LONG_ENOUGH, 0.1]) == [1, 2, 4]
+
+
+def test_a_restart_is_logged_with_its_delay(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="fake-cameras"):
+        _restart_delays(tmp_path, [0.1, 0.1])
+    assert "restarting in 1 s" in caplog.text
+    assert "restarting in 2 s" in caplog.text

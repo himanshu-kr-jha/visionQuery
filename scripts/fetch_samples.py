@@ -115,7 +115,11 @@ def fetch(clip: Clip, directory: Path, cancelled: threading.Event | None = None)
     """Make `directory/clip.file` the clip the manifest describes, downloading it if needed.
     Setting `cancelled` stops the download, which then fails."""
     target = directory / clip.file
+    # The fake cameras run as a user of their own, and read the directory (and, below, each
+    # clip) through a bind mount: a umask of 077 would otherwise lock them out.
+    directory.chmod(directory.stat().st_mode | 0o005)
     if target.is_file() and _digest(target) == clip.sha256:
+        target.chmod(target.stat().st_mode | 0o004)
         return Outcome.PRESENT
     part = target.with_name(f"{target.name}.part")
     try:
@@ -136,7 +140,6 @@ def fetch(clip: Clip, directory: Path, cancelled: threading.Event | None = None)
         # A mismatch, or an interrupted run: never leave a partial file behind.
         part.unlink(missing_ok=True)
         raise
-    # Readable by the fake cameras, which run as a user of their own.
     part.chmod(0o644)
     part.replace(target)
     return Outcome.FETCHED

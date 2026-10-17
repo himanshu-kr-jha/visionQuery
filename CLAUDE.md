@@ -148,6 +148,7 @@ The sample videos are listed with their checksums and licenses in `samples/manif
 Every image is pinned to an exact tag and its digest; MediaMTX's configuration is `docker/mediamtx/mediamtx.yml`.
 `tests/test_compose.py` checks all of this without starting anything (it needs the `docker` CLI, not the daemon) and runs with `make check`.
 The stack tests in `tests/test_stack.py` bring each profile up under a throwaway project with ephemeral ports and take it down with its volumes; they are marked `stack`, left out of `make check`, and include Triton only with `VISIONQUERY_TEST_TRITON=gpu` (or `=cpu` without a GPU), because its image is about 9 GB to download and 25 GB on disk.
+The tests read the cameras with an ffprobe container on the project's network (`mediamtx:8554`), not `--network host`, so they do not depend on a Linux host.
 The `dev` profile's stack test uses test patterns and a clip it makes itself, so it needs no download; the real samples are tested only with `VISIONQUERY_TEST_SAMPLES=1`, which runs `make fetch-samples` first.
 
 The memory's tests run against a real Postgres with TimescaleDB and pgvector.
