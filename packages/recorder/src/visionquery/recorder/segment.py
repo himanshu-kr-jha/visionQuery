@@ -1,4 +1,4 @@
-"""A Segment on disk, from its first Fragment until it is finished, and after a crash.
+"""A Segment on disk, from its first Fragment until it is finished, and after a crash (ADR 0017).
 
 A Segment is one file of a Camera's Footage, in one epoch-aligned window (`window`). Its files,
 under the camera's directory, are named for the day and the window it starts in (UTC) and the

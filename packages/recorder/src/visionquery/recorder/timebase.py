@@ -12,7 +12,8 @@ forward is still better than the wall, and with no good reading ever, the wall c
 said to be unverified. The Segment is kept either way, because discarding real Footage to avoid
 stating an uncertainty that can simply be stated is the worse error.
 
-Adapted from phyOS's Photon recorder (`adapters.photon.timebase`).
+Why arrival on this clock, and not the cameras' own timestamps: ADR 0017. Adapted from phyOS's
+Photon recorder (`adapters.photon.timebase`).
 """
 
 import ctypes
