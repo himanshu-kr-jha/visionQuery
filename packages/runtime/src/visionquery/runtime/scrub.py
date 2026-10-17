@@ -8,7 +8,7 @@ Scrubbing runs on every log record, including ones an attacker or a broken libra
 huge, so every step here is linear in the length of the text.
 
 Known limits, accepted because this is defence in depth and not a guarantee (the camera
-registry rejects camera URLs it cannot scrub, ADR 0012):
+registry never logs a camera URL, ADR 0014):
 
 - A plain-text password containing whitespace, or one of `,;&)]}` outside a URL, leaks after
   that character, because an unquoted value ends there.

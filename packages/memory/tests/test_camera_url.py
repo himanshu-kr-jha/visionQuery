@@ -117,6 +117,10 @@ def test_a_url_cannot_be_pickled_because_that_would_carry_the_full_url() -> None
         "rtsp://10.0.0/s",
         "rtsp://-cam.example/s",
         "rtsp://cam..example/s",
+        "rtsp://_/s",  # an underscore only inside a label
+        "rtsp://_cam/s",
+        "rtsp://cam_/s",
+        "rtsp://cam._x.lan/s",
         "rtsp://[fd00::7/s",
         "rtsp://[not-an-address]/s",
         "rtsp://[fe80::1%25eth0]/s",

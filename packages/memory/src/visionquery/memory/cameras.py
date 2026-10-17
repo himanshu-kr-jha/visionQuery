@@ -119,7 +119,7 @@ _URL = re.compile(
     r"(?::(?P<port>[0-9]{1,5}))?"
     rf"(?P<rest>(?:/{_SEGMENT})*(?:\?{_QUERY})?)"
 )
-_LABEL = re.compile(r"[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?")
+_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?")
 _URL_FORM = (
     "must be rtsp:// or rtsps:// followed by [user[:password]@]host[:port][/path][?query], "
     "with any space, @, /, ?, # or % in the user or password percent-encoded"

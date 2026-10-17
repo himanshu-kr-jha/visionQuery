@@ -9,7 +9,7 @@ The log scrubber (ADR 0012) knows only a URL's user and password and a fixed lis
 The user, password, path and query of a pulled Camera's URL are all secret.
 
 - The registry stores only the public part (scheme, host and port) in `pull_url`, and the secrets apart from it: the user and password in `pull_credentials`, the path and query in `pull_target`.
-  Removing a Camera clears all three secrets' columns (`pull_credentials` and `pull_target`), keeping its row, id, name and the public part.
+  Removing a Camera clears both secrets' columns (`pull_credentials` and `pull_target`), keeping its row, id, name and the public part.
 - What is shown, logged or serialised is the redacted form, `rtsps://***@192.168.1.1:7441/***`: `***@` stands for the user and password and is present only when the URL has them, and `/***` stands for the path and query and is present only when the URL has any.
   The full URL is available only through `CameraUrl.get_secret_value()`, for whatever has to connect.
   A `CameraUrl` is neither pickled nor copied, because that would carry the full URL.
@@ -21,5 +21,5 @@ The user, password, path and query of a pulled Camera's URL are all secret.
 
 This supersedes the "Camera URLs" section of ADR 0012, which refused camera URLs the scrubber cannot scrub.
 The scrubber remains a defence in depth for everything else that is logged.
-Anything that needs a URL of a Camera for display shows the redacted form, so the path of a pulled stream is never visible to an Operator in the interface; the Operator who needs it has it from the camera's own configuration.
+Anything that needs a URL of a Camera for display shows the redacted form, so the path and query of a pulled Camera's URL are never visible to an Operator in the interface; the Operator who needs it has it from the camera's own configuration.
 The secrets are stored in plaintext, as the password already was; encrypting them at rest is a separate decision for the Deployment's setup.
