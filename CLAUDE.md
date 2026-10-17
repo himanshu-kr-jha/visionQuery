@@ -49,9 +49,8 @@ The process role names (tech lead, `senior-developer`, `developer`, `tester`, `p
 The PR title must be a Conventional Commit `type(scope): subject`, because it becomes the squash commit subject.
 The squash commit body is a short summary plus `Closes #<n>`, without the template checklist.
 Nobody pushes directly to `main` or `develop`.
-Once the rulesets are applied (see "After CI first lands" under Commands), the required CI checks are the merge gate: GitHub refuses a merge until every one has passed.
-Until then, the tester's full local suite on the final commit stands in for them.
-For a docs-only or config-only change, which has no tester run, the `pr-reviewer` verdict on the final commit stands in.
+A PR whose head has a CI run merges only when every CI check on that head is green; the rulesets (see "After CI first lands" under Commands) make GitHub enforce it.
+The tester's full local suite on the final commit stands in only for a head with no CI run; for a docs-only or config-only change, which has no tester run, the `pr-reviewer` verdict on the final commit does.
 
 ## The team
 
@@ -165,8 +164,8 @@ Run everything from the repository root.
 `make lint` runs both ruff commands and actionlint over `.github/workflows/`.
 After changing a dependency, run `uv lock` and commit `uv.lock` with the change.
 
-**CI** is `.github/workflows/ci.yml`, run on every PR into `develop` or `main`, every push to them, and by hand (`gh workflow run ci.yml`).
-Each job runs the `make` target a developer runs, so CI and a local run never drift (`tests/test_ci.py` fails when `make check` gains a target no job runs): `lint`, `typecheck`, `contracts`, `test` (`make test` against a Postgres service of the tests' own image), `web` (`make web api-types-check`), `stack` (`make test-stack` without Triton, about 3 minutes), and `commits`, which fails when a commit of the PR, or its title or body, carries agent attribution (`scripts/check_attribution.py`), or when the title is not a Conventional Commit (`scripts/check_commit_message.py`).
+**CI** is `.github/workflows/ci.yml`, run on every PR into `develop` or `main`, and every push to them (there is no manual trigger, so a run cannot replace a required check's result on the same commit; repeat one with `gh run rerun`).
+Each job runs the `make` target a developer runs, so CI and a local run never drift (`tests/test_ci.py` fails when `make check` gains a target no job runs): `lint`, `typecheck`, `contracts`, `test` (`make test` against a Postgres service of the tests' own image), `web` (`make web api-types-check`), `stack` (`make test-stack` without Triton, about 7 minutes), and `commits`, which fails when a commit of the PR, or its title or body, carries agent attribution (`scripts/check_attribution.py`), or when the title is not a Conventional Commit (`scripts/check_commit_message.py`).
 The `develop` and `main` rulesets require every job, with the PR up to date with its base, and `make branch-rules` (`scripts/branch_rules.py`) is how they are set: it derives the checks from the workflow's job ids, so after adding or renaming a job, run it once the change has passed on `develop`.
 Actions are pinned by full commit SHA with the version in a comment, and uv is the version the Dockerfile builds with (`tests/test_ci.py` checks both).
 GitHub sets `CI`, and with it set the root `conftest.py` turns a test skipped for a missing prerequisite into a failure: such a skip's reason starts with "needs " (`needs Postgres: ...`), and a new one must too.
