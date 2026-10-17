@@ -43,7 +43,7 @@ from urllib.parse import quote
 
 import psycopg
 import pytest
-from fake_cameras import parse_cameras
+from fake_cameras import parse_cameras, prepare_command
 from visionquery.memory.migrate import MIGRATIONS
 
 pytestmark = pytest.mark.stack
@@ -894,6 +894,9 @@ def _marker_offsets(stack: Stack, cameras: tuple[str, ...], seconds: float) -> d
             ["docker", "run", "--rm", "--network", f"{stack.project}_default",
              "--entrypoint", "/ffmpeg", FFMPEG_IMAGE,
              "-loglevel", "error", "-fflags", "nobuffer", "-rtsp_transport", "tcp",
+             # One decoding thread: with one per core, the decoder holds back a picture per
+             # thread, which would put every camera a machine-dependent second behind the clock.
+             "-threads", "1",
              "-i", f"rtsp://mediamtx:8554/{camera}", "-t", str(seconds), "-an",
              # One byte per frame: the brightness of the whole picture, as stored in the video.
              "-vf", "scale=1:1:flags=area,format=yuv420p,extractplanes=y",
@@ -942,11 +945,21 @@ def _marker_offsets(stack: Stack, cameras: tuple[str, ...], seconds: float) -> d
     return offsets
 
 
+#: How far a camera may be from the moment of its loop that the wall clock says: each ffmpeg
+#: sends its first half second at once (`-re`), and keeps that lead less its own start-up.
+WALL_CLOCK_WITHIN = 0.75
+
+
 def _assert_in_step(stack: Stack, cameras: tuple[str, ...], within: float = 1.0) -> None:
-    """The cameras show the same moment of their loops, to within `within` seconds."""
+    """The cameras show the same moment of their loops, to within `within` seconds of each
+    other, and to within WALL_CLOCK_WITHIN of the moment the wall clock says."""
     # Longer than a loop, so that the cameras start over while they are read.
     offsets = _marker_offsets(stack, cameras, seconds=MARKER_PERIOD + 8)
     print(f"seconds ahead of the wall clock: { {c: round(o, 2) for c, o in offsets.items()} }")
+    for camera, offset in offsets.items():
+        assert abs(offset) <= WALL_CLOCK_WITHIN, (
+            f"{camera} is {offset:+.2f} s from the wall clock: {offsets}"
+        )
     first = cameras[0]
     for camera in cameras[1:]:
         gap = (offsets[camera] - offsets[first] + MARKER_PERIOD / 2) % MARKER_PERIOD
@@ -1000,6 +1013,39 @@ def test_a_camera_loops_its_video_prepared_as_a_camera_sends_it(dev_stack: Stack
     assert int(stream["nb_read_frames"]) >= 0.8 * seconds * SAMPLE_RATE, stream
     # The sample had B-frames; a browser's WebRTC cannot play them, and no camera sends them.
     assert stream["has_b_frames"] == 0
+
+
+def test_a_sample_at_a_fractional_frame_rate_is_prepared_with_keyframes_on_whole_seconds(
+    tmp_path: Path,
+) -> None:
+    # 29.97 frames a second, as many cameras record: no picture after the first is on a whole
+    # second, where every camera joins the timeline.
+    tmp_path.chmod(0o777)
+
+    def ffmpeg(tool: str, *arguments: str) -> str:
+        return subprocess.run(
+            ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
+             "--volume", f"{tmp_path}:/w", "--entrypoint", tool, FFMPEG_IMAGE, *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        ).stdout  # fmt: skip
+
+    ffmpeg("/ffmpeg", "-loglevel", "error", "-f", "lavfi",
+           "-i", "testsrc2=duration=8:size=320x240:rate=30000/1001", "-c:v", "libx264",
+           "/w/ntsc.mp4")  # fmt: skip
+    ffmpeg(*prepare_command(Path("/w/ntsc.mp4"), Path("/w/prepared.mp4"), "/ffmpeg", 6))
+    keyframes = ffmpeg(
+        "/ffprobe", "-v", "error", "-select_streams", "v:0", "-skip_frame", "nokey",
+        "-show_entries", "frame=pts_time", "-of", "csv=p=0", "/w/prepared.mp4",
+    )  # fmt: skip
+    assert [float(t.strip(",")) for t in keyframes.split()] == [0, 1, 2, 3, 4, 5]
+    duration = ffmpeg(
+        "/ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
+        "/w/prepared.mp4",
+    )  # fmt: skip
+    assert float(duration) == 6
 
 
 def test_cameras_looping_samples_are_in_step_whatever_their_length_and_start(

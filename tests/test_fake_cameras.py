@@ -10,12 +10,13 @@ import contextlib
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
 import textwrap
 import time
-from collections.abc import Callable, Coroutine, Iterator
+from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import NoReturn
@@ -25,7 +26,9 @@ import pytest
 from fake_cameras import (
     DURATION,
     HUNG_AFTER,
+    PLAYLIST_END_MARGIN,
     PLAYLIST_HOURS,
+    PLAYLIST_MOST_PASSES,
     PUBLISHED_LONG_ENOUGH,
     SYNTHETIC,
     Camera,
@@ -36,6 +39,7 @@ from fake_cameras import (
     not_publishing,
     parse_cameras,
     playlist,
+    playlist_seconds,
     prepare_command,
     publish_command,
     redact,
@@ -207,6 +211,23 @@ def test_a_playlist_from_the_beginning_has_no_inpoint() -> None:
     assert len(entries) == PLAYLIST_HOURS * 3600 // 20
 
 
+def test_a_playlist_stays_small_however_short_the_duration() -> None:
+    # A day of one-second loops would be 86,400 entries; it ends sooner, and rejoins.
+    text = playlist(Path("/cache/abc.mp4"), 0, 1)
+    assert len(_entries(text)) == PLAYLIST_MOST_PASSES
+    assert len(text.encode()) < 256 * 1024
+    # Long enough to need no rejoining more than every hour or so at any sensible duration.
+    assert PLAYLIST_MOST_PASSES >= 3600
+    assert len(_entries(playlist(Path("/cache/abc.mp4"), 0, 20))) < PLAYLIST_MOST_PASSES
+
+
+@pytest.mark.parametrize(("start", "duration"), [(101, 300), (0, 20), (0, 1), (19, 20)])
+def test_the_length_of_a_playlist_is_what_its_entries_add_up_to(start: int, duration: int) -> None:
+    entries = _entries(playlist(Path("/cache/abc.mp4"), start, duration))
+    listed = sum(int(e[-1].removeprefix("duration ")) for e in entries)
+    assert playlist_seconds(start, duration) == listed
+
+
 def test_a_playlist_quotes_the_names_it_lists() -> None:
     assert _entries(playlist(Path("/cache/it's.mp4"), 0, 20))[0][0] == r"file '/cache/it'\''s.mp4'"
 
@@ -264,6 +285,19 @@ def test_every_sample_is_prepared_to_the_same_duration() -> None:
     assert "stop_duration=20" in _after(other, "-vf")
 
 
+def test_a_sample_is_prepared_at_a_whole_number_of_frames_a_second() -> None:
+    # At 29.97 frames a second no picture falls on a whole second after the first, so neither
+    # would a keyframe, where every camera joins the timeline: its own rate, rounded, does.
+    command = prepare_command(Path("/samples/a.avi"), Path("/cache/a.part"))
+    # The filters, split at the commas between them, not at those escaped inside one.
+    filters = re.split(r"(?<!\\),", _after(command, "-vf"))
+    rate = r"fps=fps=max(1\,round(source_fps))"
+    assert rate in filters
+    # Its pictures counted from 0 first, and the last held only once the rate is whole.
+    assert filters.index("setpts=PTS-STARTPTS") < filters.index(rate)
+    assert filters.index(rate) < [f.startswith("tpad=") for f in filters].index(True)
+
+
 def test_a_sample_is_prepared_again_when_the_duration_changes(tmp_path: Path) -> None:
     sample = tmp_path / "walk.mp4"
     sample.write_bytes(b"one")
@@ -305,10 +339,23 @@ def test_a_camera_is_publishing_while_its_frames_keep_coming() -> None:
     assert not_publishing(cameras[:1], progress, now) == []
 
 
+def test_the_time_without_a_frame_after_which_a_camera_is_not_publishing_is_a_setting() -> None:
+    cameras = [Camera("a", SYNTHETIC)]
+    assert not_publishing(cameras, {"a": 995.0}, 1000.0, stale_after=10) == []
+    assert not_publishing(cameras, {"a": 995.0}, 1000.0, stale_after=2) == ["a"]
+    env = {"FAKE_CAMERAS": "a=synthetic"}
+    assert Settings.from_environment(env).stale_after == fake_cameras.STALE_AFTER
+    assert Settings.from_environment({**env, "FAKE_CAMERAS_STALE_AFTER": "2"}).stale_after == 2
+    with pytest.raises(ValueError, match="FAKE_CAMERAS_STALE_AFTER"):
+        Settings.from_environment({**env, "FAKE_CAMERAS_STALE_AFTER": "0"})
+
+
 # --- Supervising ffmpeg -----------------------------------------------------------------------
 
 #: Stands in for ffmpeg: logs its arguments, reports progress like `-progress pipe:1` until
-#: told to stop, or exits at once when the file named by FAKE_FFMPEG_FAIL exists. Preparing a
+#: told to stop, or exits at once when the file named by FAKE_FFMPEG_FAIL exists. While the file
+#: named by FAKE_FFMPEG_STALL exists its frame count stops, as a real ffmpeg's does when its
+#: write blocks, but it goes on reporting it, as a real ffmpeg does. Preparing a
 #: sample (not the test pattern) takes until the file named by FAKE_FFMPEG_HOLD is gone, and
 #: fails while the file named by FAKE_FFMPEG_FAIL_PREPARE exists.
 FAKE_FFMPEG = textwrap.dedent(
@@ -333,7 +380,9 @@ FAKE_FFMPEG = textwrap.dedent(
         sys.exit(1)
     frame = 0
     while True:
-        frame += 15
+        # A write MediaMTX stopped reading blocks, and ffmpeg goes on reporting the same count.
+        if not Path(os.environ["FAKE_FFMPEG_STALL"]).exists():
+            frame += 15
         print(f"frame={frame}\\nprogress=continue", flush=True)
         time.sleep(0.2)
     """
@@ -352,6 +401,7 @@ class Publisher:
         self.fail = tmp_path / "fail"
         self.hold = tmp_path / "hold"
         self.fail_prepare = tmp_path / "fail-prepare"
+        self.stall = tmp_path / "stall"
         #: Where the test pattern is prepared.
         self.pattern = self.cache / f"{cache_key(None)}.mp4"
         for directory in (self.samples, self.cache):
@@ -371,6 +421,7 @@ class Publisher:
             "FAKE_FFMPEG_FAIL": str(self.fail),
             "FAKE_FFMPEG_HOLD": str(self.hold),
             "FAKE_FFMPEG_FAIL_PREPARE": str(self.fail_prepare),
+            "FAKE_FFMPEG_STALL": str(self.stall),
             "FAKE_CAMERAS_PREPARE_RETRY": "0.05",
         }
         self.process: subprocess.Popen[str] | None = None
@@ -490,6 +541,24 @@ def test_a_camera_that_fails_is_restarted_and_is_unhealthy_meanwhile(
         "Connection refused, and 1 more line); restarting in 1 s"
     )
     assert "Could not write header" not in output
+
+
+def test_a_camera_whose_frame_count_stops_is_unhealthy_though_ffmpeg_still_reports(
+    publisher: Callable[[str], Publisher],
+) -> None:
+    # A real ffmpeg whose RTSP write blocks prints the same `frame=` every second.
+    p = publisher("lobby=synthetic")
+    # Reported by the status file, which is written once a second: two seconds is stale.
+    p.env["FAKE_CAMERAS_STALE_AFTER"] = "2"
+    p.start()
+    _eventually(lambda: p.health().returncode == 0)
+    p.stall.touch()
+    _eventually(lambda: p.health().returncode != 0, timeout=8)
+    assert "lobby" in p.health().stdout
+    # Its frames move again: it is publishing.
+    p.stall.unlink()
+    _eventually(lambda: p.health().returncode == 0)
+    p.stop()
 
 
 def test_a_sample_is_prepared_once_then_looped_from_the_cache(
@@ -780,6 +849,278 @@ def test_every_start_and_restart_of_a_sample_rejoins_the_shared_timeline(tmp_pat
     assert all(_played(c) == str(tmp_path / "x.mp4") for c in commands)
 
 
+def _play_to_the_end(tmp_path: Path, runs: list[float]) -> tuple[list[float], list[str]]:
+    """Publish a sample with ffmpegs that each exit with 0 after `runs` seconds, as one does
+    at the end of its playlist; what the publisher slept for, and where each ffmpeg started."""
+    wall = [1000.4]
+    starts: list[str] = []
+    delays: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        delays.append(seconds)
+        wall[0] += seconds
+        if not runs:
+            raise asyncio.CancelledError
+
+    publisher = RealPublisher(
+        _settings(tmp_path), clock=lambda: wall[0], sleep=sleep, wall=lambda: wall[0]
+    )
+
+    async def run(label: str, command: list[str], hung_after: float | None = None) -> Ended:
+        starts.append(Path(_after(command, "-i")).read_text().splitlines()[1])
+        wall[0] += runs.pop(0)
+        return Ended(0, [])
+
+    publisher._run = run  # type: ignore[method-assign]
+    keep_publishing = publisher._keep_publishing  # pyright: ignore[reportPrivateUsage]
+    with contextlib.suppress(asyncio.CancelledError):
+        asyncio.run(keep_publishing(Camera("lobby", "a.mp4"), tmp_path / "x.mp4", "u", "l", True))
+    return delays, starts
+
+
+def test_a_playlist_played_to_its_end_rejoins_the_timeline_at_once(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    day = PLAYLIST_HOURS * 3600.0
+    with caplog.at_level(logging.INFO, logger="fake-cameras"):
+        delays, starts = _play_to_the_end(tmp_path, [day, day])
+    # Only the waits for the next whole second (none: a day of whole seconds went by), never a
+    # restart's backoff.
+    assert delays == [pytest.approx(0.6), 0, 0]
+    assert starts == ["inpoint 101", "inpoint 101"]
+    # The daily reconnect is expected: said, not warned about.
+    assert [r.levelname for r in caplog.records if "lobby: " in r.message] == ["INFO"] * 3
+    assert "lobby: played its playlist to the end; rejoining the timeline" in caplog.text
+
+
+def test_an_ffmpeg_that_ends_soon_after_it_started_is_restarted_as_a_failure(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A playlist is a day long: one that ended at once did not play, whatever ffmpeg says.
+    with caplog.at_level(logging.WARNING, logger="fake-cameras"):
+        delays, _ = _play_to_the_end(tmp_path, [0.1, 0.1])
+    assert 1 in delays
+    assert 2 in delays
+    assert "lobby: ffmpeg exited with 0; restarting in 1 s" in caplog.text
+
+
+def test_an_ffmpeg_that_ends_well_before_its_playlist_is_restarted_as_a_failure(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Long enough to be told from a failure at once, but nowhere near the playlist's length: an
+    # ffmpeg that exited with 0 then did not play it to the end.
+    early = playlist_seconds(101, DURATION) - PLAYLIST_END_MARGIN - 1
+    assert early > PUBLISHED_LONG_ENOUGH
+    with caplog.at_level(logging.INFO, logger="fake-cameras"):
+        delays, _ = _play_to_the_end(tmp_path, [early])
+    assert "lobby: ffmpeg exited with 0; restarting in 1 s" in caplog.text
+    assert "played its playlist to the end" not in caplog.text
+    assert 1 in delays
+
+
+def test_an_ffmpeg_that_ends_within_the_margin_of_its_playlist_played_it_to_the_end(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    just = playlist_seconds(101, DURATION) - PLAYLIST_END_MARGIN
+    with caplog.at_level(logging.INFO, logger="fake-cameras"):
+        delays, _ = _play_to_the_end(tmp_path, [just])
+    assert "lobby: played its playlist to the end; rejoining the timeline" in caplog.text
+    assert "restarting in" not in caplog.text
+    assert 1 not in delays
+
+
+async def _a_moment(seconds: float) -> None:
+    await asyncio.sleep(0.001)
+
+
+def _publish_samples(
+    settings: Settings,
+    wall: list[float],
+    clock: list[float],
+    sleep: Callable[[float], Awaitable[None]] = _a_moment,
+) -> tuple[RealPublisher, dict[str, list[str]]]:
+    """A publisher of `settings`' cameras, whose samples are prepared already, with ffmpegs
+    that publish until they are stopped; and, for each camera, where each of its ffmpegs
+    started on the timeline (`loop` for the test pattern, which has none). Whatever it waits
+    for, it waits for a moment, or as `sleep` says."""
+    for directory in (settings.samples, settings.cache):
+        directory.mkdir()
+    for camera in settings.cameras:
+        if camera.source != SYNTHETIC:
+            video = settings.samples / camera.source
+            video.write_bytes(camera.source.encode())
+            (settings.cache / f"{cache_key(video, settings.duration)}.mp4").write_bytes(b"x")
+    (settings.cache / f"{cache_key(None)}.mp4").write_bytes(b"x")
+    starts: dict[str, list[str]] = {}
+    publisher = RealPublisher(settings, clock=lambda: clock[0], sleep=sleep, wall=lambda: wall[0])
+
+    async def run(label: str, command: list[str], hung_after: float | None = None) -> Ended:
+        read = _after(command, "-i")
+        start = "loop" if "concat" not in command else Path(read).read_text().splitlines()[1]
+        starts.setdefault(label, []).append(start)
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    publisher._run = run  # type: ignore[method-assign]
+    return publisher, starts
+
+
+def _until(condition: Callable[[], bool]) -> Coroutine[None, None, None]:
+    async def wait() -> None:
+        async with asyncio.timeout(10):
+            while not condition():
+                await asyncio.sleep(0.01)
+
+    return wait()
+
+
+@pytest.mark.parametrize(
+    ("step", "position"),
+    [
+        # A step under a second is not rounded up to one.
+        (0.7, 102),
+        # The host was suspended for 1234 s: the wall clock moved on, the monotonic one did not.
+        (1234.0, 135),
+        # The wall clock was set back by a minute.
+        (-60.0, 41),
+    ],
+)
+def test_a_step_of_the_wall_clock_makes_every_sample_rejoin_the_timeline_together(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, step: float, position: int
+) -> None:
+    settings = _settings(tmp_path, "a=walk.avi,b=other.avi,c=synthetic")
+    wall, clock = [1000.4], [50.0]
+    publisher, starts = _publish_samples(settings, wall, clock)
+
+    async def scenario() -> None:
+        running = asyncio.create_task(publisher.run())
+        await _until(lambda: all(len(starts.get(c, [])) == 1 for c in "abc"))
+        wall[0] += step
+        await _until(lambda: all(len(starts.get(c, [])) == 2 for c in "ab"))
+        await asyncio.sleep(0.1)
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+
+    with caplog.at_level(logging.INFO, logger="fake-cameras"):
+        asyncio.run(scenario())
+    assert starts["a"] == starts["b"] == ["inpoint 101", f"inpoint {position}"]
+    # The test pattern is on no timeline, and goes on as it was.
+    assert starts["c"] == ["loop"]
+    assert f"the wall clock stepped by {step:+.1f} s" in caplog.text
+    # Not a failure: no backoff, no warning.
+    assert "restarting in" not in caplog.text
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def _watch_steps(steps: list[tuple[float, float]]) -> list[logging.LogRecord]:
+    """What `_watch_clock` logs while the clock goes on, a check a second, and the wall clock
+    steps as `steps` say: (seconds of the clock when, by how much)."""
+    wall, clock = [10_000.0], [0.0]
+    pending = sorted(steps)
+
+    async def sleep(seconds: float) -> None:
+        clock[0] += seconds
+        wall[0] += seconds
+        while pending and pending[0][0] <= clock[0]:
+            wall[0] += pending.pop(0)[1]
+        if not pending and clock[0] > 3 * 3600 + 10:
+            raise asyncio.CancelledError
+
+    publisher = RealPublisher(
+        _settings(Path("/nonexistent")), clock=lambda: clock[0], sleep=sleep, wall=lambda: wall[0]
+    )
+    records: list[logging.LogRecord] = []
+
+    class Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    logger = logging.getLogger("fake-cameras")
+    handler = Collect(logging.WARNING)
+    logger.addHandler(handler)
+    try:
+        with contextlib.suppress(asyncio.CancelledError):
+            asyncio.run(publisher._watch_clock())  # pyright: ignore[reportPrivateUsage]
+    finally:
+        logger.removeHandler(handler)
+    return records
+
+
+def test_a_host_whose_clock_steps_often_is_warned_about_by_the_count() -> None:
+    # Four steps within an hour (more than three).
+    records = _watch_steps([(100.0, 5.0), (200.0, -5.0), (300.0, 5.0), (400.0, -5.0)])
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert "4 times" in records[0].getMessage()
+    assert "hour" in records[0].getMessage()
+
+
+def test_a_few_steps_of_the_wall_clock_are_not_warned_about() -> None:
+    assert _watch_steps([(100.0, 5.0), (200.0, -5.0), (300.0, 5.0)]) == []
+    # Nor are many, when they are spread over hours.
+    assert _watch_steps([(i * 1500.0 + 100, 5.0) for i in range(6)]) == []
+
+
+def test_the_warning_about_a_clock_that_steps_often_comes_at_most_once_an_hour() -> None:
+    # Eight steps within a quarter of an hour: warned at the fourth, not at the next four.
+    # Four more, long after, are warned about again.
+    steps = [(100.0 + i * 100, 5.0) for i in range(8)] + [(5000.0 + i * 100, 5.0) for i in range(4)]
+    records = _watch_steps(steps)
+    assert len(records) == 2
+    assert all("4 times" in r.getMessage() for r in records)
+
+
+def test_a_step_of_the_wall_clock_while_a_camera_waits_to_join_is_not_missed(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path, "a=walk.avi")
+    wall, clock = [1000.4], [50.0]
+    joins: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        if seconds != fake_cameras.CLOCK_EVERY and not joins:
+            # The camera waits for the next whole second, and the clock steps meanwhile.
+            joins.append(seconds)
+            wall[0] += 1234.0
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(0.001)
+
+    publisher, starts = _publish_samples(settings, wall, clock, sleep)
+
+    async def scenario() -> None:
+        running = asyncio.create_task(publisher.run())
+        await _until(lambda: len(starts.get("a", [])) >= 1)
+        await asyncio.sleep(0.1)
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+
+    asyncio.run(scenario())
+    # It starts where the clock says now, not where it said before it stepped.
+    assert joins == [pytest.approx(0.6)]
+    assert starts["a"] == ["inpoint 135"]
+
+
+def test_the_wall_clock_moving_with_the_monotonic_one_restarts_nothing(tmp_path: Path) -> None:
+    settings = _settings(tmp_path, "a=walk.avi")
+    wall, clock = [1000.4], [50.0]
+    publisher, starts = _publish_samples(settings, wall, clock)
+
+    async def scenario() -> None:
+        running = asyncio.create_task(publisher.run())
+        await _until(lambda: len(starts.get("a", [])) == 1)
+        for _ in range(20):
+            wall[0] += 0.2 + 0.001  # A clock slewed by NTP gains a little.
+            clock[0] += 0.2
+            await asyncio.sleep(0.01)
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+
+    asyncio.run(scenario())
+    assert starts["a"] == ["inpoint 101"]
+
+
 def test_the_test_pattern_has_no_timeline_to_join(tmp_path: Path) -> None:
     commands: list[list[str]] = []
 
@@ -803,8 +1144,9 @@ def test_the_test_pattern_has_no_timeline_to_join(tmp_path: Path) -> None:
 # --- A hung ffmpeg ----------------------------------------------------------------------------
 
 #: Stands in for a publishing ffmpeg: writes its pid to the file named by its first argument,
-#: reports progress every 0.1 s, and (with `hang`) stops reporting after three reports while
-#: staying alive, as when a write to a MediaMTX that stopped reading blocks.
+#: and reports progress every 0.1 s. With `hang`, its frame count stops after three reports,
+#: as when a write to a MediaMTX that stopped reading blocks; and, as a real ffmpeg 7 or later
+#: does then, it goes on reporting that same count every time, alive.
 HANGING_FFMPEG = textwrap.dedent(
     """\
     import os, sys, time
@@ -812,18 +1154,19 @@ HANGING_FFMPEG = textwrap.dedent(
     Path({pid!r}).write_text(str(os.getpid()))
     frame = 0
     while True:
-        frame += 15
+        if not ({hang} and frame >= 45):
+            frame += 15
         print(f"frame={{frame}}\\nprogress=continue", flush=True)
         time.sleep(0.1)
-        if {hang} and frame >= 45:
-            time.sleep(3600)
     """
 )
 
 
 class _Watched:
     """A publisher whose clock moves a tenth of a second per watchdog check, so that the
-    fifteen seconds before a hung ffmpeg is killed take about a second and a half."""
+    fifteen seconds before a hung ffmpeg is killed take about a second and a half. Its wall
+    clock does not move: the watchdog times ffmpeg by the monotonic clock, which a step of
+    the wall clock (or a suspended host) does not move."""
 
     def __init__(self, tmp_path: Path, hang: bool) -> None:
         self.pid = tmp_path / "ffmpeg.pid"
@@ -832,18 +1175,21 @@ class _Watched:
             f"#!{sys.executable}\n" + HANGING_FFMPEG.format(pid=str(self.pid), hang=hang)
         )
         ffmpeg.chmod(0o755)
-        self.wall = 1000.0
+        self.now = 1000.0
         self.checks = 0
         #: The restart delays, which are the other thing the publisher sleeps for.
         self.restarts: list[float] = []
         self.publisher = RealPublisher(
-            _settings(tmp_path, ffmpeg=str(ffmpeg)), sleep=self.sleep, wall=lambda: self.wall
+            _settings(tmp_path, ffmpeg=str(ffmpeg)),
+            clock=lambda: self.now,
+            sleep=self.sleep,
+            wall=lambda: 1000.0,
         )
 
     async def sleep(self, seconds: float) -> None:
         if seconds == fake_cameras.WATCH_EVERY:
             self.checks += 1
-            self.wall += 0.1
+            self.now += 0.1
             await asyncio.sleep(0.01)
         else:
             self.restarts.append(seconds)
@@ -861,7 +1207,7 @@ class _Watched:
         return keep_publishing(Camera("lobby", SYNTHETIC), tmp_path / "x.mp4", "u", "l")
 
 
-def test_an_ffmpeg_that_stops_reporting_progress_is_killed_and_restarted(
+def test_an_ffmpeg_whose_frame_count_stops_is_killed_and_restarted(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     watched = _Watched(tmp_path, hang=True)
@@ -875,12 +1221,12 @@ def test_an_ffmpeg_that_stops_reporting_progress_is_killed_and_restarted(
     assert not watched.alive()
     # Not before it was hung for HUNG_AFTER seconds of the clock, which moves 0.1 s a check.
     assert watched.checks > HUNG_AFTER / 0.1
-    assert "lobby: ffmpeg reported no progress for 15 s and was killed; restarting in 1 s" in (
+    assert "lobby: ffmpeg sent no new frame for 15 s and was killed; restarting in 1 s" in (
         caplog.text
     )
 
 
-def test_an_ffmpeg_that_keeps_reporting_progress_is_left_running(tmp_path: Path) -> None:
+def test_an_ffmpeg_whose_frame_count_moves_is_left_running(tmp_path: Path) -> None:
     watched = _Watched(tmp_path, hang=False)
 
     async def run() -> None:
@@ -1045,3 +1391,49 @@ def test_a_video_looped_by_several_cameras_is_read_once(
 
     asyncio.run(use())
     assert sorted(h.name for h in hashed if h is not None) == ["other.avi", "walk.avi"]
+
+
+@pytest.mark.parametrize("gone", ["deleted", "made unreadable"])
+def test_a_video_that_goes_after_it_was_found_gets_the_test_pattern(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    gone: str,
+) -> None:
+    # It was there when the publisher looked for it, and is gone when it is read to be named.
+    if gone == "made unreadable" and os.geteuid() == 0:
+        pytest.skip("root reads whatever the mode says")
+    settings = _settings(tmp_path, "a=walk.avi,b=synthetic")
+    wall, clock = [1000.4], [50.0]
+    publisher, starts = _publish_samples(settings, wall, clock)
+    video = settings.samples / "walk.avi"
+    if gone == "deleted":
+        video.unlink()
+    else:
+        video.chmod(0o000)
+
+    def found(samples: Path, source: str) -> Path:
+        return samples / source
+
+    monkeypatch.setattr(fake_cameras, "find_sample", found)
+    (settings.cache / "0123-old.mp4").write_bytes(b"perhaps walk.avi's, once it is back")
+
+    async def scenario() -> None:
+        running = asyncio.create_task(publisher.run())
+        # Every camera is up, the one whose video went on the test pattern.
+        await _until(lambda: running.done() or all(len(starts.get(c, [])) == 1 for c in "ab"))
+        await asyncio.sleep(0.1)
+        if running.done():
+            running.result()  # Says why it ended, which it must not.
+            pytest.fail("the publisher ended")
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+
+    with caplog.at_level(logging.WARNING, logger="fake-cameras"):
+        asyncio.run(scenario())
+    assert starts == {"a": ["loop"], "b": ["loop"]}
+    assert "a: walk.avi could not be read" in caplog.text
+    assert "gets the test pattern instead" in caplog.text
+    # Its prepared copy may come back into use: it is kept, as for a video that is missing.
+    assert (settings.cache / "0123-old.mp4").exists()
