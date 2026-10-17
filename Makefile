@@ -6,9 +6,15 @@ SHELL := bash
 .SHELLFLAGS := -euo pipefail -c
 
 .PHONY: sync lint format typecheck contracts test test-stack check up down fetch-samples
+.PHONY: sync lint format typecheck contracts test test-stack check up down
+.PHONY: web web-lint web-typecheck web-test api-types api-types-check
+
+# The web app (web/) needs Node 24 (web/.nvmrc) and installs from its lockfile.
+WEB := npm --prefix web
 
 sync:
 	uv sync --locked
+	$(WEB) ci
 
 lint:
 	uv run ruff check
@@ -33,7 +39,35 @@ test:
 test-stack:
 	uv run pytest -m stack
 
-check: lint typecheck contracts test
+web: web-lint web-typecheck web-test
+
+web-lint:
+	$(WEB) run lint
+
+web-typecheck:
+	$(WEB) run typecheck
+
+web-test:
+	$(WEB) test
+
+# The web app's API types come from the api: its OpenAPI schema is written to API_SCHEMA, and
+# openapi-typescript generates API_TYPES from that. Both are committed; after changing the api,
+# run `make api-types` and commit the result. `api-types-check` fails, changing nothing, when
+# either file is not what regenerating would give.
+API_SCHEMA ?= web/src/api/openapi.json
+API_TYPES ?= web/src/api/schema.d.ts
+OPENAPI_TYPESCRIPT := web/node_modules/.bin/openapi-typescript
+
+api-types:
+	uv run visionquery-openapi $(API_SCHEMA)
+	$(OPENAPI_TYPESCRIPT) $(API_SCHEMA) --output $(API_TYPES)
+
+api-types-check:
+	uv run visionquery-openapi --check $(API_SCHEMA)
+	$(OPENAPI_TYPESCRIPT) $(API_SCHEMA) --output $(API_TYPES) --check || { \
+		echo "$(API_TYPES) is out of date with $(API_SCHEMA): run \`make api-types\` and commit the result" >&2; exit 1; }
+
+check: lint typecheck contracts test web api-types-check
 
 # Starts the stack, and fails when the migrations did not succeed. `docker compose up --wait`
 # returns while `migrate` is still running, so a failed migration would go unnoticed, and on
