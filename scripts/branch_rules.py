@@ -94,9 +94,10 @@ def _not_passed_on_develop(checks: list[str]) -> list[str]:
 
 def _keeping_live_parameters(payload: dict[str, Any], live: dict[str, Any]) -> dict[str, Any]:
     """The payload, with the live pull_request parameters it does not set kept as they are."""
-    kept: dict[str, Any] = next(
-        (r.get("parameters", {}) for r in live["rules"] if r["type"] == "pull_request"), {}
-    )
+    kept: dict[str, Any] = {}
+    for rule in live["rules"]:
+        if rule["type"] == "pull_request":
+            kept = rule.get("parameters", {})
     for rule in payload["rules"]:
         if rule["type"] == "pull_request":
             rule["parameters"] = kept | rule["parameters"]

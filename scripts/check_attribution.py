@@ -7,8 +7,9 @@
                                                  text in environment variables (unset or empty
                                                  is nothing to check)
 
-Matching is case-insensitive, and the footer is found across spaces, hyphens and line breaks. Exits 0 when nothing matched, 1 naming each match, and 2 on a
-usage error or a range git cannot list.
+Matching is case-insensitive, and the footer is found across spaces, hyphens and line breaks.
+Exits 0 when nothing matched, 1 naming each match, and 2 on a usage error or a range git cannot
+list.
 """
 
 import argparse
