@@ -78,7 +78,7 @@ select = [
 [tool.pyright]
 typeCheckingMode = "strict"
 pythonVersion = "3.14"
-include = ["packages", "tests", "scripts", "docker/fake-cameras"]
+include = ["conftest.py", "packages", "tests", "scripts", "docker/fake-cameras"]
 extraPaths = ["scripts", "docker/fake-cameras"]
 venvPath = "."
 venv = ".venv"
