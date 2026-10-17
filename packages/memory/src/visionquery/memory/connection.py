@@ -12,7 +12,10 @@ from typing import Literal
 import psycopg
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
-__all__ = ["ConnectionFailedError", "ConnectionProblem", "categorize", "connect"]
+__all__ = ["Connection", "ConnectionFailedError", "ConnectionProblem", "categorize", "connect"]
+
+#: A connection to the memory's database, for a caller that holds one without naming the driver.
+type Connection = psycopg.Connection
 
 #: Why connecting failed, as fixed text that holds nothing from the URL.
 type ConnectionProblem = Literal[

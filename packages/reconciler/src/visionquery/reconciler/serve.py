@@ -2,6 +2,8 @@
 
     visionquery-reconciler            run until stopped (SIGTERM or SIGINT)
     visionquery-reconciler health     exit 0 while a recent cycle succeeded, 1 otherwise
+    visionquery-reconciler status     log whether each camera's video is arriving in MediaMTX;
+                                      exit 0 when every camera's is, 1 otherwise
 
 Every `VISIONQUERY_RECONCILE_INTERVAL` seconds (5) it reads the cameras not removed and makes
 MediaMTX match them (`visionquery.reconciler.reconcile`), so a change to the registry, and a
@@ -13,6 +15,11 @@ a database failure is named by its category only, and MediaMTX's errors are scru
 
 After each successful cycle it writes a heartbeat file holding the time until which it counts
 as healthy, three cycles on, which `health` (Compose's healthcheck) reads.
+
+`status` changes nothing: it logs one line per camera not removed, saying whether MediaMTX has
+its path ready with video arriving (INFO) or not (WARNING), and a `status: N cameras, M
+receiving video` line. It runs beside the reconciler (`docker compose exec reconciler
+visionquery-reconciler status`), so it serves its metrics on any free port.
 """
 
 import logging
@@ -26,17 +33,24 @@ from types import FrameType
 from typing import Annotated
 from urllib.parse import urlsplit
 
-import psycopg
 from prometheus_client import Counter, Gauge
 from pydantic import BaseModel, Field, SecretStr, field_validator
 from visionquery.memory.cameras import CameraRegistry, CameraRegistryError
-from visionquery.memory.connection import ConnectionFailedError, connect
+from visionquery.memory.connection import Connection, ConnectionFailedError, connect
 from visionquery.memory.settings import DatabaseSettings
 from visionquery.reconciler.mediamtx import MediaMTXClient, MediaMTXError
 from visionquery.reconciler.reconcile import Changes, ReconcileError, Reconciler
 from visionquery.runtime import Settings, start
 
-__all__ = ["HEARTBEAT", "MediaMTXSettings", "ReconcilerSettings", "health", "main", "run"]
+__all__ = [
+    "HEARTBEAT",
+    "MediaMTXSettings",
+    "ReconcilerSettings",
+    "health",
+    "main",
+    "run",
+    "status",
+]
 
 _log = logging.getLogger(__name__)
 
@@ -130,7 +144,7 @@ class _Loop:
         self._reconciler = Reconciler(
             MediaMTXClient(mediamtx.url, mediamtx.user, mediamtx.password)
         )
-        self._connection: psycopg.Connection | None = None
+        self._connection: Connection | None = None
         #: What the last cycle failed with; None after a success, and before the first cycle.
         self._failing: str | None = None
 
@@ -159,7 +173,7 @@ class _Loop:
             self._connection.close()
             self._connection = None
 
-    def _connected(self) -> psycopg.Connection:
+    def _connected(self) -> Connection:
         if self._connection is None or self._connection.closed:
             self._connection = connect(
                 self._settings.database.url.get_secret_value(),
@@ -209,13 +223,57 @@ def health(heartbeat: Path = HEARTBEAT) -> int:
     return 0 if time.time() < healthy_until else 1
 
 
+class _StatusSettings(ReconcilerSettings):
+    #: `status` runs beside the reconciler, which holds the metrics port: any free one.
+    metrics_port: int = 0
+
+
+def status(settings: ReconcilerSettings) -> int:
+    """Log whether each camera's video is arriving in MediaMTX; 0 when every camera's is."""
+    mediamtx = settings.mediamtx
+    client = MediaMTXClient(mediamtx.url, mediamtx.user, mediamtx.password)
+    problem: str
+    try:
+        with connect(settings.database.url.get_secret_value(), _CONNECT_TIMEOUT) as connection:
+            cameras = CameraRegistry(connection).list()
+        paths = client.paths()
+    except ConnectionFailedError as error:
+        problem = f"the database could not be reached: {error.category} ({error.cause})"
+    except (CameraRegistryError, MediaMTXError) as error:
+        problem = str(error)
+    else:
+        receiving = 0
+        for camera in cameras:
+            path = paths.get(camera.path) or {}
+            arriving = bool(path.get("ready")) and int(path.get("inboundBytes") or 0) > 0
+            receiving += arriving
+            _log.log(
+                logging.INFO if arriving else logging.WARNING,
+                "%s (%s): %s",
+                camera.name,
+                camera.path,
+                "receiving video" if arriving else "no video arriving",
+                extra={"camera": camera.name, "path": camera.path, "receiving": arriving},
+            )
+        _log.info("status: %d cameras, %d receiving video", len(cameras), receiving)
+        return 0 if receiving == len(cameras) else 1
+    _log.error("status: %s", problem)
+    return 1
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     """The `visionquery-reconciler` command."""
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments == ["health"]:
         raise SystemExit(health(HEARTBEAT))
+    if arguments == ["status"]:
+        process = start("reconciler", _StatusSettings)
+        try:
+            raise SystemExit(status(process.settings))
+        finally:
+            process.close()
     if arguments:
-        raise SystemExit("usage: visionquery-reconciler [health]")
+        raise SystemExit("usage: visionquery-reconciler [health | status]")
     settings = start("reconciler", ReconcilerSettings).settings
     stop = threading.Event()
 

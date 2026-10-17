@@ -49,6 +49,17 @@ class MediaMTXClient:
             pages, page = int(listed["pageCount"]), page + 1
         return configs
 
+    def paths(self) -> dict[str, Json]:
+        """Every path's state (whether it is ready, its tracks, the bytes it received), by name."""
+        states: dict[str, Json] = {}
+        page, pages = 0, 1
+        while page < pages:
+            listed = self._call("GET", f"/v3/paths/list?itemsPerPage={_PAGE}&page={page}")
+            for item in cast(list[Json], listed["items"]):
+                states[item["name"]] = item
+            pages, page = int(listed["pageCount"]), page + 1
+        return states
+
     def path_defaults(self) -> Json:
         """The settings a path has when its configuration does not say otherwise."""
         return self._call("GET", "/v3/config/pathdefaults/get")
