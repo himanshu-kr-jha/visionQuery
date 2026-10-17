@@ -7,20 +7,32 @@ A service declares what it needs by extending `Settings` with its own fields:
 
     settings = RecorderSettings.load()  # reads VISIONQUERY_FOOTAGE_DIR
 
-A nested model is set with a double underscore (`VISIONQUERY_DATABASE__URL`). A field takes
-no alias, so each is read from exactly the variable named after it.
+A nested model is set with a double underscore (`VISIONQUERY_DATABASE__URL`), and a list or
+dict as JSON (`VISIONQUERY_PORTS='[8554, 8555]'`). A field takes no alias, so each is read
+from exactly the variable named after it, and an error names the variable that was set.
 
 Credentials are declared as `SecretStr`, so neither `repr` nor a log line shows them.
 """
 
-from typing import Annotated, Any, Literal, Self
+import os
+from collections.abc import Iterable, Set
+from typing import Annotated, Any, Literal, Self, override
 
 from pydantic import BaseModel, BeforeValidator, Field, ValidationError
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic.fields import FieldInfo
+from pydantic_settings import (
+    BaseSettings,
+    EnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
+from pydantic_settings import SettingsError as SourceError
 
 __all__ = ["LogLevel", "Settings", "SettingsError"]
 
 PREFIX = "VISIONQUERY_"
+#: Between a nested group and its field, as in VISIONQUERY_DATABASE__URL.
+NESTED = "__"
 
 type LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
@@ -36,8 +48,7 @@ class Settings(BaseSettings):
         env_prefix=PREFIX,
         # An empty variable is a missing one, not an empty path or name.
         env_ignore_empty=True,
-        # A nested model is set as VISIONQUERY_DATABASE__URL.
-        env_nested_delimiter="__",
+        env_nested_delimiter=NESTED,
         extra="ignore",
         frozen=True,
     )
@@ -62,43 +73,133 @@ class Settings(BaseSettings):
                 )
 
     @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (init_settings, _Environment(settings_cls), dotenv_settings, file_secret_settings)
+
+    @classmethod
     def load(cls) -> Self:
         """Read the settings from the environment, or say which variables are wrong."""
+        # `from None` throughout: pydantic's own errors repeat the rejected value, which may be
+        # a secret typed into the wrong variable.
         try:
             return cls()
         except ValidationError as error:
-            # `from None`: pydantic's own error repeats the rejected value, which may be a secret.
-            raise SettingsError(cls, error) from None
+            raise SettingsError(cls, _problems(cls, error)) from None
+        except SourceError as error:
+            # pydantic-settings decodes lists, dicts and groups before validation, so a value
+            # that is not JSON fails here, outside the ValidationError.
+            cause = error.__cause__
+            if not isinstance(cause, _NotJsonError):
+                raise
+            raise SettingsError(cls, [(cause.variable, "is invalid: not valid JSON")]) from None
+
+
+#: A variable at fault (None for a rule across several), and what is wrong with it.
+type Problem = tuple[str | None, str]
 
 
 class SettingsError(Exception):
     """Environment variables a process needs are missing or invalid."""
 
-    def __init__(self, settings: type[BaseModel], error: ValidationError) -> None:
+    def __init__(self, settings: type[BaseModel], problems: Iterable[Problem]) -> None:
         lines: list[str] = []
         variables: list[str] = []
-        for detail in error.errors(include_input=False, include_url=False):
-            if not detail["loc"]:
-                # A rule across several variables belongs to none of them.
-                lines.append(f"  {detail['msg']}")
-                continue
-            if detail["type"] == "missing":
-                for loc in _required_leaves(settings, detail["loc"]):
-                    variable = _variable(loc)
-                    lines.append(f"  {variable} is missing")
-                    variables.append(variable)
-                continue
-            variable = _variable(detail["loc"])
-            lines.append(f"  {variable} is invalid: {detail['msg']}")
-            variables.append(variable)
+        for variable, what in problems:
+            if variable is None:
+                lines.append(f"  {what}")
+            else:
+                lines.append(f"  {variable} {what}")
+                variables.append(variable)
         #: The variables to fix, each named once, in the order the fields are declared.
         self.variables = tuple(dict.fromkeys(variables))
         joined = "\n".join(lines)
         super().__init__(f"{settings.__name__} could not be read from the environment:\n{joined}")
 
 
+def _problems(settings: type[BaseModel], error: ValidationError) -> list[Problem]:
+    present = {name.upper() for name, value in os.environ.items() if value}
+    problems: list[Problem] = []
+    for detail in error.errors(include_input=False, include_url=False):
+        if not detail["loc"]:
+            problems.append((None, detail["msg"]))
+        elif detail["type"] == "missing":
+            for loc in _required_leaves(settings, detail["loc"]):
+                problems.append((_variable(loc), "is missing"))
+        else:
+            variable = _holding(detail["loc"], present)
+            problems.append((variable, f"is invalid: {detail['msg']}"))
+    return problems
+
+
 def _variable(loc: tuple[int | str, ...]) -> str:
-    return f"{PREFIX}{'__'.join(str(part) for part in loc)}".upper()
+    return f"{PREFIX}{NESTED.join(str(part) for part in loc)}".upper()
+
+
+def _holding(loc: tuple[int | str, ...], present: Set[str]) -> str:
+    """The variable the invalid value at `loc` was read from.
+
+    pydantic places an error at the item that is wrong (`ports.1`, `limits.gate`), but a list
+    or dict, or a whole nested group, may be set as JSON in one variable (`VISIONQUERY_PORTS`).
+    The variable is the longest start of `loc` that names one that is set.
+    """
+    for end in range(len(loc), 0, -1):
+        if (variable := _variable(loc[:end])) in present:
+            return variable
+    return _variable(loc)
+
+
+class _NotJsonError(ValueError):
+    """The value of `variable`, a list, dict or nested group, is not valid JSON."""
+
+    def __init__(self, variable: str) -> None:
+        super().__init__(f"{variable} is not valid JSON")
+        self.variable = variable
+
+
+class _Environment(EnvSettingsSource):
+    """The environment, naming the variable whose list, dict or group is not valid JSON.
+
+    pydantic-settings decodes those values itself, before validation, and reports a failure
+    for the field as a whole, without saying which variable held it.
+    """
+
+    def __init__(self, settings_cls: type[BaseSettings]) -> None:
+        super().__init__(settings_cls)
+        self._field_variable = ""
+
+    @override
+    def prepare_field_value(
+        self, field_name: str, field: FieldInfo, value: Any, value_is_complex: bool
+    ) -> Any:
+        self._field_variable = self._extract_field_info(field, field_name)[0][1]
+        return super().prepare_field_value(field_name, field, value, value_is_complex)
+
+    @override
+    def decode_complex_value(self, field_name: str, field: FieldInfo, value: Any) -> Any:
+        try:
+            return super().decode_complex_value(field_name, field, value)
+        except ValueError as error:
+            raise _NotJsonError(self._holding(field_name, value)) from error
+
+    def _holding(self, name: str, value: object) -> str:
+        """The variable of the current field, or under it, that ends in `name` and holds `value`."""
+        field = self._field_variable.lower()
+        for variable, held in self.env_vars.items():
+            lowered = variable.lower()
+            in_field = lowered == field or (
+                lowered.startswith(f"{field}{NESTED}")
+                and lowered.endswith(f"{NESTED}{name.lower()}")
+            )
+            if in_field and held == value:
+                return variable.upper()
+        return field.upper()
 
 
 def _required_leaves(

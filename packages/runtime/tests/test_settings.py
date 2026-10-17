@@ -223,3 +223,58 @@ def test_a_field_with_an_alias_is_rejected_when_the_settings_are_declared() -> N
 
     with pytest.raises(TypeError, match=r"camera_url.*alias"):
         declare()
+
+
+class Pool(BaseModel):
+    hosts: list[str] = []
+    size: int = 5
+
+
+class FleetSettings(Settings):
+    ports: list[int] = Field(default_factory=list[int])
+    limits: dict[str, int] = Field(default_factory=dict[str, int])
+    pool: Pool = Pool()
+
+
+def _bad_variables(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> SettingsError:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(SettingsError) as raised:
+        FleetSettings.load()
+    return raised.value
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["VISIONQUERY_PORTS", "VISIONQUERY_LIMITS", "VISIONQUERY_POOL", "VISIONQUERY_POOL__HOSTS"],
+)
+def test_a_list_or_dict_that_is_not_json_is_named_without_its_value(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    error = _bad_variables(monkeypatch, name, "hunter2")
+    assert error.variables == (name,)
+    assert f"{name} is invalid: " in str(error)
+    assert "JSON" in str(error)
+    assert "hunter2" not in str(error)
+    assert error.__cause__ is None
+    assert error.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("VISIONQUERY_PORTS", '[8554, "hunter2"]'),
+        ("VISIONQUERY_LIMITS", '{"gate": "hunter2"}'),
+        ("VISIONQUERY_LIMITS__GATE", "hunter2"),
+        ("VISIONQUERY_POOL", '{"size": "hunter2"}'),
+        ("VISIONQUERY_POOL__HOSTS", '["db", 3]'),
+    ],
+)
+def test_an_invalid_item_names_the_variable_that_holds_it(
+    monkeypatch: pytest.MonkeyPatch, name: str, value: str
+) -> None:
+    # pydantic places the error at the item (`ports.1`), but the variable to fix is the one
+    # the item was read from, never an invented VISIONQUERY_PORTS__1.
+    error = _bad_variables(monkeypatch, name, value)
+    assert error.variables == (name,)
+    assert f"{name} is invalid: " in str(error)
+    assert "hunter2" not in str(error)
