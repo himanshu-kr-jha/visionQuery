@@ -2,7 +2,8 @@
 # and every other check again on each PR.
 #
 # Opt in with `uv run pre-commit install`, which installs a pre-commit and a commit-msg hook
-# into .git/hooks, replacing any hook of those names already there.
+# into .git/hooks. A hook of either name already there is kept as `<name>.legacy` and still
+# runs first; `--overwrite` deletes it instead.
 #
 # Every hook is local and runs the workspace's own tools through uv, so a hook uses exactly
 # the version uv.lock pins, the same one `make check` and CI use, and never a second copy

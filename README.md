@@ -83,10 +83,24 @@ The variables every process reads are listed in [`CLAUDE.md`](CLAUDE.md#architec
 The database schema is applied with `visionquery-migrate`, which reads `VISIONQUERY_DATABASE__URL` (a `postgresql://` URL to a Postgres with TimescaleDB and pgvector) and is safe to run on every start: it applies only what is new, and refuses, naming the file, when the migrations and the database disagree.
 
 The memory's and the api's tests run against a real Postgres: they need Docker (each session starts and removes its own container) or `VISIONQUERY_TEST_DATABASE_URL` pointing at a superuser's `postgresql://` URL on a server with TimescaleDB and pgvector.
-Without either they are skipped, saying why.
+Without either they are skipped, saying why (in CI, where `CI` is set, a test skipped for a missing prerequisite fails instead).
 
 ## Contributing
 
 Work is test-driven and tracked in GitHub issues.
-Branches follow git-flow (`main`, `develop`, `feature/<issue>-<slug>`, `release/vX.Y.Z`), commits follow Conventional Commits, and every PR into `develop` must pass CI and review.
+Branches follow git-flow (`main`, `develop`, `feature/<issue>-<slug>`, `release/vX.Y.Z`), commits follow Conventional Commits, and every PR into `develop` or `main` must pass CI and review.
 The details are in [`CLAUDE.md`](CLAUDE.md), which serves as the working guide for both people and coding agents.
+
+`make check` runs locally what CI runs on every PR, except the stack tests (`make test-stack`).
+CI (`.github/workflows/ci.yml`) runs lint (ruff, ruff format, actionlint), the type check, the import contracts, the Python tests against Postgres, the web app's lint, type check and tests with its API types check, the Compose stack tests, and a check that no commit, PR title or PR body carries agent attribution and that the PR title is a Conventional Commit.
+`develop` and `main` accept changes only through a PR on which every one of those checks passed.
+
+To have git run the fast checks for you, opt in to the pre-commit hooks:
+
+```sh
+uv run pre-commit install
+```
+
+It installs a `pre-commit` hook (ruff and ruff format on the staged files) and a `commit-msg` hook (the commit message is a Conventional Commit and carries no agent attribution) into `.git/hooks`, taking the place of any hook of those names already there.
+pre-commit keeps such a hook as `<name>.legacy` and still runs it before its own checks, so a stricter hook of your own (one that refuses the `ci`, `build` or `perf` types, say) keeps refusing; `uv run pre-commit install --overwrite` deletes it instead.
+`uv run pre-commit uninstall` removes pre-commit's hooks and puts back any it set aside.
