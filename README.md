@@ -101,6 +101,7 @@ To have git run the fast checks for you, opt in to the pre-commit hooks:
 uv run pre-commit install
 ```
 
-It installs a `pre-commit` hook (ruff and ruff format on the staged files) and a `commit-msg` hook (the commit message is a Conventional Commit and carries no agent attribution) into `.git/hooks`, taking the place of any hook of those names already there.
-pre-commit keeps such a hook as `<name>.legacy` and still runs it before its own checks, so a stricter hook of your own (one that refuses the `ci`, `build` or `perf` types, say) keeps refusing; `uv run pre-commit install --overwrite` deletes it instead.
+It installs a `pre-commit` hook (ruff and ruff format on the staged files) and a `commit-msg` hook (the commit message is a Conventional Commit and carries no agent attribution) into `.git/hooks`.
+A hook of those names already there is kept as `<name>.legacy` (a `commit-msg` hook as `commit-msg.legacy`) and still runs before pre-commit's own checks, so a stricter hook of your own (one that refuses the `ci`, `build` or `perf` types, say) keeps refusing; `uv run pre-commit install --overwrite` deletes it instead.
+To check only what is staged, pre-commit sets your unstaged changes aside while the hooks run and restores them afterwards, so nothing is lost; if a hook fails, or you interrupt it, they are restored as well.
 `uv run pre-commit uninstall` removes pre-commit's hooks and puts back any it set aside.

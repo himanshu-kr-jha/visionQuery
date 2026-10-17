@@ -65,8 +65,8 @@ Keep the pipeline full: as soon as `senior-developer` hands an issue back, start
    Non-blocking findings in a "ready to merge" verdict go to `developer` as a fix round while fewer than two rounds are done and the fix stays within the issue's scope; any still unfixed at the merge go into the follow-up issue.
 5. When CI is green, squash-merge with `gh pr merge --squash --delete-branch` and confirm the issue closed.
    If GitHub did not auto-close it, close it with a comment linking the merged PR.
-   Until CI exists (issue #8), "CI is green" means the tester ran the full local suite and it passed.
-   When no checks exist for the change, the tester's verdict on the final commit stands in for CI; for a docs-only or config-only change, the `pr-reviewer` verdict on the final commit does.
+   Once the rulesets are applied, the required CI checks are the merge gate and GitHub refuses a merge until they pass.
+   Until then, the tester's full local suite on the final commit stands in for them; for a docs-only or config-only change, the `pr-reviewer` verdict on the final commit does.
    Merge when the verdict is "ready to merge", or when two fix rounds are done and no security or correctness finding remains; never over a "do not merge" verdict, a design-change finding, or a `tester` "not ready" on the head (after two rounds, only one with a security or correctness finding blocks).
    The PR title is a Conventional Commit `type(scope): subject`; the squash body is a short summary plus `Closes #<n>`, without the template checklist.
 6. The `docs/plan/v1.md` status marker is part of the issue's own PR: the builder marks the milestone `[~]` in its first PR and `[x]` in the PR that closes its last sub-issue.

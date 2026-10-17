@@ -48,10 +48,10 @@ The process role names (tech lead, `senior-developer`, `developer`, `tester`, `p
 **Pull requests** use `.github/pull_request_template.md`.
 The PR title must be a Conventional Commit `type(scope): subject`, because it becomes the squash commit subject.
 The squash commit body is a short summary plus `Closes #<n>`, without the template checklist.
-Required CI checks must pass before merging; nobody pushes directly to `main` or `develop`.
-Until CI exists (issue #8), "CI is green" is replaced by "the tester ran the full local suite and it passed".
-When no checks exist for the change, the tester's verdict on the final commit stands in for CI.
-For a docs-only or config-only change, which has no tester run, the `pr-reviewer` verdict on the final commit stands in for CI.
+Nobody pushes directly to `main` or `develop`.
+Once the rulesets are applied (see "After CI first lands" under Commands), the required CI checks are the merge gate: GitHub refuses a merge until every one has passed.
+Until then, the tester's full local suite on the final commit stands in for them.
+For a docs-only or config-only change, which has no tester run, the `pr-reviewer` verdict on the final commit stands in.
 
 ## The team
 
@@ -172,6 +172,16 @@ Actions are pinned by full commit SHA with the version in a comment, and uv is t
 GitHub sets `CI`, and with it set the root `conftest.py` turns a test skipped for a missing prerequisite into a failure: such a skip's reason starts with "needs " (`needs Postgres: ...`), and a new one must too.
 The pre-commit hooks (`.pre-commit-config.yaml`) are ruff, ruff format, and on the commit message the same two checks as the `commits` job; each runs the locked tool through `uv run`, so the hooks, `make check` and CI share one version of each.
 Scripts the workflow and the hooks run live in `scripts/`, with their tests in `tests/`.
+
+**After CI first lands** (the tech lead, once the PR that adds `ci.yml` is merged into `develop`; this is what proves the merge gate works):
+
+1. Wait for the run triggered by the push to `develop` (`gh run list --branch develop --workflow ci.yml`, then `gh run watch <id>`) and confirm all 7 jobs (`lint`, `typecheck`, `contracts`, `test`, `web`, `stack`, `commits`) are green.
+   If one is not, fix it with a `fix/` PR first: the rulesets must not require a check that does not pass.
+2. Run `make branch-rules` as a repository admin.
+3. Verify both rulesets with `gh api repos/{owner}/{repo}/rulesets`, then `gh api repos/{owner}/{repo}/rulesets/<id>` for `protect-develop` and `protect-main`: `enforcement` is `active`, the `pull_request`, `non_fast_forward` and `deletion` rules are present, and `required_status_checks` lists all 7 contexts.
+4. Open a throwaway, non-draft PR into `develop` from a branch (`chore/ci-gate-check`) that adds one failing test.
+   Confirm the `test` check goes red, `gh pr view <n> --json mergeStateStatus` reports `BLOCKED`, and `gh pr merge <n> --squash` is refused.
+5. Close the PR without merging (`gh pr close <n> --delete-branch`), and confirm the branch is gone.
 
 **The web app** (`web/`) is React, TypeScript in strict mode and Vite, linted by eslint with typescript-eslint's strict type-checked rules and tested by vitest with React Testing Library.
 It needs Node 24 (`web/.nvmrc`; npm refuses another through `engines` and `engine-strict`), and every dependency is pinned to an exact version (`save-exact`) and locked in `web/package-lock.json`: add one with `npm --prefix web install <name>@<version>` and commit both files.
