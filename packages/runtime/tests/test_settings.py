@@ -278,3 +278,22 @@ def test_an_invalid_item_names_the_variable_that_holds_it(
     assert error.variables == (name,)
     assert f"{name} is invalid: " in str(error)
     assert "hunter2" not in str(error)
+
+
+def test_a_source_error_that_is_not_json_is_named_as_a_variable_without_its_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse(self: object, field: object, field_name: str) -> object:
+        raise RuntimeError("hunter2 cannot be read")
+
+    monkeypatch.setattr(
+        "visionquery.runtime.settings._Environment._get_resolved_field_value", refuse
+    )
+    with pytest.raises(SettingsError) as raised:
+        RecorderSettings.load()
+    error = raised.value
+    assert error.variables == ("VISIONQUERY_LOG_LEVEL",)
+    assert "VISIONQUERY_LOG_LEVEL" in str(error)
+    assert "hunter2" not in str(error)
+    assert error.__cause__ is None
+    assert error.__suppress_context__

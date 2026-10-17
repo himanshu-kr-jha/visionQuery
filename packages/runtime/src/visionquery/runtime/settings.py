@@ -15,6 +15,7 @@ Credentials are declared as `SecretStr`, so neither `repr` nor a log line shows 
 """
 
 import os
+import re
 from collections.abc import Iterable, Set
 from typing import Annotated, Any, Literal, Self, override
 
@@ -96,9 +97,13 @@ class Settings(BaseSettings):
             # pydantic-settings decodes lists, dicts and groups before validation, so a value
             # that is not JSON fails here, outside the ValidationError.
             cause = error.__cause__
-            if not isinstance(cause, _NotJsonError):
-                raise
-            raise SettingsError(cls, [(cause.variable, "is invalid: not valid JSON")]) from None
+            if isinstance(cause, _NotJsonError):
+                raise SettingsError(cls, [(cause.variable, "is invalid: not valid JSON")]) from None
+            # Any other failure of the source names its field in quotes; its cause may hold
+            # the value, so only the variable is kept.
+            named = re.search(r'field "(\w+)"', str(error))
+            variable = f"{PREFIX}{named.group(1)}".upper() if named else None
+            raise SettingsError(cls, [(variable, "could not be read")]) from None
 
 
 #: A variable at fault (None for a rule across several), and what is wrong with it.
@@ -178,7 +183,8 @@ class _Environment(EnvSettingsSource):
     def prepare_field_value(
         self, field_name: str, field: FieldInfo, value: Any, value_is_complex: bool
     ) -> Any:
-        self._field_variable = self._extract_field_info(field, field_name)[0][1]
+        # No field takes an alias, so this is the variable it is read from.
+        self._field_variable = f"{PREFIX}{field_name}".lower()
         return super().prepare_field_value(field_name, field, value, value_is_complex)
 
     @override

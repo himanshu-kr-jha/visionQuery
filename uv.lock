@@ -695,7 +695,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "prometheus-client", specifier = ">=0.26.0" },
-    { name = "pydantic-settings", specifier = ">=2.16.0" },
+    { name = "pydantic-settings", specifier = ">=2.16,<3" },
 ]
 
 [[package]]
