@@ -489,13 +489,15 @@ class Publisher:
                 started = self._clock()
                 ended = await self._run(camera.name, command, HUNG_AFTER)
             else:
+                # Taken before the clock is read: a step from then on is not missed.
+                stepped = self._stepped
                 wait, start = timeline_start(self._wall(), self._settings.duration)
                 playing = self._settings.status.with_name(f"{camera.name}.concat")
                 playing.write_text(playlist(source, start, self._settings.duration))
                 await self._sleep(wait)
                 command = publish_command(source, url, self._settings.ffmpeg, playing)
                 started = self._clock()
-                ended = await self._run_on_the_timeline(camera.name, command)
+                ended = await self._run_on_the_timeline(camera.name, command, stepped)
             self._progress.pop(camera.name, None)
             published = self._clock() - started
             if ended is None:
@@ -511,15 +513,20 @@ class Publisher:
             _LOG.warning("%s: ffmpeg %s; restarting in %d s", camera.name, ended, delay)
             await self._sleep(delay)
 
-    async def _run_on_the_timeline(self, label: str, command: list[str]) -> Ended | None:
-        """Run a camera's ffmpeg as `_run` does, unless the wall clock steps meanwhile, which
-        stops it (None) so that the camera rejoins the timeline the clock now says."""
-        stepped = asyncio.create_task(self._stepped.wait())
+    async def _run_on_the_timeline(
+        self, label: str, command: list[str], stepped: asyncio.Event
+    ) -> Ended | None:
+        """Run a camera's ffmpeg as `_run` does, unless the wall clock steps (`stepped` is set)
+        before it ends, which stops it (None) so that the camera rejoins the timeline the clock
+        now says."""
+        if stepped.is_set():
+            return None
+        step = asyncio.create_task(stepped.wait())
         run = asyncio.create_task(self._run(label, command, HUNG_AFTER))
         try:
-            await asyncio.wait({run, stepped}, return_when=asyncio.FIRST_COMPLETED)
+            await asyncio.wait({run, step}, return_when=asyncio.FIRST_COMPLETED)
         finally:
-            stepped.cancel()
+            step.cancel()
             if not run.done():
                 run.cancel()
                 # Waited for, not awaited: this task's own cancellation must not be lost.

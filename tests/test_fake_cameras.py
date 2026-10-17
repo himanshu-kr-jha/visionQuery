@@ -16,7 +16,7 @@ import subprocess
 import sys
 import textwrap
 import time
-from collections.abc import Callable, Coroutine, Iterator
+from collections.abc import Awaitable, Callable, Coroutine, Iterator
 from dataclasses import replace
 from pathlib import Path
 from typing import NoReturn
@@ -882,12 +882,20 @@ def test_an_ffmpeg_that_ends_soon_after_it_started_is_restarted_as_a_failure(
     assert "lobby: ffmpeg exited with 0; restarting in 1 s" in caplog.text
 
 
+async def _a_moment(seconds: float) -> None:
+    await asyncio.sleep(0.001)
+
+
 def _publish_samples(
-    settings: Settings, wall: list[float], clock: list[float]
+    settings: Settings,
+    wall: list[float],
+    clock: list[float],
+    sleep: Callable[[float], Awaitable[None]] = _a_moment,
 ) -> tuple[RealPublisher, dict[str, list[str]]]:
     """A publisher of `settings`' cameras, whose samples are prepared already, with ffmpegs
     that publish until they are stopped; and, for each camera, where each of its ffmpegs
-    started on the timeline (`loop` for the test pattern, which has none)."""
+    started on the timeline (`loop` for the test pattern, which has none). Whatever it waits
+    for, it waits for a moment, or as `sleep` says."""
     for directory in (settings.samples, settings.cache):
         directory.mkdir()
     for camera in settings.cameras:
@@ -897,10 +905,6 @@ def _publish_samples(
             (settings.cache / f"{cache_key(video, settings.duration)}.mp4").write_bytes(b"x")
     (settings.cache / f"{cache_key(None)}.mp4").write_bytes(b"x")
     starts: dict[str, list[str]] = {}
-
-    async def sleep(seconds: float) -> None:
-        await asyncio.sleep(0.001)
-
     publisher = RealPublisher(settings, clock=lambda: clock[0], sleep=sleep, wall=lambda: wall[0])
 
     async def run(label: str, command: list[str], hung_after: float | None = None) -> Ended:
@@ -958,6 +962,37 @@ def test_a_step_of_the_wall_clock_makes_every_sample_rejoin_the_timeline_togethe
     # Not a failure: no backoff, no warning.
     assert "restarting in" not in caplog.text
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_step_of_the_wall_clock_while_a_camera_waits_to_join_is_not_missed(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path, "a=walk.avi")
+    wall, clock = [1000.4], [50.0]
+    joins: list[float] = []
+
+    async def sleep(seconds: float) -> None:
+        if seconds != fake_cameras.CLOCK_EVERY and not joins:
+            # The camera waits for the next whole second, and the clock steps meanwhile.
+            joins.append(seconds)
+            wall[0] += 1234.0
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(0.001)
+
+    publisher, starts = _publish_samples(settings, wall, clock, sleep)
+
+    async def scenario() -> None:
+        running = asyncio.create_task(publisher.run())
+        await _until(lambda: len(starts.get("a", [])) >= 1)
+        await asyncio.sleep(0.1)
+        running.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await running
+
+    asyncio.run(scenario())
+    # It starts where the clock says now, not where it said before it stepped.
+    assert joins == [pytest.approx(0.6)]
+    assert starts["a"] == ["inpoint 135"]
 
 
 def test_the_wall_clock_moving_with_the_monotonic_one_restarts_nothing(tmp_path: Path) -> None:
