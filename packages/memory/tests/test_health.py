@@ -6,8 +6,13 @@ for an unreachable one.
 
 import socket
 import time
+from typing import Any
 from urllib.parse import quote, urlsplit
 
+import psycopg
+import pytest
+from visionquery.memory import health as health_module
+from visionquery.memory.connection import connect
 from visionquery.memory.health import DatabaseHealth, check_database
 
 
@@ -50,3 +55,38 @@ def test_a_server_that_never_answers_times_out_within_the_timeout() -> None:
         )
     assert health.problem == "timed out"
     assert time.monotonic() - started < 8
+
+
+def test_a_query_that_never_finishes_is_cancelled_and_reported_as_timed_out(
+    postgres: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `SELECT 1` has no client-side limit, so the server is asked to give up on a slow query.
+    # A server that answers the handshake and then hangs is stood in for by a slow statement.
+    real_connect = health_module.connect
+
+    def slow(url: str, timeout: int, **kwargs: Any) -> psycopg.Connection:
+        connection = real_connect(url, timeout, **kwargs)
+        execute = connection.execute
+
+        def sleeping(query: Any, *args: Any, **kw: Any) -> Any:
+            return execute("SELECT pg_sleep(30)", *args, **kw)
+
+        monkeypatch.setattr(connection, "execute", sleeping, raising=False)
+        return connection
+
+    monkeypatch.setattr(health_module, "connect", slow)
+    started = time.monotonic()
+    health = check_database(postgres, timeout=1)
+    assert health.problem == "timed out"
+    assert time.monotonic() - started < 8
+
+
+def test_the_connection_bounds_a_statement_unless_the_url_sets_its_own_options(
+    postgres: str,
+) -> None:
+    with connect(postgres, 3, statement_timeout_ms=1234) as connection:
+        row = connection.execute("SHOW statement_timeout").fetchone()
+        assert row == ("1234ms",)
+    own = postgres + ("&" if "?" in postgres else "?") + "options=-c%20statement_timeout%3D777"
+    with connect(own, 3, statement_timeout_ms=1234) as connection:
+        assert connection.execute("SHOW statement_timeout").fetchone() == ("777ms",)

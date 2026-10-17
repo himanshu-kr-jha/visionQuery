@@ -31,7 +31,7 @@ class DatabaseHealth:
 def check_database(url: str, *, timeout: int = HEALTH_TIMEOUT) -> DatabaseHealth:
     """Connect to the database at `url` and run a query, then say whether that worked."""
     try:
-        with connect(url, timeout) as connection:
+        with connect(url, timeout, statement_timeout_ms=timeout * 1000) as connection:
             connection.execute("SELECT 1")
     except ConnectionFailedError as error:
         return DatabaseHealth(error.category)
