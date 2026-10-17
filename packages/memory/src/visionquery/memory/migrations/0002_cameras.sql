@@ -23,6 +23,9 @@ CREATE TABLE cameras (
 );
 
 -- Names are unique within the Deployment whatever their case, among cameras not removed.
-CREATE UNIQUE INDEX cameras_name_unique ON cameras (lower(name)) WHERE removed_at IS NULL;
+-- Case is folded by Unicode's rules (pg_unicode_fast, built into Postgres), never by the
+-- database's locale, in which lower() may fold only ASCII.
+CREATE UNIQUE INDEX cameras_name_unique ON cameras (casefold(name COLLATE pg_unicode_fast))
+    WHERE removed_at IS NULL;
 -- MediaMTX path names are case-sensitive.
 CREATE UNIQUE INDEX cameras_push_path_unique ON cameras (push_path) WHERE removed_at IS NULL;

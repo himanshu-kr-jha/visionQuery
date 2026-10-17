@@ -173,6 +173,33 @@ def test_two_cameras_cannot_share_a_name(registry: CameraRegistry, again: str) -
     assert registry.list() == [first]
 
 
+@pytest.mark.parametrize(
+    ("first", "again"), [("Café door", "CAFÉ DOOR"), ("Γάτα", "ΓΆΤΑ"), ("Straße", "STRASSE")]
+)
+def test_names_are_unique_whatever_their_case_in_any_script_and_any_locale(
+    postgres: str, first: str, again: str
+) -> None:
+    # The database's own locale must not decide it: in the C locale, lower() folds only ASCII.
+    name = f"test_{uuid.uuid4().hex[:16]}"
+    with psycopg.connect(postgres, autocommit=True) as admin:
+        admin.execute(
+            sql.SQL("CREATE DATABASE {} TEMPLATE template0 LOCALE_PROVIDER libc LOCALE 'C'").format(
+                sql.Identifier(name)
+            )
+        )
+    url = postgres.rsplit("/", 1)[0] + f"/{name}"
+    try:
+        migrate(url)
+        with connect(url, 5) as connection:
+            registry = CameraRegistry(connection)
+            registry.add_pushed(first, "a")
+            with pytest.raises(CameraNameTakenError):
+                registry.add_pushed(again, "b")
+    finally:
+        with psycopg.connect(postgres, autocommit=True) as admin:
+            admin.execute(sql.SQL("DROP DATABASE {} WITH (FORCE)").format(sql.Identifier(name)))
+
+
 def test_two_cameras_cannot_share_a_push_path(registry: CameraRegistry) -> None:
     first = registry.add_pushed("Gate 2", "gate-2")
     with pytest.raises(CameraPathTakenError) as raised:
