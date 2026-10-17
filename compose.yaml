@@ -60,6 +60,15 @@ x-visionquery: &visionquery
   read_only: true
   tmpfs: [/tmp]
 
+# The runtime's settings every VisionQuery process is given. A service's `environment` merges
+# them in (`<<: *runtime-environment`), because a map of its own replaces, not extends, one
+# inherited from x-visionquery; tests/test_compose.py checks that each one does.
+x-runtime-environment: &runtime-environment
+  VISIONQUERY_LOG_LEVEL: ${VISIONQUERY_LOG_LEVEL:-INFO}
+  # The runtime serves /metrics on loopback unless told otherwise, which Prometheus, in a
+  # container of its own, cannot reach. The port is never published on the host.
+  VISIONQUERY_METRICS_HOST: 0.0.0.0
+
 services:
   postgres:
     <<: *service
@@ -102,7 +111,7 @@ services:
     restart: "no"
     command: ["visionquery-migrate"]
     environment:
-      VISIONQUERY_LOG_LEVEL: ${VISIONQUERY_LOG_LEVEL:-INFO}
+      <<: *runtime-environment
       # The password is not part of the URL, where `@`, `/`, `:` or `#` in it would break the
       # URL: libpq reads it from PGPASSWORD, so any password works.
       VISIONQUERY_DATABASE__URL: postgresql://visionquery@postgres:5432/visionquery

@@ -547,6 +547,17 @@ def test_prometheus_scrapes_every_long_running_service() -> None:
         assert expected in scraped, f"Prometheus does not scrape {name} at {expected}"
 
 
+def test_every_visionquery_process_serves_its_metrics_beyond_its_own_container() -> None:
+    # A process serves /metrics on loopback unless told otherwise, which Prometheus, in a
+    # container of its own, cannot reach. Nothing is published on the host.
+    processes = {n: s for n, s in _services(_config()).items() if _is_visionquery_process(s)}
+    assert processes
+    for name, service in processes.items():
+        assert service["environment"].get("VISIONQUERY_METRICS_HOST") == "0.0.0.0", name
+        published = {str(port.get("target")) for port in service.get("ports", [])}
+        assert str(RUNTIME_METRICS_PORT) not in published, name
+
+
 def test_triton_is_scraped_only_through_a_file_the_gpu_profile_writes() -> None:
     # Looked up in DNS without the gpu profile, its name would not resolve and Prometheus would
     # log an error every 15 s; and the file must be where Prometheus reads it.

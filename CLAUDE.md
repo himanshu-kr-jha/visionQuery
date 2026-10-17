@@ -232,9 +232,10 @@ A package's tests live in `packages/<package>/tests/`; tests about the workspace
 | `api` | FastAPI over `tools`. |
 | `runtime` | What every process starts with: env settings, JSON logs scrubbed of credentials, and a Prometheus `/metrics` endpoint (ADR 0012). |
 
-Every process starts with `visionquery.runtime.start("<service>", <Settings subclass>)` (ADR 0012): it reads the settings from `VISIONQUERY_*` environment variables (a missing or invalid one is logged by name and the process exits with status 2), sends every log record to stdout as one JSON line with `service` and `level`, scrubbed of URL credentials, and serves Prometheus metrics on `/metrics`; it returns a `Process` holding the settings and the metrics port, with a `close()`.
+Every process starts with `visionquery.runtime.start("<service>", <Settings subclass>)` (ADR 0012): it reads the settings from `VISIONQUERY_*` environment variables (a missing or invalid one, or a metrics address it cannot listen on, is logged by name and the process exits with status 2), sends every log record to stdout as one JSON line with `service` and `level`, scrubbed of URL credentials, and serves Prometheus metrics on `/metrics`; it returns a `Process` holding the settings and the metrics port, with a `close()`.
 A service adds its own settings as fields of a `Settings` subclass (`footage_dir: Path` is read from `VISIONQUERY_FOOTAGE_DIR`), declares credentials as `SecretStr`, and declares metrics with `prometheus_client` where they are measured.
-A nested model is set with a double underscore (`VISIONQUERY_DATABASE__URL`), and a settings field takes no alias.
+A nested model is set with a double underscore (`VISIONQUERY_DATABASE__URL`), a list or dict as JSON in one variable (`VISIONQUERY_PORTS='[8554, 8555]'`), and a settings field takes no alias.
+In `compose.yaml` every VisionQuery service merges `<<: *runtime-environment` into its `environment`, which sets the log level and `VISIONQUERY_METRICS_HOST=0.0.0.0` so Prometheus can scrape it (`tests/test_compose.py` checks it).
 Each service has its own env file, never one shared by all, so a service sees only the variables it declares.
 Secrets are declared as `SecretStr`.
 Camera credentials live in the camera registry, never in the environment.
@@ -244,7 +245,7 @@ A service that embeds uvicorn must run it with `log_config=None`, because uvicor
 | Variable | Default | Meaning |
 |---|---|---|
 | `VISIONQUERY_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`. |
-| `VISIONQUERY_METRICS_HOST` | `0.0.0.0` | Interface `/metrics` listens on. |
+| `VISIONQUERY_METRICS_HOST` | `127.0.0.1` | Interface `/metrics` listens on; `compose.yaml` sets `0.0.0.0`. |
 | `VISIONQUERY_METRICS_PORT` | `9100` | Port `/metrics` listens on; `0` picks a free one. |
 
 A process that uses the memory also declares `database: DatabaseSettings` (from `visionquery.memory.settings`), read from `VISIONQUERY_DATABASE__URL`, a `postgresql://` URL held as a `SecretStr`.
