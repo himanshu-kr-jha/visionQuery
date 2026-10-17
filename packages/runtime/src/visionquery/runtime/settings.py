@@ -128,11 +128,27 @@ class SettingsError(Exception):
         super().__init__(f"{settings.__name__} could not be read from the environment:\n{joined}")
 
 
+class VariableError(ValueError):
+    """A validator's refusal of an environment variable outside the settings' own names.
+
+    Raised from a validator when the value to change is another program's variable (libpq's
+    `PGCONNECT_TIMEOUT`), so `SettingsError` names that variable, not the field being validated.
+    `what` must not quote the value.
+    """
+
+    def __init__(self, variable: str, what: str) -> None:
+        super().__init__(f"{variable} {what}")
+        self.variable = variable
+        self.what = what
+
+
 def _problems(settings: type[BaseModel], error: ValidationError) -> list[Problem]:
     present = {name.upper() for name, value in os.environ.items() if value}
     problems: list[Problem] = []
     for detail in error.errors(include_input=False, include_url=False):
-        if not detail["loc"]:
+        if isinstance(cause := detail.get("ctx", {}).get("error"), VariableError):
+            problems.append((cause.variable, f"is invalid: {cause.what}"))
+        elif not detail["loc"]:
             problems.append((None, detail["msg"]))
         elif detail["type"] == "missing":
             for loc in _required_leaves(settings, detail["loc"]):

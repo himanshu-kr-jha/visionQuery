@@ -139,7 +139,7 @@ def test_a_non_ascii_host_name_is_refused_with_how_to_write_it(url: str) -> None
     assert "cher" not in message
 
 
-@pytest.mark.parametrize("value", ["abc", "-1", "1.5", "5s", " 5", "99999999999"])
+@pytest.mark.parametrize("value", ["abc", "-1", "1.5", "5s", " ", "99999999999"])
 def test_a_pgconnect_timeout_that_is_not_an_integer_is_refused_naming_it(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:
@@ -149,7 +149,7 @@ def test_a_pgconnect_timeout_that_is_not_an_integer_is_refused_naming_it(
     assert SECRET not in str(raised.value)
 
 
-@pytest.mark.parametrize("value", ["", "0", "5", "60"])
+@pytest.mark.parametrize("value", ["", "0", "5", "60", " 5", "5 ", "\t5\n"])
 def test_an_empty_or_integer_pgconnect_timeout_is_accepted(
     monkeypatch: pytest.MonkeyPatch, value: str
 ) -> None:

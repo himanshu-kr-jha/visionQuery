@@ -6,7 +6,7 @@ from typing import Self
 
 import pytest
 from pydantic import BaseModel, Field, SecretStr, model_validator
-from visionquery.runtime import Settings, SettingsError
+from visionquery.runtime import Settings, SettingsError, VariableError
 
 
 class RecorderSettings(Settings):
@@ -297,3 +297,21 @@ def test_a_source_error_that_is_not_json_is_named_as_a_variable_without_its_valu
     assert "hunter2" not in str(error)
     assert error.__cause__ is None
     assert error.__suppress_context__
+
+
+def test_a_validator_can_name_a_variable_other_than_its_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Checked(Settings):
+        footage_dir: Path
+
+        @model_validator(mode="after")
+        def _other_variable(self) -> Self:
+            raise VariableError("PGCONNECT_TIMEOUT", "must be a whole number of seconds")
+
+    monkeypatch.setenv("VISIONQUERY_FOOTAGE_DIR", "/srv/footage")
+    with pytest.raises(SettingsError) as raised:
+        Checked.load()
+    assert raised.value.variables == ("PGCONNECT_TIMEOUT",)
+    assert "PGCONNECT_TIMEOUT is invalid: must be a whole number of seconds" in str(raised.value)
+    assert "VISIONQUERY_" not in str(raised.value)

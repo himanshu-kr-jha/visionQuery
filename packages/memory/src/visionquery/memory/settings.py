@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 import psycopg
 from psycopg.conninfo import conninfo_to_dict
 from pydantic import BaseModel, SecretStr, field_validator, model_validator
+from visionquery.runtime import VariableError
 
 __all__ = ["DatabaseSettings"]
 
@@ -114,8 +115,12 @@ class DatabaseSettings(BaseModel):
         # libpq's own variable, which connecting reads when the URL sets no timeout; an empty
         # one is unset and 0 waits forever, as in libpq. libpq would quote a bad one back.
         value = os.environ.get("PGCONNECT_TIMEOUT", "")
-        if value and not _DIGITS.fullmatch(value):
-            raise ValueError("PGCONNECT_TIMEOUT must be a non-negative whole number of seconds")
+        # libpq accepts surrounding whitespace; a negative or a non-number is refused, and the
+        # value is not quoted.
+        if value and not _DIGITS.fullmatch(value.strip()):
+            raise VariableError(
+                "PGCONNECT_TIMEOUT", "must be a whole number of seconds, 0 to wait forever"
+            )
         return self
 
 

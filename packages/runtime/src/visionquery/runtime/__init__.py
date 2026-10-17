@@ -4,7 +4,7 @@ from visionquery.runtime.logs import configure_logging
 from visionquery.runtime.metrics import MetricsServer, serve_metrics
 from visionquery.runtime.process import Process, start
 from visionquery.runtime.scrub import scrub
-from visionquery.runtime.settings import LogLevel, Settings, SettingsError
+from visionquery.runtime.settings import LogLevel, Settings, SettingsError, VariableError
 
 __all__ = [
     "LogLevel",
@@ -12,6 +12,7 @@ __all__ = [
     "Process",
     "Settings",
     "SettingsError",
+    "VariableError",
     "configure_logging",
     "scrub",
     "serve_metrics",

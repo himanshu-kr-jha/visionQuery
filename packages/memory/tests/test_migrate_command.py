@@ -199,7 +199,10 @@ def test_a_pgconnect_timeout_that_is_not_a_number_is_a_settings_error_naming_it(
     status, lines, stderr = _run({"PGCONNECT_TIMEOUT": "soon"}, database__url=database)
     assert (status, stderr) == (2, "")
     (line,) = lines
-    assert "PGCONNECT_TIMEOUT" in line["message"]
+    assert "PGCONNECT_TIMEOUT is invalid" in line["message"]
+    assert "whole number of seconds, 0 to wait forever" in line["message"]
+    # The variable to change is PGCONNECT_TIMEOUT alone, not the database URL's.
+    assert "VISIONQUERY_DATABASE" not in line["message"]
     assert "soon" not in line["message"]
 
 
