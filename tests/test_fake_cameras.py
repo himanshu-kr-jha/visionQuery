@@ -505,6 +505,24 @@ def _prepared(calls: list[list[str]]) -> list[list[str]]:
     return [c for c in calls if c[-2] == "mp4" and "lavfi" not in c]
 
 
+def test_with_a_password_each_camera_publishes_as_itself_with_it(
+    publisher: Callable[[str], Publisher],
+) -> None:
+    # MediaMTX lets a camera publish only with its own credentials (ADR 0002): the fake cameras
+    # are registered as pushed cameras whose publish user is their name, sharing one password.
+    p = publisher("lobby=synthetic,yard-2=synthetic")
+    p.env["FAKE_CAMERAS_PASSWORD"] = "fake/camera pa55word+"
+    p.start()
+    _eventually(lambda: p.health().returncode == 0)
+    assert sorted(_publishing(p.ffmpeg_calls())) == [
+        "rtsp://lobby:fake%2Fcamera%20pa55word%2B@mediamtx.test:8554/lobby",
+        "rtsp://yard-2:fake%2Fcamera%20pa55word%2B@mediamtx.test:8554/yard-2",
+    ]
+    logged = p.stop()
+    assert "pa55word" not in logged
+    assert "publishing the test pattern to rtsp://***@mediamtx.test:8554/lobby" in logged
+
+
 def test_every_camera_gets_its_own_ffmpeg_and_turns_healthy(
     publisher: Callable[[str], Publisher],
 ) -> None:

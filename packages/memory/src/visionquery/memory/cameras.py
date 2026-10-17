@@ -46,6 +46,7 @@ from pydantic import GetCoreSchemaHandler, SecretStr
 from pydantic_core import core_schema
 
 __all__ = [
+    "PASSWORD_MINIMUM",
     "PULLED_PATHS",
     "Camera",
     "CameraError",
