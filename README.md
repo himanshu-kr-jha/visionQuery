@@ -100,11 +100,14 @@ By default these are three cameras of the [MEVA](https://mevadata.org/) dataset'
 
 All the cameras play their videos in step.
 Each video is cut to the same five minutes (`VISIONQUERY_FAKE_CAMERA_DURATION`, in seconds; MEVA's recordings are 300.0 to 300.3 s long and would otherwise drift apart), and every camera shows the second of its video that the wall clock says, counted from the Unix epoch.
-A camera that starts late, is still being prepared, or restarts rejoins that timeline at once, so the cameras that recorded the same minutes show the same people at the same moment, to within a fraction of a second, however long the stack has been up.
+A camera that starts late, is still being prepared, or restarts rejoins that timeline at once, so the cameras that recorded the same minutes show the same people at the same moment, however long the stack has been up.
+They agree to within about 0.15 s, and are a few tenths of a second ahead of the wall clock: each camera's ffmpeg sends its first half second at once and then keeps that lead, and some start a little sooner than others, which also shifts a camera slightly each time it restarts.
+To keep it so, each camera playing a sample reconnects once a day (sooner when `VISIONQUERY_FAKE_CAMERA_DURATION` is only a few seconds), and every one of them at once when the wall clock steps (it is set, or the machine wakes from sleep), which disconnects its viewers once.
 The five minutes then repeat for ever, beginning at every five minutes of the hour (UTC): the same people walk by again every five minutes, so expect the same Visits, Tracks and Links to recur when developing perception and the linker against these cameras.
 (The test pattern, and a camera on it while its video is prepared, are not part of the timeline.)
 
 Any number of cameras can be listed, several may loop the same video, `synthetic` is a test pattern that needs no video, and any video file in `VISIONQUERY_FAKE_CAMERA_SAMPLES` (`samples/` by default) can be used.
+A video is played at its frame rate rounded to a whole number (29.97 becomes 30), so that it has a keyframe on every second, where a camera joins the timeline.
 Each camera reconnects by itself whenever MediaMTX restarts.
 
 The samples are changed from the originals: each is re-encoded for streaming (H.264 without B-frames, a keyframe a second, no audio), as CC BY 4.0 asks to be said.
@@ -120,6 +123,9 @@ The database schema is applied with `visionquery-migrate`, which reads `VISIONQU
 
 The memory's and the api's tests run against a real Postgres: they need Docker (each session starts and removes its own container) or `VISIONQUERY_TEST_DATABASE_URL` pointing at a superuser's `postgresql://` URL on a server with TimescaleDB and pgvector.
 Without either they are skipped, saying why (in CI, where `CI` is set, a test skipped for a missing prerequisite fails instead).
+
+The stack tests (`make test-stack`) bring the stack up for real under a throwaway Compose project, and are left out of `make check`.
+`VISIONQUERY_TEST_SAMPLES=1 make test-stack` also runs the fake cameras on the real samples, downloading them first; it takes about 18 minutes the first time and about 13 after, most of it downloading the samples (once) and preparing them (every run, in a volume of its own).
 
 ## Contributing
 
