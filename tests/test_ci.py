@@ -54,10 +54,7 @@ def test_it_runs_on_prs_and_pushes_to_develop_and_main_and_by_hand() -> None:
     # PyYAML reads the bare key `on` as True.
     triggers = _workflow()[True]
     assert triggers["pull_request"]["branches"] == ["develop", "main"]
-    assert triggers["push"]["branches"] in (
-        ["develop", "main"],
-        ["develop", "main", "feature/8-ci"],
-    )
+    assert triggers["push"]["branches"] == ["develop", "main"]
     assert "workflow_dispatch" in triggers
 
 
