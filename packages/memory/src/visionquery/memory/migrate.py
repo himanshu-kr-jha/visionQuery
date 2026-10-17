@@ -8,7 +8,8 @@ The row in `schema_migrations` that records a file is written in the same transa
 file's statements, so a migration that fails leaves nothing behind and nothing recorded, while
 the ones before it stay applied. The record keeps the SHA-256 of the file's bytes.
 Only the record's owner, the role that migrates, may write it: every run takes back from any
-other role, and from PUBLIC, every privilege on it but `SELECT`.
+other role, and from PUBLIC, every privilege on it but `SELECT`, before applying anything and
+again after, since a migration may grant on it too.
 
 **A run refuses when the files and the record disagree, naming each file.**
 Migrations are append-only: an applied file that was edited, renamed, renumbered or removed
@@ -225,10 +226,18 @@ def migrate(
         pending, problems = _plan(files, misnamed, _applied(connection))
         if problems:
             raise MigrationRefusedError(problems)
-        for migration in pending:
-            _apply(connection, migration, lock_timeout)
-            connection.execute(_RESET)
-        return tuple(migration.name for migration in pending)
+        applied: list[str] = []
+        try:
+            for migration in pending:
+                _apply(connection, migration, lock_timeout)
+                applied.append(migration.name)
+                connection.execute(_RESET)
+        finally:
+            # A migration may have granted on the record too (`ON ALL TABLES IN SCHEMA`), and
+            # what it did stays even when a later one fails.
+            if applied and not connection.broken:
+                _seal(connection)
+        return tuple(applied)
 
 
 _RECORD = b"""

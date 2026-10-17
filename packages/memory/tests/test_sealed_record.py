@@ -14,7 +14,7 @@ from typing import Literal
 import psycopg
 import pytest
 from psycopg import sql
-from visionquery.memory.migrate import migrate
+from visionquery.memory.migrate import MigrationFailedError, migrate
 
 WRITES = [
     "INSERT INTO schema_migrations (number, name, sha256) VALUES (99, 'x', sha256('x'))",
@@ -52,7 +52,7 @@ def _cannot_write(database: str, role: str) -> None:
     with psycopg.connect(database, autocommit=True) as connection:
         connection.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(role)))
         # Reading what is applied stays allowed: a service may check the schema it runs on.
-        assert connection.execute("SELECT count(*) FROM schema_migrations").fetchone() == (1,)
+        assert connection.execute("SELECT count(*) FROM schema_migrations").fetchone() != (0,)
         for statement in WRITES:
             with pytest.raises(psycopg.errors.InsufficientPrivilege):
                 connection.execute(statement.encode())
@@ -155,3 +155,27 @@ def test_a_column_level_grant_is_taken_back(
             assert row == (0,)
     finally:
         _drop_roles(database, role)
+
+
+def test_a_grant_a_migration_makes_on_the_record_is_taken_back_in_the_same_run(
+    database: str, migrations: Path, service: str
+) -> None:
+    # A migration that grants on every table (as one giving a role the memory's rows would)
+    # reaches the record too; the run must not leave that until the next run.
+    (migrations / "0002_grant.sql").write_text(
+        f'GRANT ALL ON ALL TABLES IN SCHEMA public TO "{service}";'
+    )
+    assert migrate(database, migrations) == ("0001_people.sql", "0002_grant.sql")
+    _cannot_write(database, service)
+
+
+def test_a_grant_on_the_record_is_taken_back_even_when_a_later_migration_fails(
+    database: str, migrations: Path, service: str
+) -> None:
+    (migrations / "0002_grant.sql").write_text(
+        f'GRANT ALL ON ALL TABLES IN SCHEMA public TO "{service}";'
+    )
+    (migrations / "0003_broken.sql").write_text("SELECT * FROM nowhere;")
+    with pytest.raises(MigrationFailedError):
+        migrate(database, migrations)
+    _cannot_write(database, service)
