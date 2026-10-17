@@ -35,6 +35,7 @@ visionquery-runtime = { workspace = true }
 dev = [
     "httpx2>=2.13.1",
     "import-linter>=2.15",
+    "pre-commit>=4.7.0",
     "pyright[nodejs]>=1.1.414",
     "pytest>=9.1.1",
     "pyyaml>=6.0.3",
