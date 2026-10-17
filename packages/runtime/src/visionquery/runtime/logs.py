@@ -4,9 +4,15 @@ Everything goes through the standard library's logging, so third-party libraries
 covered too. Scrubbing happens in two places, so no single forgotten call can leak a camera
 password: a record factory scrubs every record as it is made (leaving it untouched when there
 is nothing to remove), and a wrapper around `Logger.makeRecord` scrubs the `extra=` fields,
-which the standard library attaches only after the factory has run. Together they protect
-handlers a library installs for itself. The JSON formatter scrubs every field it writes and
-masks credential-named structured fields as well.
+which the standard library attaches only after the factory has run. Both are process-wide
+and wrap the hooks already in place. Together they protect handlers a library installs for
+itself. The JSON formatter scrubs every field it writes and masks credential-named
+structured fields as well.
+
+On a handler a library installed for itself, this layer does not reach records made by a
+`Logger` subclass whose `makeRecord` does not call `super()` (their `extra=` fields), records
+made by `logging.makeLogRecord`, or fields a filter adds after the record is made; the JSON
+formatter still scrubs all three on the runtime's own handler (ADR 0012).
 
 Output that does not go through logging is not covered: subprocess stderr, stderr written by
 C libraries, and `print`. Subprocess stderr must be piped and logged line by line (ADR 0012).
