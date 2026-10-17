@@ -63,6 +63,13 @@ _Avoid_: incident, investigation, bookmark, folder, evidence
 
 ## Place
 
+**Camera**:
+What films for a Deployment, known by a name unique within it.
+Either pulled, reached by the Deployment at its URL, or pushed, publishing its video to the Deployment at a path of its own.
+A pulled Camera's URL is secret in its user, password, path and query, because cameras put their credentials in any of them; only its scheme, host and port are shown.
+A removed Camera's name is free for another, but its Footage and Tracks still say which Camera saw them.
+_Avoid_: stream, channel, feed, device, source
+
 **Area**:
 A named place the Owner refers to, such as "the loading dock" or "gate 2", seen by one or more cameras.
 How a Question's "where" is turned into which cameras to look at.
