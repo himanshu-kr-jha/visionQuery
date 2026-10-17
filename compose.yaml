@@ -44,7 +44,10 @@ x-visionquery: &visionquery
   # containers and drop live streams. One name for every VisionQuery service means one build and
   # one set of layers per project.
   image: ${COMPOSE_PROJECT_NAME}-app:dev
-  build: .
+  # Only `migrate` builds it (`build: .` there): Compose stamps the building service's name into
+  # the image's labels, so two services building the one tag would race, and whichever finished
+  # last would leave an image ID the other's next build replaces, recreating every container on
+  # every `make up`. The others run what migrate built, which they wait for anyway.
   # Never pulled (it exists only on this host) and never rebuilt by a bare `docker compose up`,
   # which so leaves running streams alone; Compose still builds it when it is absent. `make up`
   # builds first, with BuildKit's attestations off
@@ -94,6 +97,8 @@ services:
   # tests/test_compose.py fails until it does.
   migrate:
     <<: *visionquery
+    # The one service that builds the VisionQuery image (see x-visionquery).
+    build: .
     restart: "no"
     command: ["visionquery-migrate"]
     environment:

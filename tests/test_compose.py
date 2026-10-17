@@ -54,6 +54,8 @@ METRICS: dict[str, str] = {
 RUNTIME_METRICS_PORT = 9100
 #: Long-running services Prometheus does not scrape, and why.
 UNSCRAPED = {"fake-cameras": "a development tool, never part of a Deployment"}
+#: The Compose project `docker compose config` names when not told another.
+VISIONQUERY_PROJECT = "visionquery"
 
 #: An exact tag, naming a version (`1.21.1`) or a dated build (`trixie-20261005-slim`) rather
 #: than `latest` or a bare major, and the digest it resolved to.
@@ -145,9 +147,14 @@ def _long_running(config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     return {n: s for n, s in _services(config).items() if s.get("restart", "no") != "no"}
 
 
-def _is_visionquery_process(service: Mapping[str, Any]) -> bool:
+def _builds_the_visionquery_image(service: Mapping[str, Any]) -> bool:
     build = service.get("build")
     return build is not None and Path(build["context"]).resolve() == ROOT
+
+
+def _is_visionquery_process(service: Mapping[str, Any]) -> bool:
+    """Whether the service runs the image the root Dockerfile builds, whoever builds it."""
+    return service.get("image") == f"{VISIONQUERY_PROJECT}-app:dev"
 
 
 def _combinations() -> list[tuple[str, ...]]:
@@ -251,7 +258,8 @@ def test_every_image_is_pinned_to_a_version_and_its_digest() -> None:
             images += _dockerfile_bases(service)
             # A built image exists only on this host, so it is never pulled from a registry.
             assert service.get("pull_policy") == "never", name
-        else:
+        elif not _is_visionquery_process(service):
+            # A VisionQuery process runs the image migrate builds, whose bases are checked there.
             images.append(service["image"])
     assert images
     unpinned = [image for image in images if not PINNED.match(image)]
@@ -293,8 +301,21 @@ def test_every_visionquery_process_runs_the_one_image() -> None:
     # One build and one set of layers per project: every service built from the root
     # Dockerfile has the same image name.
     services = _services(_config())
-    images = {s["image"] for s in services.values() if _is_visionquery_process(s)}
-    assert len(images) == 1, images
+    images = {s["image"] for s in services.values() if _builds_the_visionquery_image(s)}
+    assert images == {f"{VISIONQUERY_PROJECT}-app:dev"}
+    assert {n for n, s in services.items() if _is_visionquery_process(s)} >= {"migrate", "api"}
+
+
+def test_exactly_one_service_builds_the_visionquery_image() -> None:
+    # Compose stamps the building service's name into the image's labels, so two services
+    # building one tag would race, each `make up` would leave a different image ID behind, and
+    # every VisionQuery container would be recreated on every `make up`. One service builds it
+    # (migrate, which every other one waits for) and the others only run it.
+    services = _services(_config())
+    assert [n for n, s in services.items() if _builds_the_visionquery_image(s)] == ["migrate"]
+    for name, service in services.items():
+        if _is_visionquery_process(service):
+            assert service.get("pull_policy") == "never", name
 
 
 def test_dockerfiles_pin_the_frontend_that_copy_parents_needs() -> None:
