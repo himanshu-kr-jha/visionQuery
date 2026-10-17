@@ -23,6 +23,7 @@ def _rejects(url: str) -> None:
         f"postgresql://u:{SECRET}@127.0.0.1:1/d",
         "postgresql://u:p%40ss@127.0.0.1:5432/d",
         "postgresql://u@/d?host=%2Fvar%2Frun%2Fpostgresql",
+        "postgresql://visionquery@postgres:5432/visionquery",
         "postgresql://u:p@[::1]:5432/d",
         "postgresql://u:p@h/d?port=5432&connect_timeout=0",
         "postgresql://u:p@h/d?connect_timeout=10",

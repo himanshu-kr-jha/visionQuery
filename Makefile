@@ -1,7 +1,11 @@
 # The checks CI runs, one target each; `make check` runs them all.
 # Every target is a thin wrapper over a command listed in CLAUDE.md.
 
-.PHONY: sync lint format typecheck contracts test check
+# A recipe stops at its first failing command, and at a failing stage of a pipe.
+SHELL := bash
+.SHELLFLAGS := -euo pipefail -c
+
+.PHONY: sync lint format typecheck contracts test test-stack check up down
 
 sync:
 	uv sync --locked
@@ -23,4 +27,54 @@ contracts:
 test:
 	uv run pytest
 
+# Brings the Compose stack up for real and takes it down again; needs a running Docker.
+# Not part of `check`. Add VISIONQUERY_TEST_TRITON=gpu (or =cpu on a machine without a
+# GPU) to include Triton, whose image is about 9 GB to download and 25 GB on disk.
+test-stack:
+	uv run pytest -m stack
+
 check: lint typecheck contracts test
+
+# Starts the stack, and fails when the migrations did not succeed. `docker compose up --wait`
+# returns while `migrate` is still running, so a failed migration would go unnoticed, and on
+# a stack that is already up it fails because `migrate` ran again and exited, which is why
+# `migrate` is run and waited for first, and it and every other one-shot job (restart: "no")
+# is left out of the `--wait`. The schema is therefore up to date before any other service starts.
+# Profiles and files come from the environment as usual:
+#   make up COMPOSE_PROFILES=observability
+#   make up COMPOSE_FILE=compose.yaml:compose.no-gpu.yaml COMPOSE_PROFILES=gpu
+# COMPOSE is the command to run, which the stack tests replace to target a project of their own.
+#
+# `up` builds first, so that changed code is what runs: Compose's `pull_policy: never` (see
+# compose.yaml) builds only an absent image, which would leave a stale one running after an
+# edit. Building is cheap on an unchanged tree because every layer is cached, and the image ID
+# stays the same only when BuildKit adds no attestation, whose timestamp would otherwise give
+# a new ID on every build and have Compose recreate migrate and mediamtx on every `up`.
+# The variable is exported for every Compose call, including a `docker compose build` run by hand.
+export BUILDX_NO_DEFAULT_ATTESTATIONS = 1
+COMPOSE ?= docker compose
+
+# The one-shot jobs (restart: "no" in compose.yaml; tests/test_compose.py checks the list):
+# `up --wait` fails on a service that exited, so they are left out of it. Everything else
+# is started and waited for.
+ONE_SHOTS ?= migrate triton-scrape
+# Seconds `make up` gives the migrations to finish, and then every healthcheck.
+MIGRATE_TIMEOUT ?= 300
+WAIT_TIMEOUT ?= 300
+
+up:
+	$(COMPOSE) build
+	$(COMPOSE) up --detach migrate
+	timeout $(MIGRATE_TIMEOUT) $(COMPOSE) wait migrate >/dev/null || { status=$$?; \
+		if [ $$status -eq 124 ]; then echo "make up: the database migrations did not finish within $(MIGRATE_TIMEOUT) s (MIGRATE_TIMEOUT). migrate said:" >&2; \
+		else echo "make up: the database migrations failed ($(COMPOSE) wait migrate exited $$status, with the error above if it printed one). migrate said:" >&2; fi; \
+		$(COMPOSE) logs --no-color --tail 20 migrate >&2; exit 1; }
+	services="$$($(COMPOSE) config --services | grep --invert-match --line-regexp --fixed-strings $(addprefix --regexp ,$(ONE_SHOTS)) || true)"; \
+		[ -n "$$services" ] || { echo "make up: no long-running service in the project" >&2; exit 1; }; \
+		$(COMPOSE) up --detach --wait --wait-timeout $(WAIT_TIMEOUT) $$services
+
+# Stops every service of the project, including those of a profile that is not enabled now
+# (Triton, which would otherwise keep the GPU), and keeps its data; `make down VOLUMES=1`
+# deletes the data too (the database, the metrics).
+down:
+	$(COMPOSE) --profile '*' down --remove-orphans $(if $(VOLUMES),--volumes)

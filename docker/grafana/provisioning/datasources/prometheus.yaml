@@ -1,0 +1,11 @@
+# Grafana's one datasource, provisioned at start so a fresh stack needs no clicking.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

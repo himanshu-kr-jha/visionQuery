@@ -1,0 +1,273 @@
+# The VisionQuery stack.
+#
+#   cp .env.example .env              then set the three passwords in it
+#   make up                           Postgres, migrations and MediaMTX; no GPU needed
+#   make up COMPOSE_PROFILES=observability     adds Prometheus and Grafana
+#   make up COMPOSE_PROFILES=gpu               adds Triton on the host's GPUs
+#   make down                         stop everything, whatever its profile; the data stays
+#   make down VOLUMES=1               stop, and delete the data (database, metrics) too
+# `make up` builds the images (so changed code is what runs), brings the stack up and checks
+# that `migrate` exited 0, which `docker compose up --wait` does not: it returns while a
+# migration is still running. A bare `docker compose up` builds only an absent image, so after
+# changing code or a Dockerfile use `make up`, or run
+# `BUILDX_NO_DEFAULT_ATTESTATIONS=1 docker compose build` first.
+# Needs Docker Engine 25 or newer and Compose 2.30 or newer (`compose wait`).
+#
+# Profiles:
+#   gpu            Triton, reserving every GPU. On a machine without one, add
+#                  `-f compose.yaml -f compose.no-gpu.yaml` to run it on the CPU.
+#   observability  Prometheus scraping every service's /metrics, and Grafana reading it.
+#   dev            the fake camera publisher (#6); until it lands, the same as no profile.
+#
+# Every variable is documented in .env.example. Ports are published on
+# VISIONQUERY_BIND_ADDRESS (loopback unless set) and each has a variable of its own; only
+# MediaMTX's camera-facing ports use VISIONQUERY_MEDIAMTX_BIND_ADDRESS, so opening them to
+# cameras never opens anything else.
+
+name: visionquery
+
+x-service: &service
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  logging:
+    driver: json-file
+    options: { max-size: "10m", max-file: "5" }
+
+# What every VisionQuery process shares: the one image (Dockerfile) and the runtime's settings.
+x-visionquery: &visionquery
+  <<: *service
+  # Named for the project, never `visionquery:dev`: image tags are global to the Docker daemon,
+  # and Compose stamps the project's name into the labels of every image it builds, so two
+  # projects (two clones, a stack test beside a developer's stack) building the same tag would
+  # give it a different image ID each time, and each one's next `make up` would recreate its
+  # containers and drop live streams. One name for every VisionQuery service means one build and
+  # one set of layers per project.
+  image: ${COMPOSE_PROJECT_NAME}-app:dev
+  build: .
+  # Never pulled (it exists only on this host) and never rebuilt by a bare `docker compose up`,
+  # which so leaves running streams alone; Compose still builds it when it is absent. `make up`
+  # builds first, with BuildKit's attestations off
+  # (BUILDX_NO_DEFAULT_ATTESTATIONS=1, which Compose 5.1 cannot be told in this file): an
+  # attestation carries a timestamp, so every build would give a new image ID even when no
+  # layer changed, and Compose recreates a container whose image ID changed, which would drop
+  # live streams on every `make up`. Without attestations an unchanged tree gives the same ID,
+  # so only the service whose code changed is recreated.
+  pull_policy: never
+  read_only: true
+  tmpfs: [/tmp]
+
+services:
+  postgres:
+    <<: *service
+    # TimescaleDB on PostgreSQL 18, with pgvector bundled (ADR 0006).
+    image: timescale/timescaledb:2.30.1-pg18@sha256:9dede0e3ccc071cf71935b17f76bf243331df0b1575338c8ac294640fcf12a36
+    environment:
+      POSTGRES_USER: visionquery
+      POSTGRES_DB: visionquery
+      POSTGRES_PASSWORD: ${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}
+      # The image would otherwise tune itself on every start and rewrite postgresql.conf.
+      NO_TS_TUNE: "true"
+    # A Deployment is closed (ADR 0001, ADR 0002), so TimescaleDB never reports home.
+    command: ["postgres", "-c", "timescaledb.telemetry_level=off"]
+    shm_size: 256m
+    volumes:
+      # PostgreSQL 18 images keep PGDATA in a versioned directory under this one.
+      - postgres:/var/lib/postgresql
+    ports:
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_POSTGRES_PORT:-15432}:5432"
+    healthcheck:
+      # Over TCP: while the image initialises a new database it listens on its socket only,
+      # so a socket check would pass before the server that stays is up.
+      test: ["CMD", "pg_isready", "--host=127.0.0.1", "--username=visionquery", "--dbname=visionquery"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+      start_interval: 1s
+
+  # Brings the schema up to date, then exits; safe to run on every start (ADR 0011).
+  # `up --wait` returns while this still runs, so start the stack with `make up`, which also
+  # fails when it did not exit 0.
+  # EVERY long-running service built from the VisionQuery image (recorder, linker, api...) must
+  # declare `depends_on: { migrate: { condition: service_completed_successfully } }`;
+  # tests/test_compose.py fails until it does.
+  migrate:
+    <<: *visionquery
+    restart: "no"
+    command: ["visionquery-migrate"]
+    environment:
+      VISIONQUERY_LOG_LEVEL: ${VISIONQUERY_LOG_LEVEL:-INFO}
+      # The password is not part of the URL, where `@`, `/`, `:` or `#` in it would break the
+      # URL: libpq reads it from PGPASSWORD, so any password works.
+      VISIONQUERY_DATABASE__URL: postgresql://visionquery@postgres:5432/visionquery
+      PGPASSWORD: ${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  mediamtx:
+    <<: *service
+    # Named for the project, for the reason given at x-visionquery.
+    image: ${COMPOSE_PROJECT_NAME}-mediamtx:1.21.1
+    build: docker/mediamtx
+    pull_policy: never
+    read_only: true
+    environment:
+      # The address a browser sends WebRTC media to; the container cannot know it.
+      MTX_WEBRTCADDITIONALHOSTS: ${VISIONQUERY_MEDIAMTX_WEBRTC_HOSTS:-127.0.0.1}
+      # The port is announced to the browser as it is inside, so the host publishes the same number.
+      MTX_WEBRTCLOCALUDPADDRESS: ":${VISIONQUERY_MEDIAMTX_WEBRTC_UDP_PORT:-8189}"
+      MTX_AUTHINTERNALUSERS_3_PASS: ${VISIONQUERY_MEDIAMTX_API_PASSWORD:?set VISIONQUERY_MEDIAMTX_API_PASSWORD in .env (see .env.example)}
+    volumes:
+      # The directory, not the file: MediaMTX reloads its configuration when the file changes,
+      # and a bind-mounted file would keep showing the copy an editor replaced.
+      - ./docker/mediamtx:/etc/mediamtx:ro
+    ports:
+      - "${VISIONQUERY_MEDIAMTX_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_RTSP_PORT:-8554}:8554"
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_API_PORT:-9997}:9997"
+      - "${VISIONQUERY_MEDIAMTX_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_WEBRTC_PORT:-8889}:8889"
+      # WebRTC media, on the same number inside and out (see MTX_WEBRTCLOCALUDPADDRESS).
+      - "${VISIONQUERY_MEDIAMTX_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_MEDIAMTX_WEBRTC_UDP_PORT:-8189}:${VISIONQUERY_MEDIAMTX_WEBRTC_UDP_PORT:-8189}/udp"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:9997/v3/paths/list"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+  triton:
+    <<: *service
+    profiles: [gpu]
+    image: nvcr.io/nvidia/tritonserver:26.09-py3@sha256:350820308a0e62efbb22f9d4e5b29c970b7c7a54f7b275674e457e5fd8bab1a5
+    command:
+      - tritonserver
+      - --model-repository=/models
+      - --log-format=ISO8601
+    # What NVIDIA asks for: room for shared memory, locked memory and deep stacks.
+    shm_size: 1g
+    ulimits:
+      memlock: -1
+      stack: 67108864
+    volumes:
+      - ./docker/triton/models:/models:ro
+    ports:
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_TRITON_HTTP_PORT:-8000}:8000"
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_TRITON_GRPC_PORT:-8001}:8001"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://127.0.0.1:8000/v2/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+      start_interval: 2s
+    # compose.no-gpu.yaml removes this on a machine without a GPU.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # With the gpu profile, tells Prometheus where Triton's metrics are: it writes a file that
+  # Prometheus reads (file_sd), so that without the profile there is no target and no lookup
+  # of a name that does not resolve, which Prometheus would log as an error every 15 s.
+  # The file stays in the volume once written, so a stack that ran Triton and then stopped it
+  # shows the target as down until the volume alone is removed, with the stack down:
+  # `docker volume rm visionquery_scrape-targets` (`<project>_scrape-targets`). Not
+  # `down --volumes`, which deletes the database too. The volume is shared between two
+  # containers, so it cannot be a tmpfs, and it must outlive `down` for the metrics of a
+  # stack that is only restarted.
+  triton-scrape:
+    <<: *service
+    profiles: [gpu]
+    restart: "no"
+    image: alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+    command: ["sh", "-c", "echo '- targets: [\"triton:8002\"]' > /targets/triton.yml"]
+    read_only: true
+    volumes:
+      - scrape-targets:/targets
+
+  prometheus:
+    <<: *service
+    profiles: [observability]
+    image: prom/prometheus:v3.15.0@sha256:efd719c99d83b060d9daefdcf00360461adf279f45ef5391f8d111892118753e
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+    volumes:
+      - ./docker/prometheus:/etc/prometheus:ro
+      - scrape-targets:/etc/prometheus-targets:ro
+      - prometheus:/prometheus
+    depends_on:
+      # Only when the gpu profile is on: then its file is written before Prometheus starts.
+      triton-scrape:
+        condition: service_completed_successfully
+        required: false
+    ports:
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+  grafana:
+    <<: *service
+    profiles: [observability]
+    image: grafana/grafana:13.2.4@sha256:dbbc38ea21103cefb50396340cd88afec779c7e070b0a7bf5a75b4ce46651d3f
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${VISIONQUERY_GRAFANA_ADMIN_PASSWORD:?set VISIONQUERY_GRAFANA_ADMIN_PASSWORD in .env (see .env.example)}
+      # A Deployment is closed: no usage reports, update checks or news feed.
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana:/var/lib/grafana
+    ports:
+      - "${VISIONQUERY_BIND_ADDRESS:-127.0.0.1}:${VISIONQUERY_GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 1s
+
+  # Postgres's metrics for Prometheus; never published on the host.
+  postgres-exporter:
+    <<: *service
+    profiles: [observability]
+    image: prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
+    environment:
+      DATA_SOURCE_URI: postgres:5432/visionquery?sslmode=disable
+      DATA_SOURCE_USER: visionquery
+      DATA_SOURCE_PASS: ${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}
+    read_only: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:9187/"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+      start_interval: 1s
+
+volumes:
+  scrape-targets:
+  postgres:
+  prometheus:
+  grafana:

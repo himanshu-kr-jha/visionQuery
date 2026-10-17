@@ -19,9 +19,12 @@ import pytest
 COMMAND = Path(sys.executable).parent / "visionquery-migrate"
 
 
-def _run(**variables: str) -> tuple[int, list[dict[str, Any]], str]:
+def _run(
+    extra: dict[str, str] | None = None, **variables: str
+) -> tuple[int, list[dict[str, Any]], str]:
     inherited = {k: v for k, v in os.environ.items() if not k.upper().startswith("VISIONQUERY_")}
     environment = inherited | {f"VISIONQUERY_{k.upper()}": v for k, v in variables.items()}
+    environment |= extra or {}
     # Bound to loopback; the port is the command's own default, which must not be a fixed one.
     environment["VISIONQUERY_METRICS_HOST"] = "127.0.0.1"
     done = subprocess.run(
@@ -47,6 +50,27 @@ def test_migrates_a_new_database_and_then_has_nothing_to_do(database: str) -> No
     (done,) = [line for line in lines if line["message"].startswith("migrated")]
     assert done["applied"] == []
     assert not any(m.startswith("applied ") for m in _messages(lines))
+
+
+def test_the_password_may_come_from_pgpassword_instead_of_the_url(database: str) -> None:
+    # How the Compose stack runs it: the URL names no password, so any password works.
+    parts = urlsplit(database)
+    assert parts.password is not None
+    bare = parts._replace(netloc=f"{parts.username}@{parts.hostname}:{parts.port}").geturl()
+    status, lines, stderr = _run(extra={"PGPASSWORD": parts.password}, database__url=bare)
+    assert (status, stderr) == (0, "")
+    assert any(m.startswith("migrated") for m in _messages(lines))
+    assert parts.password not in json.dumps(lines)
+
+
+def test_a_wrong_pgpassword_fails_without_showing_it(database: str) -> None:
+    parts = urlsplit(database)
+    bare = parts._replace(netloc=f"{parts.username}@{parts.hostname}:{parts.port}").geturl()
+    status, lines, stderr = _run(extra={"PGPASSWORD": "wrongPW9"}, database__url=bare)
+    assert status == 1
+    (failed,) = [line for line in lines if line["level"] == "CRITICAL"]
+    assert failed["error"] == "ConnectionFailedError"
+    assert "wrongPW9" not in json.dumps(lines) + stderr
 
 
 def test_an_edited_migration_is_refused_by_name(database: str) -> None:
