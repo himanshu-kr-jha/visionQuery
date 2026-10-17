@@ -32,8 +32,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from prometheus_client import Counter, Gauge
 from visionquery.memory.cameras import Camera
+from visionquery.recorder import metrics
 from visionquery.recorder.ffmpeg import Recording, Source
 from visionquery.recorder.mp4 import Fragment, Init, MalformedError
 from visionquery.recorder.segment import Reason, Segment, SegmentFile, window
@@ -42,36 +42,6 @@ from visionquery.recorder.timebase import TimeBase
 __all__ = ["Backoff", "Segmenter", "Timing", "record_camera"]
 
 _log = logging.getLogger(__name__)
-
-_CONNECTIONS = Counter(
-    "visionquery_recorder_connections",
-    "Connections the recorder made to a camera's stream in MediaMTX, by camera id.",
-    ["camera"],
-)
-_FRAGMENTS = Counter(
-    "visionquery_recorder_fragments", "Fragments of Footage written, by camera id.", ["camera"]
-)
-_BYTES = Counter(
-    "visionquery_recorder_bytes", "Bytes of Footage written, by camera id.", ["camera"]
-)
-_SEGMENTS = Counter(
-    "visionquery_recorder_segments",
-    "Segments finished, by camera id and why (rolled, stream_ended, stopped, recovered).",
-    ["camera", "reason"],
-)
-_RECEIVING = Gauge(
-    "visionquery_recorder_receiving",
-    "1 while a camera's video is arriving and being recorded, 0 while it is not, by camera id.",
-    ["camera"],
-)
-_CLOCK_VERIFIED = Gauge(
-    "visionquery_recorder_clock_verified",
-    "1 when a camera's last Segment opened on a synchronised NTP reading, 0 on the wall clock.",
-)
-_WALL_OFFSET = Gauge(
-    "visionquery_recorder_clock_wall_offset_seconds",
-    "The wall clock less the recorder's timebase, when a Segment last finished.",
-)
 
 
 @dataclass(frozen=True)
@@ -181,7 +151,7 @@ class _Outage:
         self._started = False
 
     def lost(self, why: str | None) -> None:
-        _RECEIVING.labels(str(self._camera.id)).set(0)
+        metrics.RECEIVING.labels(str(self._camera.id)).set(0)
         if self._since is not None:
             return
         self._since = asyncio.get_running_loop().time()
@@ -195,7 +165,7 @@ class _Outage:
         )
 
     def back(self) -> None:
-        _RECEIVING.labels(str(self._camera.id)).set(1)
+        metrics.RECEIVING.labels(str(self._camera.id)).set(1)
         if self._since is not None:
             away = asyncio.get_running_loop().time() - self._since
             _log.info(
@@ -247,7 +217,7 @@ async def record_camera(
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), timeout=backoff.next())
     finally:
-        _RECEIVING.labels(str(camera.id)).set(0)
+        metrics.RECEIVING.labels(str(camera.id)).set(0)
 
 
 async def _connect_once(
@@ -262,7 +232,7 @@ async def _connect_once(
     """One connection to the camera's stream, until it ends: whether video arrived, and why
     it ended."""
     label = str(camera.id)
-    _CONNECTIONS.labels(label).inc()
+    metrics.CONNECTIONS.labels(label).inc()
     not_before = timebase.now()
     segmenter: Segmenter | None = None
     received = False
@@ -283,9 +253,9 @@ async def _connect_once(
                 if not received:
                     received = True
                     outage.back()
-                    _CLOCK_VERIFIED.set(int(timebase.verified))
-                _FRAGMENTS.labels(label).inc()
-                _BYTES.labels(label).inc(len(item.data))
+                    metrics.CLOCK_VERIFIED.set(int(timebase.verified))
+                metrics.FRAGMENTS.labels(label).inc()
+                metrics.BYTES.labels(label).inc(len(item.data))
                 if rolled is not None:
                     _finished(camera, rolled, timebase)
         except MalformedError as error:
@@ -310,8 +280,8 @@ async def _stop_when(stop: asyncio.Event, recording: Recording) -> None:
 
 
 def _finished(camera: Camera, segment: Segment, timebase: TimeBase) -> None:
-    _SEGMENTS.labels(str(camera.id), segment.reason).inc()
-    _WALL_OFFSET.set(timebase.state().wall_offset_seconds)
+    metrics.SEGMENTS.labels(str(camera.id), segment.reason).inc()
+    metrics.WALL_OFFSET.set(timebase.state().wall_offset_seconds)
     _log.info(
         "%s (%s): Segment %s finished %s, %s to %s",
         camera.name,
