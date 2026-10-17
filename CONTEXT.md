@@ -46,6 +46,12 @@ The recorded video from a camera, the only thing that can never be regenerated o
 Kept on a rolling budget: when space runs out, the oldest Footage not in a Case goes first.
 _Avoid_: recording, video, archive, clip (a clip is a span of Footage)
 
+**Segment**:
+One file of a Camera's Footage, covering at most one window of a fixed length aligned to the epoch, so that every Camera's Footage is cut at the same instants.
+Copied from the Camera's stream without decoding it, and timed by the Deployment's NTP-anchored clock, never by when it happened to be written.
+When a Camera's stream drops, its Segment ends there, and the time until the next one begins is time nothing was recorded.
+_Avoid_: chunk, file, recording, clip
+
 **Keyframe**:
 A still crop of a person chosen from a Track to represent how they looked.
 Outlives the Footage it came from, so a Track can still be shown after its Footage has expired.
