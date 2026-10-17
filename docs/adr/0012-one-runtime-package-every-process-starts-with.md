@@ -19,15 +19,18 @@ The record factory (`logging.setLogRecordFactory`) scrubs the message, its argum
 `Logger.makeRecord` is replaced on the class itself, for every logger in the process including those that already exist, to scrub the `extra=` fields, because the standard library attaches them only after the factory has run.
 Both wrap whatever factory and `makeRecord` are in place when `configure_logging` is called, rather than replacing them, so a library that installed its own first (OpenTelemetry's logging instrumentor adds trace ids this way) keeps the fields it adds.
 Both wrappers are marked as the runtime's, so configuring again does not wrap them a second time.
-A container in `extra=` keeps its type (a namedtuple stays one), and is left as it is when there is nothing to remove.
+That holds only while a wrapper of ours is the one in place: a library that wrapped ours on top keeps ours underneath, but one that saved the hook it found before ours and later restores it (OpenTelemetry's uninstrument does) removes ours with it, and the next `configure_logging` installs it again.
+A container in `extra=` is left as it is when there is nothing to remove.
+When something in it has to be scrubbed, a namedtuple, list, tuple or set keeps its type if it can be rebuilt, and a mapping becomes a dict.
 
 Records that reach a handler without passing through both hooks are not scrubbed by this layer:
 
 - records made by a `Logger` subclass that overrides `makeRecord` without calling `super()`, whose `extra=` fields are not scrubbed;
-- records made by `logging.makeLogRecord`, which does not call the factory, as when records arrive over a socket from another process;
+- records made by `logging.makeLogRecord`, which calls the factory on an empty record and then overlays the given fields, so none of them is scrubbed, as when records arrive over a socket from another process;
+- records built directly with `logging.LogRecord(...)` and passed to `Logger.handle`, which bypass both hooks;
 - fields that a filter adds to a record after it was made, since a filter runs when the record is handled.
 
-On the runtime's own handler all three are still scrubbed, by the JSON formatter.
+On the runtime's own handler all four are still scrubbed, by the JSON formatter.
 On a handler a library installed for itself, with a formatter of its own, they are not: a service that installs such a handler with such a filter or logger class must scrub what it adds.
 
 ## What never passes through logging

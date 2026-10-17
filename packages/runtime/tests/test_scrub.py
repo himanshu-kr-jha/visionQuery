@@ -198,7 +198,8 @@ _ADVERSARIAL = {
 _SMALL, _LARGE = 20_000, 200_000
 
 #: Times `scrub` on a small and a large size of each adversarial text, best of three each,
-#: writing one line per text as soon as it is timed, so a text that hangs is known by name.
+#: writing `started <text>` before each text and its timings as soon as they are known, so a
+#: text that hangs is known by name.
 _TIMING = f"""
 import json, sys, time
 from visionquery.runtime import scrub
@@ -213,6 +214,7 @@ def best(prefix, unit, size):
     return min(times)
 
 for name, (prefix, unit) in json.loads(sys.argv[1]).items():
+    print("started " + name, flush=True)
     timed = [best(prefix, unit, {_SMALL}), best(prefix, unit, {_LARGE})]
     print(json.dumps([name, timed]), flush=True)
 """
@@ -228,11 +230,12 @@ _HARD_TIMEOUT_SECONDS = 60
 
 
 @pytest.fixture(scope="module")
-def timings(tmp_path_factory: pytest.TempPathFactory) -> dict[str, tuple[float, float]]:
+def timings(tmp_path_factory: pytest.TempPathFactory) -> dict[str, tuple[float, float] | str]:
     """How long each adversarial text took at each size, timed in one child process.
 
     A child process, so that a quadratic scrub can be stopped; one, so that the interpreter
-    starts once rather than once per text. A text missing from the result did not finish.
+    starts once rather than once per text. A text that was started and did not finish is
+    "hung", and each one after it "not reached".
     """
     output = tmp_path_factory.mktemp("scrub") / "timings.jsonl"
     with output.open("w") as stream, contextlib.suppress(subprocess.TimeoutExpired):
@@ -242,20 +245,24 @@ def timings(tmp_path_factory: pytest.TempPathFactory) -> dict[str, tuple[float, 
             timeout=_HARD_TIMEOUT_SECONDS,
             check=True,
         )
-    timed: dict[str, tuple[float, float]] = {}
+    timed: dict[str, tuple[float, float] | str] = dict.fromkeys(_ADVERSARIAL, "not reached")
     for line in output.read_text().splitlines():
-        name, (small, large) = json.loads(line)
-        timed[name] = (small, large)
+        if line.startswith("started "):
+            timed[line.removeprefix("started ")] = "hung"
+        else:
+            name, (small, large) = json.loads(line)
+            timed[name] = (small, large)
     return timed
 
 
 @pytest.mark.parametrize("name", list(_ADVERSARIAL))
 def test_scrubbing_adversarial_text_grows_linearly_with_its_size(
-    timings: dict[str, tuple[float, float]], name: str
+    timings: dict[str, tuple[float, float] | str], name: str
 ) -> None:
-    if name not in timings:
-        pytest.fail(f"scrubbing {name} did not finish within {_HARD_TIMEOUT_SECONDS} s")
-    small, large = timings[name]
+    result = timings[name]
+    if isinstance(result, str):
+        pytest.fail(f"scrubbing {name} did not finish within {_HARD_TIMEOUT_SECONDS} s: {result}")
+    small, large = result
     assert large < max(small, _FLOOR_SECONDS) * _GROWTH_LIMIT, (small, large)
 
 

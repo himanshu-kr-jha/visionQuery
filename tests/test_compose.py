@@ -547,13 +547,22 @@ def test_prometheus_scrapes_every_long_running_service() -> None:
         assert expected in scraped, f"Prometheus does not scrape {name} at {expected}"
 
 
+def _runtime_environment() -> list[str]:
+    """The variables compose.yaml says every VisionQuery process is given."""
+    declared = yaml.safe_load(COMPOSE.read_text())["x-runtime-environment"]
+    assert "VISIONQUERY_METRICS_HOST" in declared
+    return list(declared)
+
+
 def test_every_visionquery_process_serves_its_metrics_beyond_its_own_container() -> None:
     # A process serves /metrics on loopback unless told otherwise, which Prometheus, in a
     # container of its own, cannot reach. Nothing is published on the host.
     processes = {n: s for n, s in _services(_config()).items() if _is_visionquery_process(s)}
     assert processes
     for name, service in processes.items():
-        assert service["environment"].get("VISIONQUERY_METRICS_HOST") == "0.0.0.0", name
+        for variable in _runtime_environment():
+            assert variable in service["environment"], f"{name} lacks {variable}"
+        assert service["environment"]["VISIONQUERY_METRICS_HOST"] == "0.0.0.0", name
         published = {str(port.get("target")) for port in service.get("ports", [])}
         assert str(RUNTIME_METRICS_PORT) not in published, name
 

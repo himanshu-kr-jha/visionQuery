@@ -11,8 +11,9 @@ structured fields as well.
 
 On a handler a library installed for itself, this layer does not reach records made by a
 `Logger` subclass whose `makeRecord` does not call `super()` (their `extra=` fields), records
-made by `logging.makeLogRecord`, or fields a filter adds after the record is made; the JSON
-formatter still scrubs all three on the runtime's own handler (ADR 0012).
+made by `logging.makeLogRecord` or built directly with `logging.LogRecord`, or fields a filter
+adds after the record is made; the JSON formatter still scrubs all of them on the runtime's
+own handler (ADR 0012).
 
 Output that does not go through logging is not covered: subprocess stderr, stderr written by
 C libraries, and `print`. Subprocess stderr must be piped and logged line by line (ADR 0012).
