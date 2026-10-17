@@ -15,6 +15,13 @@
 
 FROM ghcr.io/astral-sh/uv:0.11.7@sha256:240fb85ab0f263ef12f492d8476aa3a2e4e1e333f7d67fbdd923d00a506a516a AS uv
 
+# The recorder's ffmpeg (visionquery.recorder.ffmpeg), which copies each camera's stream into
+# fragmented MP4 without decoding it. The static build the fake cameras use, pinned to the same
+# version and digest (tests/test_compose.py checks they agree), so one ffmpeg is tested for both;
+# only the binary is copied. Debian's own package would bring a few hundred megabytes of
+# libraries for codecs the recorder never touches.
+FROM mwader/static-ffmpeg:9.0.2-1@sha256:f5d100184884eb3e82b0eb14bb5ebf98da99826ac824989720297fb9ef21c822 AS ffmpeg
+
 FROM debian:trixie-20261005-slim@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f AS build
 COPY --from=uv /uv /usr/local/bin/uv
 # Python is uv's own build, as on a developer's machine (`python-preference = "only-managed"`),
@@ -50,6 +57,7 @@ RUN apt-get update \
         --home-dir /tmp --shell /usr/sbin/nologin visionquery
 COPY --from=build /opt/python /opt/python
 COPY --from=build /opt/visionquery /opt/visionquery
+COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg
 ENV PATH=/opt/visionquery/bin:$PATH \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
