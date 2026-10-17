@@ -28,7 +28,7 @@ Everything lives in one PostgreSQL database (TimescaleDB for time partitioning, 
 
 ## Setup
 
-The project is being scaffolded (milestone M0): the stack runs, but there are no sample cameras yet.
+The project is being scaffolded (milestone M0): the stack runs, with fake cameras for development, but nothing watches them yet.
 
 You need Docker Engine 25 or newer with the Compose plugin v2.30 or newer (`docker compose wait`; the Dockerfile frontend that `COPY --parents` needs is pinned in the Dockerfile and fetched by BuildKit) and, to work on the code, [uv](https://docs.astral.sh/uv/).
 A GPU is needed only for Triton (the `gpu` profile), and then with NVIDIA's container toolkit.
@@ -45,8 +45,34 @@ A GPU is needed only for Triton (the `gpu` profile), and then with NVIDIA's cont
    - `make up COMPOSE_PROFILES=observability` (or `--profile observability` with `docker compose`): Prometheus on <http://127.0.0.1:9090> scraping every service, and Grafana on <http://127.0.0.1:3000> (user `admin`) reading it.
    - `COMPOSE_PROFILES=gpu` (or `--profile gpu`): Triton on `127.0.0.1:8000` (HTTP) and `8001` (gRPC), on every GPU.
      On a machine without one, run it on the CPU with `make up COMPOSE_FILE=compose.yaml:compose.no-gpu.yaml COMPOSE_PROFILES=gpu`.
-   - `--profile dev`: the fake camera publisher, once it lands (#6).
+   - `COMPOSE_PROFILES=dev` (or `--profile dev`): fake cameras, each looping a video into MediaMTX over RTSP as a real camera would publish it, so that everything can be developed without one.
+     See "Fake cameras" below.
 4. Stop it with `make down`, which stops every service whatever its profile (Triton included) and keeps the data; `make down VOLUMES=1` deletes the database and metrics as well.
+
+### Fake cameras
+
+The `dev` profile's `fake-cameras` service publishes one MediaMTX path per camera that `VISIONQUERY_FAKE_CAMERAS` in `.env` lists, as `name=video` pairs.
+By default these are three cameras of the [MEVA](https://mevadata.org/) dataset's school ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/legalcode)), recording the same five minutes: two views of a busy gym from opposite sides, and a stairwell by an entrance.
+
+1. Download the videos once: `make fetch-samples` (about 400 MB, into `samples/`, which git ignores).
+   Each is checked against the SHA-256 in [`samples/manifest.toml`](samples/manifest.toml), which also gives its license and attribution, and one already present is skipped.
+2. Start the stack with the profile: `make up COMPOSE_PROFILES=dev`.
+   Each video is first re-encoded once as a camera sends video (H.264 without B-frames, a keyframe a second), which takes about a minute per video and is kept in the `fake-cameras` volume; the camera shows a test pattern meanwhile.
+   A camera whose video is not in `samples/` shows the test pattern instead, with a warning in `docker compose logs fake-cameras`, so the profile works before anything is downloaded; restart the service (`docker compose restart fake-cameras`) once the video is there.
+3. Watch a camera: `ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/gym-g299` (or the same URL in VLC), or open <http://127.0.0.1:8889/gym-g299> in a browser for MediaMTX's WebRTC player.
+
+All the cameras play their videos in step.
+Each video is cut to the same five minutes (`VISIONQUERY_FAKE_CAMERA_DURATION`, in seconds; MEVA's recordings are 300.0 to 300.3 s long and would otherwise drift apart), and every camera shows the second of its video that the wall clock says, counted from the Unix epoch.
+A camera that starts late, is still being prepared, or restarts rejoins that timeline at once, so the cameras that recorded the same minutes show the same people at the same moment, to within a fraction of a second, however long the stack has been up.
+The five minutes then repeat for ever, beginning at every five minutes of the hour (UTC): the same people walk by again every five minutes, so expect the same Visits, Tracks and Links to recur when developing perception and the linker against these cameras.
+(The test pattern, and a camera on it while its video is prepared, are not part of the timeline.)
+
+Any number of cameras can be listed, several may loop the same video, `synthetic` is a test pattern that needs no video, and any video file in `VISIONQUERY_FAKE_CAMERA_SAMPLES` (`samples/` by default) can be used.
+Each camera reconnects by itself whenever MediaMTX restarts.
+
+The samples are changed from the originals: each is re-encoded for streaming (H.264 without B-frames, a keyframe a second, no audio), as CC BY 4.0 asks to be said.
+A camera that starts on the test pattern switches to its prepared sample once the sample is ready, which disconnects a viewer once: reconnect it (play the URL again, or reload the page) to see the sample.
+A video that exists but that the container cannot read (as after `umask 077`) is reported as such in `docker compose logs fake-cameras`; `make fetch-samples` makes the directory and the samples world-readable, or run `chmod -R a+rX samples`.
 
 Every port listens on loopback only unless `VISIONQUERY_BIND_ADDRESS` (or, for the camera-facing ports of MediaMTX alone, `VISIONQUERY_MEDIAMTX_BIND_ADDRESS`) says otherwise, and each can be moved with its own variable when something on the machine already uses it.
 

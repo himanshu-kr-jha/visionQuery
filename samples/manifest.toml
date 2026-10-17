@@ -1,0 +1,49 @@
+# The sample videos the fake cameras loop (dev profile), fetched by `make fetch-samples` into
+# this directory, which git ignores except for this file. Each sample is verified against its
+# SHA-256 and skipped when already present. Total: about 399 MB, downloaded once.
+#
+# Three cameras of the MEVA dataset's school, recording the same five minutes
+# (2018-03-11 11:20-11:25): two views of one gym from opposite sides, which overlap and are
+# busy with people walking, and the stairwell by an entrance, which people pass through. They
+# are what VisionQuery is for: the same people seen by several cameras at once and in turn.
+# The fake cameras play them in step: each is cut to exactly five minutes (the recordings are
+# 300.0 s to 300.3 s long) and every camera shows the same second of its video as every other,
+# by the wall clock, so that the same people are on several cameras at the same moment.
+# The five minutes then repeat for ever, starting at every five minutes of the hour (UTC), so
+# the same people come back every five minutes.
+# MEVA's cameras record H.264 with B-frames in AVI; the fake cameras re-encode each sample once,
+# locally, as a camera sends video, and nothing is redistributed.
+#
+# Fields: file (its name here, which VISIONQUERY_FAKE_CAMERAS refers to), url, sha256, size
+# (bytes), license (SPDX), license_url, attribution (to show wherever the video is shown
+# outside this machine) and source (where the sample and its license are described).
+
+[[sample]]
+file = "meva-school-g299.avi"
+url = "https://mevadata-public-01.s3.amazonaws.com/drops-123-r13/2018-03-11/11/2018-03-11.11-20-00.11-25-00.school.G299.r13.avi"
+sha256 = "ed7b2a9b43755119f898d24588e28f42bedc3b004c9b740d65e6ed11587979ee"
+size = 156966208
+license = "CC-BY-4.0"
+license_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "\"Multiview Extended Video with Activities\" (MEVA) dataset by Kitware Inc. and the Intelligence Advanced Research Projects Activity (IARPA), camera G299 (school gym), 2018-03-11 11:20-11:25; CC BY 4.0"
+source = "https://mevadata.org/"
+
+[[sample]]
+file = "meva-school-g330.avi"
+url = "https://mevadata-public-01.s3.amazonaws.com/drops-123-r13/2018-03-11/11/2018-03-11.11-20-00.11-25-00.school.G330.r13.avi"
+sha256 = "4036fd9daca49098bbb09eb5961e9552501a396ce569c50e09ff4816909e0eff"
+size = 167734396
+license = "CC-BY-4.0"
+license_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "\"Multiview Extended Video with Activities\" (MEVA) dataset by Kitware Inc. and the Intelligence Advanced Research Projects Activity (IARPA), camera G330 (school gym), 2018-03-11 11:20-11:25; CC BY 4.0"
+source = "https://mevadata.org/"
+
+[[sample]]
+file = "meva-school-g420.avi"
+url = "https://mevadata-public-01.s3.amazonaws.com/drops-123-r13/2018-03-11/11/2018-03-11.11-20-00.11-25-00.school.G420.r13.avi"
+sha256 = "72355632da411da7110facf951f6469c3a4ecf23ded279c37843d9587a868b68"
+size = 74109992
+license = "CC-BY-4.0"
+license_url = "https://creativecommons.org/licenses/by/4.0/"
+attribution = "\"Multiview Extended Video with Activities\" (MEVA) dataset by Kitware Inc. and the Intelligence Advanced Research Projects Activity (IARPA), camera G420 (school stairwell), 2018-03-11 11:20-11:25; CC BY 4.0"
+source = "https://mevadata.org/"

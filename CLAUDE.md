@@ -144,9 +144,13 @@ Run everything from the repository root.
 | ...with Prometheus and Grafana | `make up COMPOSE_PROFILES=observability` |
 | ...with Triton on the GPUs | `make up COMPOSE_PROFILES=gpu` |
 | ...with Triton on a machine without a GPU | `make up COMPOSE_FILE=compose.yaml:compose.no-gpu.yaml COMPOSE_PROFILES=gpu` |
+| Download the sample videos the fake cameras loop (about 400 MB, once) | `make fetch-samples` (`uv run scripts/fetch_samples.py`) |
+| ...with fake cameras looping them into MediaMTX | `make up COMPOSE_PROFILES=dev` |
+| Watch a fake camera | `ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/gym-g299`, or <http://127.0.0.1:8889/gym-g299> |
 | Stop the stack, every profile included; keeps the data (`make down VOLUMES=1` deletes it) | `make down` |
 | Rebuild after changing code: `make up` does it; a bare `docker compose up` builds only an absent image | `make up` |
 | Stack tests (bring the stack up for real) | `make test-stack` (`uv run pytest -m stack`) |
+| ...including the fake cameras on the real samples (downloads them first) | `VISIONQUERY_TEST_SAMPLES=1 make test-stack` |
 
 `make lint` runs both ruff commands.
 After changing a dependency, run `uv lock` and commit `uv.lock` with the change.
@@ -155,10 +159,14 @@ After changing a dependency, run `uv lock` and commit `uv.lock` with the change.
 Every published port listens on `VISIONQUERY_BIND_ADDRESS`, or MediaMTX's camera-facing ones (RTSP, WebRTC) on `VISIONQUERY_MEDIAMTX_BIND_ADDRESS` (both loopback by default) and has a variable of its own; Postgres is on host port 15432.
 Every VisionQuery process runs from the one image the root `Dockerfile` builds (ADR 0013; `<project>-app:dev`: image tags are global to the Docker daemon, so every built image is named for its Compose project, or two projects would fight over one tag), choosing its process by its Compose `command`; `migrate` is a one-shot service that runs `visionquery-migrate` once Postgres is healthy, with the password in `PGPASSWORD` rather than in the URL.
 Every future long-running service built from that image must declare `depends_on: migrate: condition: service_completed_successfully` (`tests/test_compose.py` enforces it), and the stack is started with `make up` because `up --wait` returns while `migrate` still runs (it needs Docker Engine 25+, Compose 2.30+ for `compose wait`, and the Dockerfile frontend pinned by digest in the Dockerfile's first line for `COPY --parents`; images are pulled by nobody, `pull_policy: never`).
-Profiles: `gpu` adds Triton with the model repository in `docker/triton/models/`, `observability` adds Prometheus (`docker/prometheus/prometheus.yml`, which must scrape every long-running service) and Grafana, and `dev` is reserved for the fake camera publisher.
+Profiles: `gpu` adds Triton with the model repository in `docker/triton/models/`, `observability` adds Prometheus (`docker/prometheus/prometheus.yml`, which must scrape every long-running service) and Grafana, and `dev` adds `fake-cameras` (`docker/fake-cameras/`), which loops the videos `VISIONQUERY_FAKE_CAMERAS` names into MediaMTX, one RTSP path per camera, and is the only long-running service Prometheus does not scrape (`UNSCRAPED` in `tests/test_compose.py`).
+The sample videos are listed with their checksums and licenses in `samples/manifest.toml` and downloaded by `make fetch-samples`; they are never committed.
+`scripts/` and `docker/fake-cameras/` hold development tools that are not packages: pytest and pyright include them, and their tests are `tests/test_fetch_samples.py` and `tests/test_fake_cameras.py`.
 Every image is pinned to an exact tag and its digest; MediaMTX's configuration is `docker/mediamtx/mediamtx.yml`.
 `tests/test_compose.py` checks all of this without starting anything (it needs the `docker` CLI, not the daemon) and runs with `make check`.
 The stack tests in `tests/test_stack.py` bring each profile up under a throwaway project with ephemeral ports and take it down with its volumes; they are marked `stack`, left out of `make check`, and include Triton only with `VISIONQUERY_TEST_TRITON=gpu` (or `=cpu` without a GPU), because its image is about 9 GB to download and 25 GB on disk.
+The tests read the cameras with an ffprobe container on the project's network (`mediamtx:8554`), not `--network host`, so they do not depend on a Linux host.
+The `dev` profile's stack test uses test patterns and a clip it makes itself, so it needs no download; the real samples are tested only with `VISIONQUERY_TEST_SAMPLES=1`, which runs `make fetch-samples` first.
 
 The memory's tests run against a real Postgres with TimescaleDB and pgvector.
 By default the test session starts a disposable `timescale/timescaledb:2.30.1-pg18` container of its own (on an ephemeral loopback port, removed at the end), so Docker must be running; to use an existing server instead, set `VISIONQUERY_TEST_DATABASE_URL` to a superuser's `postgresql://` URL.

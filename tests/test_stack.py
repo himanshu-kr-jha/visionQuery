@@ -21,6 +21,7 @@ adds `compose.no-gpu.yaml` so that Triton starts on a machine without one.
 
 import base64
 import json
+import math
 import os
 import secrets
 import shlex
@@ -42,6 +43,7 @@ from urllib.parse import quote
 
 import psycopg
 import pytest
+from fake_cameras import parse_cameras
 from visionquery.memory.migrate import MIGRATIONS
 
 pytestmark = pytest.mark.stack
@@ -147,8 +149,9 @@ class Stack:
         return command
 
     def image(self, name: str) -> str:
-        """The image Compose builds for `app` (every VisionQuery process) or `mediamtx`."""
-        tag = {"app": "dev", "mediamtx": "1.21.1"}[name]
+        """The image Compose builds for `app` (every VisionQuery process), `mediamtx` or
+        `fake-cameras`."""
+        tag = {"app": "dev", "mediamtx": "1.21.1", "fake-cameras": "dev"}[name]
         return f"{self.project}-{name}:{tag}"
 
     def make(
@@ -499,7 +502,7 @@ def _remove(stack: Stack) -> None:
     stack.compose(
         "--profile", "*", "down", "--volumes", "--remove-orphans", timeout=300, check=False
     )
-    for image in (stack.image("app"), stack.image("mediamtx")):
+    for image in (stack.image(name) for name in ("app", "mediamtx", "fake-cameras")):
         subprocess.run(["docker", "image", "rm", image], capture_output=True, check=False)
 
 
@@ -701,3 +704,356 @@ def test_prometheus_finds_triton_through_the_file_the_gpu_profile_writes(
         return "up", ""
 
     wait_for(triton_up, timeout=90)
+
+
+# --- The dev profile: fake cameras ------------------------------------------------------------
+
+#: ffmpeg's static build, which the fake cameras' image copies its ffmpeg from; the tests use
+#: its ffmpeg to make a sample and its ffprobe to read what MediaMTX serves.
+FFMPEG_IMAGE = next(
+    line.split()[1]
+    for line in (ROOT / "docker" / "fake-cameras" / "Dockerfile").read_text().splitlines()
+    if line.startswith("FROM mwader/static-ffmpeg:")
+)
+#: Samples made by the test, so that cameras loop real video files with no download. Made with
+#: x264's defaults, which include B-frames, so that preparing them has something to remove.
+#: Their picture is flat grey that brightens steadily over MARKER_PERIOD seconds and starts
+#: over, so that the point of the loop a camera is at can be read from any single frame.
+SAMPLE = "sample.mp4"
+#: Another sample, a little longer, as MEVA's cameras' recordings are of one another's.
+LONGER_SAMPLE = "longer-sample.mp4"
+SAMPLE_SECONDS = {SAMPLE: 20.4, LONGER_SAMPLE: 21.0}
+SAMPLE_SIZE = (320, 240)
+SAMPLE_RATE = 10
+#: What the cameras cut every sample to (VISIONQUERY_FAKE_CAMERA_DURATION), which is also the
+#: period of the marker.
+MARKER_PERIOD = 20
+#: The luma range of video (16 to 235), which the marker spans.
+LUMA_LOW, LUMA_RANGE = 16, 219
+#: The cameras of the dev stack: two looping the same sample and one a longer one, two test
+#: patterns, and one whose video was never fetched.
+DEV_CAMERAS = (
+    f"gate={SAMPLE},gate-again={SAMPLE},hall={LONGER_SAMPLE},"
+    "lobby=synthetic,yard=synthetic,missing=not-fetched.mp4"
+)
+#: The cameras of DEV_CAMERAS that loop a sample, which are on one timeline.
+TIMELINE_CAMERAS = ("gate", "gate-again", "hall")
+#: The test pattern's size, which a camera without its video shows.
+TEST_PATTERN_SIZE = (1280, 720)
+SAMPLES_VARIABLE = "VISIONQUERY_TEST_SAMPLES"
+
+
+def _make_samples(directory: Path) -> None:
+    """Write the samples into `directory`, which the fake cameras then read."""
+    directory.mkdir()
+    # The fake cameras run as a user of their own; pytest's directories are private.
+    directory.chmod(0o755)
+    size = f"{SAMPLE_SIZE[0]}x{SAMPLE_SIZE[1]}"
+    brightness = f"{LUMA_LOW}+{LUMA_RANGE}*mod(T,{MARKER_PERIOD})/{MARKER_PERIOD}"
+    for name, seconds in SAMPLE_SECONDS.items():
+        source = f"color=c=black:size={size}:rate={SAMPLE_RATE}:duration={seconds},"
+        subprocess.run(
+            ["docker", "run", "--rm", "--user", f"{os.getuid()}:{os.getgid()}",
+             "--volume", f"{directory}:/out", "--entrypoint", "/ffmpeg", FFMPEG_IMAGE,
+             "-loglevel", "error", "-f", "lavfi",
+             "-i", f"{source}geq=lum='{brightness}':cb=128:cr=128",
+             "-c:v", "libx264", "-pix_fmt", "yuv420p", f"/out/{name}"],
+            check=True,
+            capture_output=True,
+            timeout=600,
+        )  # fmt: skip
+        (directory / name).chmod(0o644)
+
+
+def _try_probe(stack: Stack, camera: str, seconds: float) -> tuple[dict[str, Any] | None, str]:
+    """Read `seconds` of the camera from MediaMTX over RTSP, as a client on the project's
+    network would (a container on it works on every host, unlike `--network host`, which
+    Docker Desktop does not give the host's network), and say what its video is and how many
+    frames were decoded; or None, and why not (a camera is unreachable for a moment when it
+    switches from the test pattern to its sample)."""
+    probe = subprocess.run(
+        ["docker", "run", "--rm", "--network", f"{stack.project}_default",
+         "--entrypoint", "/ffprobe",
+         FFMPEG_IMAGE, "-v", "error", "-rtsp_transport", "tcp", "-select_streams", "v:0",
+         "-count_frames", "-read_intervals", f"%+{seconds}",
+         "-show_entries", "stream=codec_name,width,height,has_b_frames,nb_read_frames",
+         "-of", "json", f"rtsp://mediamtx:8554/{camera}"],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=seconds + 60,
+    )  # fmt: skip
+    if probe.returncode != 0:
+        return None, probe.stderr
+    (stream,) = json.loads(probe.stdout)["streams"]
+    return stream, ""
+
+
+def _probe(stack: Stack, camera: str, seconds: float) -> dict[str, Any]:
+    """Read the camera as `_try_probe` does, which must work."""
+    stream, why = _try_probe(stack, camera, seconds)
+    assert stream is not None, f"{camera}: {why}\n{stack.diagnostics()}"
+    return stream
+
+
+def _paths(stack: Stack) -> dict[str, dict[str, Any]]:
+    """MediaMTX's paths, by name, as its API lists them."""
+    url = stack.url("mediamtx", 9997, "/v3/paths/list")
+    status, body = _get(url, ("visionquery", stack.secret("VISIONQUERY_MEDIAMTX_API_PASSWORD")))
+    assert status == 200, body
+    return {item["name"]: item for item in json.loads(body)["items"]}
+
+
+def _wait_until_every_camera_is_ready(stack: Stack, cameras: set[str], timeout: float) -> None:
+    def ready() -> tuple[set[str] | None, str]:
+        paths = _paths(stack)
+        ready = {name for name, path in paths.items() if path["ready"]}
+        if ready != cameras:
+            return None, f"ready paths are {sorted(ready)}, {sorted(cameras)} are wanted"
+        return ready, ""
+
+    wait_for(ready, timeout)
+
+
+def _wait_until_looping_its_sample(stack: Stack, camera: str, width: int, timeout: float) -> None:
+    """A camera shows the test pattern until its sample is prepared; the sample's width tells."""
+
+    def looping() -> tuple[bool | None, str]:
+        stream, why = _try_probe(stack, camera, 0.5)
+        if stream is None:
+            return None, f"{camera} cannot be read: {why}"
+        if stream["width"] != width:
+            return None, f"{camera} is {stream['width']}x{stream['height']}, not its sample yet"
+        return True, ""
+
+    wait_for(looping, timeout)
+
+
+def _marker_offsets(stack: Stack, cameras: tuple[str, ...], seconds: float) -> dict[str, float]:
+    """How far each camera's picture is ahead of the wall clock, in seconds modulo the marker
+    period (negative: behind it by the stream's delay), read from the cameras at the same time.
+
+    Every decoded frame is stamped with when it arrived, and its brightness says which second of
+    the loop it is, so each frame tells how far ahead of the clock the loop is: unlike comparing
+    one frame of each camera, that does not depend on when a connection happened to start, on
+    which keyframe it began at, or on the delay of the stream, which is the same for every camera.
+    """
+    readers = {
+        camera: subprocess.Popen(
+            ["docker", "run", "--rm", "--network", f"{stack.project}_default",
+             "--entrypoint", "/ffmpeg", FFMPEG_IMAGE,
+             "-loglevel", "error", "-fflags", "nobuffer", "-rtsp_transport", "tcp",
+             "-i", f"rtsp://mediamtx:8554/{camera}", "-t", str(seconds), "-an",
+             # One byte per frame: the brightness of the whole picture, as stored in the video.
+             "-vf", "scale=1:1:flags=area,format=yuv420p,extractplanes=y",
+             "-fps_mode", "passthrough",
+             "-f", "rawvideo", "-flush_packets", "1", "-"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        for camera in cameras
+    }  # fmt: skip
+
+    def read(camera: str) -> list[tuple[float, int]]:
+        stdout = readers[camera].stdout
+        assert stdout is not None
+        frames: list[tuple[float, int]] = []
+        while chunk := stdout.read(1):
+            frames.append((time.time(), chunk[0]))
+        return frames
+
+    with ThreadPoolExecutor(max_workers=len(cameras)) as pool:
+        frames = dict(zip(cameras, pool.map(read, cameras), strict=True))
+    offsets: dict[str, float] = {}
+    for camera, process in readers.items():
+        assert process.stderr is not None
+        process.wait(timeout=60)
+        assert process.returncode == 0, f"{camera}: {process.stderr.read().decode()}"
+        arrived = frames[camera]
+        # At the camera's own rate: a loop that restarts with timestamps that do not move is
+        # sent all at once, which is many times as many pictures as there is time for. (The few
+        # of the keyframe a connection starts at arrive together, hence the margin.)
+        expected = SAMPLE_RATE * (arrived[-1][0] - arrived[0][0])
+        assert 0.7 * expected <= len(arrived) <= 1.3 * expected, (camera, len(arrived), expected)
+        # Not the first seconds for the offset, which come in a burst from that keyframe.
+        settled = [(t, y) for t, y in arrived if t > arrived[0][0] + seconds / 3]
+        assert len(settled) >= 5, (camera, len(arrived))
+        angles = [
+            2
+            * math.pi
+            * ((((y - LUMA_LOW) / LUMA_RANGE) * MARKER_PERIOD - t) % MARKER_PERIOD)
+            / MARKER_PERIOD
+            for t, y in settled
+        ]
+        mean = math.atan2(sum(map(math.sin, angles)), sum(map(math.cos, angles)))
+        offsets[camera] = mean / (2 * math.pi) * MARKER_PERIOD
+    return offsets
+
+
+def _assert_in_step(stack: Stack, cameras: tuple[str, ...], within: float = 1.0) -> None:
+    """The cameras show the same moment of their loops, to within `within` seconds."""
+    # Longer than a loop, so that the cameras start over while they are read.
+    offsets = _marker_offsets(stack, cameras, seconds=MARKER_PERIOD + 8)
+    print(f"seconds ahead of the wall clock: { {c: round(o, 2) for c, o in offsets.items()} }")
+    first = cameras[0]
+    for camera in cameras[1:]:
+        gap = (offsets[camera] - offsets[first] + MARKER_PERIOD / 2) % MARKER_PERIOD
+        gap -= MARKER_PERIOD / 2
+        assert abs(gap) <= within, f"{camera} is {gap:+.2f} s from {first}: {offsets}"
+
+
+@pytest.fixture(scope="module")
+def dev_stack(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Stack]:
+    samples = tmp_path_factory.mktemp("dev") / "samples"
+    _make_samples(samples)
+    environment = {
+        "VISIONQUERY_FAKE_CAMERAS": DEV_CAMERAS,
+        "VISIONQUERY_FAKE_CAMERA_SAMPLES": str(samples),
+        "VISIONQUERY_FAKE_CAMERA_DURATION": str(MARKER_PERIOD),
+    }
+    with running_stack(profiles=["dev"], environment=environment) as stack:
+        yield stack
+
+
+def _dev_cameras() -> set[str]:
+    return {camera.name for camera in parse_cameras(DEV_CAMERAS)}
+
+
+def test_the_dev_profile_adds_fake_cameras_healthy(dev_stack: Stack) -> None:
+    _assert_healthy(dev_stack, {"postgres", "mediamtx", "fake-cameras"})
+
+
+def test_mediamtx_has_a_ready_path_for_exactly_the_configured_cameras(dev_stack: Stack) -> None:
+    _wait_until_every_camera_is_ready(dev_stack, _dev_cameras(), timeout=30)
+    paths = _paths(dev_stack)
+    assert set(paths) == _dev_cameras()
+    for name, path in paths.items():
+        assert path["source"]["type"] == "rtspSession", name
+        assert path["tracks"] == ["H264"], name
+
+
+def test_each_fake_camera_is_readable_over_rtsp(dev_stack: Stack) -> None:
+    for camera in sorted(_dev_cameras()):
+        stream = _probe(dev_stack, camera, 2)
+        assert stream["codec_name"] == "h264", camera
+        assert int(stream["nb_read_frames"]) >= 5, (camera, stream)
+
+
+def test_a_camera_loops_its_video_prepared_as_a_camera_sends_it(dev_stack: Stack) -> None:
+    _wait_until_looping_its_sample(dev_stack, "gate", SAMPLE_SIZE[0], timeout=120)
+    # Past the end of a loop, which the loop must go on from at the sample's own rate.
+    seconds = MARKER_PERIOD + 5
+    stream = _probe(dev_stack, "gate", seconds)
+    assert (stream["width"], stream["height"]) == SAMPLE_SIZE
+    assert int(stream["nb_read_frames"]) >= 0.8 * seconds * SAMPLE_RATE, stream
+    # The sample had B-frames; a browser's WebRTC cannot play them, and no camera sends them.
+    assert stream["has_b_frames"] == 0
+
+
+def test_cameras_looping_samples_are_in_step_whatever_their_length_and_start(
+    dev_stack: Stack,
+) -> None:
+    # `gate` and `gate-again` loop one sample, which each prepared and started on its own;
+    # `hall`'s is 0.6 s longer, which drifts a loop that is not cut to the duration.
+    for camera in TIMELINE_CAMERAS:
+        _wait_until_looping_its_sample(dev_stack, camera, SAMPLE_SIZE[0], timeout=120)
+    _assert_in_step(dev_stack, TIMELINE_CAMERAS)
+    # And again a loop later, which is where unequal lengths show.
+    time.sleep(MARKER_PERIOD)
+    _assert_in_step(dev_stack, TIMELINE_CAMERAS)
+
+
+def test_a_camera_whose_video_was_never_fetched_shows_the_test_pattern_and_says_why(
+    dev_stack: Stack,
+) -> None:
+    stream = _probe(dev_stack, "missing", 1)
+    assert (stream["width"], stream["height"]) == TEST_PATTERN_SIZE
+    logs = dev_stack.compose("logs", "--no-color", "fake-cameras").stdout
+    assert "not-fetched.mp4" in logs
+    assert "make fetch-samples" in logs
+
+
+def test_every_camera_comes_back_by_itself_after_mediamtx_restarts(dev_stack: Stack) -> None:
+    publisher = dev_stack.containers()["fake-cameras"]["ID"]
+    dev_stack.compose("restart", "mediamtx")
+    _wait_until_every_camera_is_ready(dev_stack, _dev_cameras(), timeout=60)
+    # Each camera's ffmpeg started over: they all rejoin the timeline, none starts its loop over.
+    # Read at once and for longer than a loop, to see the first time each one's loop ends.
+    _assert_in_step(dev_stack, TIMELINE_CAMERAS)
+    for camera in sorted(_dev_cameras()):
+        assert int(_probe(dev_stack, camera, 1)["nb_read_frames"]) > 0, camera
+    # The publisher reconnected; it was neither restarted nor recreated.
+    assert dev_stack.containers()["fake-cameras"]["ID"] == publisher
+    _assert_healthy(dev_stack, {"mediamtx", "fake-cameras"})
+
+
+# --- The dev profile with the real samples ----------------------------------------------------
+
+#: How long the test pattern runs before it loops, which is not on the timeline.
+SYNTHETIC_DURATION = 60.0
+#: The sample videos' width: MEVA's cameras record 1920x1080 or 1920x1072.
+SAMPLE_WIDTH = 1920
+
+
+@pytest.fixture(scope="module")
+def sample_stack() -> Iterator[Stack]:
+    if os.environ.get(SAMPLES_VARIABLE) != "1":
+        pytest.skip(
+            f"downloads the sample videos (about 400 MB, once) into samples/: set "
+            f"{SAMPLES_VARIABLE}=1 to run it"
+        )
+    fetch = subprocess.run(
+        ["make", "--no-print-directory", "fetch-samples"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=BUILD_TIMEOUT,
+    )
+    assert fetch.returncode == 0, fetch.stdout + fetch.stderr
+    # The cameras .env.example configures, reading the repository's samples/.
+    with running_stack(profiles=["dev"]) as stack:
+        yield stack
+
+
+def test_the_default_cameras_loop_the_fetched_samples(sample_stack: Stack) -> None:
+    cameras = parse_cameras(_documented()["VISIONQUERY_FAKE_CAMERAS"])
+    _wait_until_every_camera_is_ready(sample_stack, {c.name for c in cameras}, timeout=60)
+    for camera in cameras:
+        # Preparing a five-minute 1080p sample takes about a minute on 12 cores.
+        _wait_until_looping_its_sample(sample_stack, camera.name, SAMPLE_WIDTH, timeout=900)
+        stream = _probe(sample_stack, camera.name, 3)
+        assert stream["has_b_frames"] == 0, camera
+        assert int(stream["nb_read_frames"]) >= 30, (camera, stream)
+    logs = sample_stack.compose("logs", "--no-color", "fake-cameras").stdout
+    assert "make fetch-samples" not in logs
+
+
+def test_the_default_samples_are_prepared_to_the_same_five_minutes(sample_stack: Stack) -> None:
+    # The recordings are 300.0 s to 300.3 s long (and start with two pictures that are lost),
+    # which would drift their loops apart.
+    for camera in parse_cameras(_documented()["VISIONQUERY_FAKE_CAMERAS"]):
+        _wait_until_looping_its_sample(sample_stack, camera.name, SAMPLE_WIDTH, timeout=900)
+    listing = sample_stack.compose(
+        "exec", "-T", "fake-cameras", "python3", "-c",
+        "import pathlib; print(*sorted(p.name for p in pathlib.Path('/cache').glob('*.mp4')))",
+    )  # fmt: skip
+    prepared = listing.stdout.split()
+    assert len(prepared) >= 4, listing.stdout  # three samples and the test pattern
+    durations: dict[str, float] = {}
+    for name in prepared:
+        probe = subprocess.run(
+            ["docker", "run", "--rm", "--volume", f"{sample_stack.project}_fake-cameras:/cache:ro",
+             "--entrypoint", "/ffprobe", FFMPEG_IMAGE, "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=start_time,duration", "-of", "csv=p=0", f"/cache/{name}"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=60,
+        )  # fmt: skip
+        start, duration = map(float, probe.stdout.strip().split(","))
+        # Whole seconds are keyframes only if the pictures start at 0.
+        assert start == 0, (name, start)
+        durations[name] = duration
+    assert sorted(round(d, 2) for d in durations.values()) == [SYNTHETIC_DURATION, 300, 300, 300]

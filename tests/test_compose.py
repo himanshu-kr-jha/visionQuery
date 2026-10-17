@@ -20,6 +20,8 @@ from typing import Any
 
 import pytest
 import yaml
+from fake_cameras import SYNTHETIC, parse_cameras
+from fetch_samples import MANIFEST, load_manifest
 
 ROOT = Path(__file__).resolve().parents[1]
 COMPOSE = ROOT / "compose.yaml"
@@ -32,9 +34,9 @@ GRAFANA_DATASOURCES = ROOT / "docker" / "grafana" / "provisioning" / "datasource
 PROFILES = ("dev", "gpu", "observability")
 #: What `docker compose up` starts with no profile, on a machine without a GPU.
 DEFAULT_SERVICES = {"postgres", "migrate", "mediamtx"}
-#: What each profile adds. `dev` is where the fake camera publisher (#6) arrives.
+#: What each profile adds.
 PROFILE_SERVICES: dict[str, set[str]] = {
-    "dev": set(),
+    "dev": {"fake-cameras"},
     "gpu": {"triton", "triton-scrape"},
     "observability": {"prometheus", "grafana", "postgres-exporter"},
 }
@@ -50,6 +52,8 @@ METRICS: dict[str, str] = {
     "grafana": "grafana:3000",
 }
 RUNTIME_METRICS_PORT = 9100
+#: Long-running services Prometheus does not scrape, and why.
+UNSCRAPED = {"fake-cameras": "a development tool, never part of a Deployment"}
 
 #: An exact tag, naming a version (`1.21.1`) or a dated build (`trixie-20261005-slim`) rather
 #: than `latest` or a bare major, and the digest it resolved to.
@@ -487,6 +491,8 @@ def _scraped() -> set[str]:
 def test_prometheus_scrapes_every_long_running_service() -> None:
     scraped = _scraped()
     for name, service in _long_running(_config()).items():
+        if name in UNSCRAPED:
+            continue
         if _is_visionquery_process(service):
             expected = f"{name}:{RUNTIME_METRICS_PORT}"
         else:
@@ -607,3 +613,74 @@ def test_make_down_stops_profile_services_and_keeps_data_unless_told() -> None:
     (wiped,) = [c for c in _make_dry_run("down", "VOLUMES=1") if "compose-under-test" in c]
     assert "--profile '*' down" in wiped
     assert "--volumes" in wiped
+
+
+# --- The dev profile: fake cameras ------------------------------------------------------------
+
+
+def _fake_cameras(env: Mapping[str, str | None] | None = None) -> dict[str, Any]:
+    return _services(_config(profiles=["dev"], env=env))["fake-cameras"]
+
+
+def test_only_the_dev_profile_runs_fake_cameras() -> None:
+    assert _services(_config())["fake-cameras"]["profiles"] == ["dev"]
+
+
+def test_fake_cameras_publish_into_mediamtx_once_it_is_healthy() -> None:
+    cameras = _fake_cameras()
+    assert cameras["environment"]["FAKE_CAMERAS_RTSP"] == "rtsp://mediamtx:8554"
+    assert cameras["depends_on"]["mediamtx"]["condition"] == "service_healthy"
+    # They publish into MediaMTX, so nothing of theirs is published on the host.
+    assert "ports" not in cameras
+
+
+def test_the_cameras_and_their_videos_come_from_the_environment() -> None:
+    chosen = "gate=walk.mp4,lobby=synthetic,yard=walk.mp4"
+    cameras = _fake_cameras(env={"VISIONQUERY_FAKE_CAMERAS": chosen})
+    assert cameras["environment"]["FAKE_CAMERAS"] == chosen
+
+
+def test_every_sample_is_cut_to_the_same_duration_the_environment_names() -> None:
+    assert _fake_cameras()["environment"]["FAKE_CAMERAS_DURATION"] == "300"
+    chosen = _fake_cameras(env={"VISIONQUERY_FAKE_CAMERA_DURATION": "20"})
+    assert chosen["environment"]["FAKE_CAMERAS_DURATION"] == "20"
+    assert _example()["VISIONQUERY_FAKE_CAMERA_DURATION"] == "300"
+
+
+def _mount(service: Mapping[str, Any], target: str) -> dict[str, Any]:
+    (mount,) = [m for m in service["volumes"] if m["target"] == target]
+    return mount
+
+
+def test_the_samples_are_read_from_a_directory_the_environment_names() -> None:
+    default = _mount(_fake_cameras(), "/samples")
+    assert (default["type"], Path(default["source"]), default["read_only"]) == (
+        "bind",
+        ROOT / "samples",
+        True,
+    )
+    elsewhere = _mount(
+        _fake_cameras(env={"VISIONQUERY_FAKE_CAMERA_SAMPLES": "/srv/videos"}), "/samples"
+    )
+    assert elsewhere["source"] == "/srv/videos"
+
+
+def test_prepared_samples_are_kept_in_a_volume_of_their_own() -> None:
+    cache = _mount(_fake_cameras(), "/cache")
+    assert (cache["type"], cache["source"]) == ("volume", "fake-cameras")
+
+
+def test_fake_cameras_are_healthy_only_while_every_camera_publishes() -> None:
+    assert _fake_cameras()["healthcheck"]["test"] == ["CMD", "fake-cameras", "health"]
+
+
+def test_the_default_cameras_loop_the_fetched_samples() -> None:
+    cameras = parse_cameras(_example()["VISIONQUERY_FAKE_CAMERAS"])
+    samples = {sample.file for sample in load_manifest(MANIFEST)}
+    assert len(cameras) >= 3
+    assert {c.source for c in cameras} - {SYNTHETIC} == samples
+
+
+def test_make_fetch_samples_runs_the_script_with_uv() -> None:
+    (command,) = [c for c in _make_dry_run("fetch-samples") if "fetch_samples" in c]
+    assert command == "uv run scripts/fetch_samples.py"
