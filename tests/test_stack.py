@@ -46,6 +46,7 @@ import psycopg
 import pytest
 from fake_cameras import parse_cameras, prepare_command
 from visionquery.memory.cameras import CameraRegistry, PublishCredentials
+from visionquery.memory.footage import SegmentIndex
 from visionquery.memory.migrate import MIGRATIONS
 from visionquery.memory.roles import MONITORING, RUNTIME
 
@@ -1238,6 +1239,21 @@ def test_the_recorder_records_every_registered_camera_into_epoch_aligned_segment
             "-i", rolled["path"], "-f", "null", "-",
         )  # fmt: skip
         assert played.stderr == "", (name, played.stderr)
+    # Each is indexed in the memory, by the recorder as the runtime role, so that an instant
+    # inside it resolves to its file.
+    with psycopg.connect(_database_url(dev_stack), connect_timeout=10, autocommit=True) as db:
+        index = SegmentIndex(db)
+
+        def indexed(segment: dict[str, Any]) -> tuple[bool | None, str]:
+            begins = datetime.fromisoformat(segment["time_from"])
+            middle = begins + (datetime.fromisoformat(segment["time_to"]) - begins) / 2
+            located = index.find(segment["camera"], middle)
+            if located is None:
+                return None, f"not indexed yet: {segment}"
+            return str(Path("/footage") / located.segment.path) == segment["path"], ""
+
+        for s in found:
+            assert wait_for(lambda s=s: indexed(s), timeout=60), s
     # Footage is written by the recorder's own user, into a volume only it mounts.
     owner = dev_stack.compose("exec", "-T", "recorder", "stat", "-c", "%U", "/footage").stdout
     assert owner.strip() == "visionquery"
