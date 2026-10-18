@@ -207,8 +207,20 @@ class MediaMTX:
     def read(
         self, path: str, user: str | None = None, password: str | None = None
     ) -> subprocess.CompletedProcess[str]:
-        """Read one frame of `path`, as the recorder would; ffmpeg exits 0 only when it did."""
+        """Read one frame of `path`, as the recorder would; ffmpeg exits 0 only when it did.
+
+        A read that fails for any reason but MediaMTX refusing the credentials (401 or 403) is
+        tried again, twice: a publisher that has only just become ready may not have sent a
+        frame a reader can start from yet, and a refusal is never transient."""
         url = f"rtsp://{_credentials(user, password)}{RTSP}/{path}"
+        for _ in range(2):
+            read = self._read_once(url)
+            if read.returncode == 0 or "401" in read.stderr or "403" in read.stderr:
+                return read
+            time.sleep(1)
+        return self._read_once(url)
+
+    def _read_once(self, url: str) -> subprocess.CompletedProcess[str]:
         return _docker(
             "run", "--rm", "--network", self.network, "--label", LABEL, FFMPEG_IMAGE,
             "-v", "error", "-rtsp_transport", "tcp", "-timeout", "10000000",
