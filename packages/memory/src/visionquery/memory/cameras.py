@@ -112,25 +112,26 @@ class CameraRegistryError(CameraError):
 # --- pull URLs --------------------------------------------------------------------------------
 
 #: RFC 3986's characters, less `@` outside the user and password: a URL's credentials run to
-#: its last `@`, so one in the path would make the host ambiguous.
+#: its last `@`, so one in the path would make the host ambiguous. Credentials are a user and a
+#: password (empty or not) or neither, the one form MediaMTX accepts for a source (ADR 0014).
 _UNRESERVED = r"A-Za-z0-9\-._~"
 _SUB_DELIMS = r"!$&'()*+,;="
 _ESCAPE = r"%[0-9A-Fa-f]{2}"
 _USER = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}]|{_ESCAPE})+"
 _PASSWORD = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}:]|{_ESCAPE})*"
-_PASSWORD_REQUIRED = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}:]|{_ESCAPE})+"
 _SEGMENT = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}:]|{_ESCAPE})*"
 _QUERY = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}:/?]|{_ESCAPE})*"
 _URL = re.compile(
     rf"(?P<scheme>(?i:rtsps?))://"
-    rf"(?:(?P<credentials>{_USER}(?::{_PASSWORD})?|:{_PASSWORD_REQUIRED})@)?"
+    rf"(?:(?P<credentials>{_USER}:{_PASSWORD})@)?"
     r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9_.\-]+)"
     r"(?::(?P<port>[0-9]{1,5}))?"
     rf"(?P<rest>(?:/{_SEGMENT})*(?:\?{_QUERY})?)"
 )
 _LABEL = re.compile(r"[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?")
 _URL_FORM = (
-    "must be rtsp:// or rtsps:// followed by [user[:password]@]host[:port][/path][?query], "
+    "must be rtsp:// or rtsps:// followed by [user:password@]host[:port][/path][?query] "
+    "(a user and a password, which may be empty, or neither: MediaMTX accepts no other), "
     "with any space, @, /, ?, # or % in the user or password percent-encoded"
 )
 
@@ -306,8 +307,11 @@ _PUBLISH_USER = re.compile(r"[A-Za-z0-9._-]{1,64}")
 _ANYONE = "any"
 PASSWORD_MINIMUM = 16
 PASSWORD_LIMIT = 256
-#: argon2id with argon2-cffi's defaults (RFC 9106's low-memory choice), which MediaMTX verifies.
-_HASHER = PasswordHasher()
+#: argon2id at 19 MiB, two passes and one lane (OWASP's first choice, ADR 0015), which MediaMTX
+#: verifies on every publish attempt, from anyone who reaches the RTSP port: argon2-cffi's
+#: defaults (64 MiB, three passes, four lanes) would let a flood of wrong passwords take
+#: gigabytes and every core of MediaMTX's host.
+_HASHER = PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1)
 
 
 class PublishCredentials:
