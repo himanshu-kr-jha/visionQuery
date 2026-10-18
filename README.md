@@ -59,7 +59,7 @@ docker compose exec reconciler visionquery-reconciler status
 make down VOLUMES=1
 ```
 
-1. `make bootstrap` checks the prerequisites, writes `.env` from `.env.example` with a generated password for each of the five secrets it leaves empty (an `.env` that exists is never changed, only checked to set them), and installs the Python packages and the web app's from their lockfiles (`make sync`).
+1. `make bootstrap` checks the prerequisites, writes `.env` from `.env.example` with a generated password for each of the seven secrets it leaves empty (an `.env` that exists is never changed, only checked to set them: it names each secret the file lacks or leaves empty, and you add those yourself, see "Upgrading an existing `.env`"), and installs the Python packages and the web app's from their lockfiles (`make sync`).
    Running it again is safe.
 2. `make up COMPOSE_PROFILES=dev` builds the images and starts the stack with fake cameras, returning once every service is healthy (the first build takes a few minutes).
 3. The api answers `{"status":"healthy", ...}` once it reaches the database, and the last check asks the reconciler, inside the stack, whether MediaMTX receives every registered camera's video (the fake cameras are registered as they start), so it needs nothing more on the machine; it exits 1, naming the camera, when one is not.
@@ -71,14 +71,14 @@ CI's `setup-guide` job runs exactly these commands on a clean runner (its checko
 ### Running the stack
 
 1. Configure the stack, which `make bootstrap` does for you.
-   It is `.env` (git ignores it), a copy of `.env.example` with the five passwords it leaves empty set, for example each to the output of `openssl rand -hex 24`.
+   It is `.env` (git ignores it), a copy of `.env.example` with the seven passwords it leaves empty set, for example each to the output of `openssl rand -hex 24`.
    Every other variable has a working default, and `.env.example` explains each.
 2. Start it: `make up`.
    It builds the images (rebuilding only what changed, so edited code is what runs; a bare `docker compose up` builds only an image that is absent and never rebuilds), then starts Postgres and runs the database migrations and waits for them to succeed (`MIGRATE_TIMEOUT`, 300 s), and only then starts the long-running services and waits for their healthchecks (`WAIT_TIMEOUT`, 300 s).
    `docker compose up --wait` alone would return while a migration is still running, so a failed or stuck migration stops `make up` with an error and the migration's log.
    It starts Postgres (TimescaleDB and pgvector), MediaMTX, the reconciler that keeps MediaMTX matching the camera registry, and the VisionQuery api, and returns once every service is healthy.
-   Postgres listens on `127.0.0.1:15432` (superuser and database `visionquery`), MediaMTX on `127.0.0.1:8554` (RTSP) and `127.0.0.1:9997` (API, user `visionquery`), and the api on `127.0.0.1:8080`, where <http://127.0.0.1:8080/health> says whether it can reach the database.
-   MediaMTX lets a camera publish only to its own path with its own credentials, and lets only VisionQuery's own user `visionquery` (with `VISIONQUERY_MEDIAMTX_API_PASSWORD`) read; a camera added, changed or removed reaches it within one reconcile (`VISIONQUERY_RECONCILE_INTERVAL`, 5 s), and so does a restarted MediaMTX.
+   Postgres listens on `127.0.0.1:15432` (superuser and database `visionquery`), MediaMTX on `127.0.0.1:8554` (RTSP) and `127.0.0.1:9997` (API, user `visionquery-api`), and the api on `127.0.0.1:8080`, where <http://127.0.0.1:8080/health> says whether it can reach the database.
+   MediaMTX lets a camera publish only to its own path with its own credentials, and lets only VisionQuery's own readers' user `visionquery-reader` (with `VISIONQUERY_MEDIAMTX_READ_PASSWORD`) read, which may do nothing else; only the reconciler holds the password of the API user `visionquery-api` (`VISIONQUERY_MEDIAMTX_API_PASSWORD`), so a reader cannot rewrite who may publish; a camera added, changed or removed reaches it within one reconcile (`VISIONQUERY_RECONCILE_INTERVAL`, 5 s), and so does a restarted MediaMTX.
    `docker compose exec reconciler visionquery-reconciler status` says whether each camera's video is arriving.
 3. Add what you need with profiles:
    - `make up COMPOSE_PROFILES=observability` (or `--profile observability` with `docker compose`): Prometheus on <http://127.0.0.1:9090> scraping every service, and Grafana on <http://127.0.0.1:3000> (user `admin`) reading it.
@@ -100,7 +100,7 @@ By default these are three cameras of the [MEVA](https://mevadata.org/) dataset'
 2. Start the stack with the profile: `make up COMPOSE_PROFILES=dev`.
    Each video is first re-encoded once as a camera sends video (H.264 without B-frames, a keyframe a second), which takes about a minute per video and is kept in the `fake-cameras` volume; the camera shows a test pattern meanwhile.
    A camera whose video is not in `samples/` shows the test pattern instead, with a warning in `docker compose logs fake-cameras`, so the profile works before anything is downloaded; restart the service (`docker compose restart fake-cameras`) once the video is there.
-3. Watch a camera as VisionQuery reads it, with the `visionquery` user and `VISIONQUERY_MEDIAMTX_API_PASSWORD` from `.env`: `ffplay -rtsp_transport tcp rtsp://visionquery:<password>@127.0.0.1:8554/gym-g299` (or the same URL in VLC), or open <http://127.0.0.1:8889/gym-g299> in a browser for MediaMTX's WebRTC player, which asks for them.
+3. Watch a camera as VisionQuery reads it, with the `visionquery-reader` user and `VISIONQUERY_MEDIAMTX_READ_PASSWORD` from `.env`: `ffplay -rtsp_transport tcp rtsp://visionquery-reader:<password>@127.0.0.1:8554/gym-g299` (or the same URL in VLC), or open <http://127.0.0.1:8889/gym-g299> in a browser for MediaMTX's WebRTC player, which asks for them.
 
 All the cameras play their videos in step.
 Each video is cut to the same five minutes (`VISIONQUERY_FAKE_CAMERA_DURATION`, in seconds; MEVA's recordings are 300.0 to 300.3 s long and would otherwise drift apart), and every camera shows the second of its video that the wall clock says, counted from the Unix epoch.
@@ -127,6 +127,18 @@ The database schema is applied with `visionquery-migrate`, which reads `VISIONQU
 Only the migrations connect as the superuser `visionquery`: every long-running service connects as `visionquery_runtime`, which reads and writes the memory's rows and nothing more, and the Postgres exporter as `visionquery_monitoring` (`pg_monitor`), each with its password from `.env` ([ADR 0016](docs/adr/0016-services-connect-as-a-least-privilege-role.md)).
 `visionquery-migrate` makes both roles and, after every run, lets them log in with `VISIONQUERY_RUNTIME_PASSWORD` and `VISIONQUERY_MONITORING_PASSWORD`, so a password changed in `.env` takes effect at the next `make up`.
 An `.env` from before these roles lacks their two passwords: `make bootstrap` names them, and each can be set to the output of `openssl rand -hex 24`.
+
+#### Upgrading an existing `.env`
+
+`make bootstrap` never changes an `.env` that exists: it names each secret the file lacks or leaves empty, and `make up` refuses to start until they are set.
+The seven secrets are `VISIONQUERY_POSTGRES_PASSWORD`, `VISIONQUERY_POSTGRES_RUNTIME_PASSWORD`, `VISIONQUERY_POSTGRES_MONITORING_PASSWORD`, `VISIONQUERY_GRAFANA_ADMIN_PASSWORD`, `VISIONQUERY_MEDIAMTX_API_PASSWORD`, `VISIONQUERY_MEDIAMTX_READ_PASSWORD` and `VISIONQUERY_FAKE_CAMERA_PASSWORD` (the last is used only by the `dev` profile, but `make bootstrap` sets it too).
+To add one an older `.env` lacks, append it with a generated value, for example:
+
+```sh
+echo "VISIONQUERY_MEDIAMTX_READ_PASSWORD=$(openssl rand -hex 24)" >> .env
+```
+
+The MediaMTX user `visionquery` no longer exists: `VISIONQUERY_MEDIAMTX_API_PASSWORD` is now the password of `visionquery-api`, which only drives the control API, and anything that read cameras as `visionquery` (a player, a script) reads as `visionquery-reader` with `VISIONQUERY_MEDIAMTX_READ_PASSWORD`.
 `visionquery-migrate status` lists the applied and pending migrations and what a run would refuse, changing nothing; against the running stack, `docker compose run --rm migrate visionquery-migrate status`.
 
 The memory's and the api's tests run against a real Postgres: they need Docker (each session starts and removes its own container) or `VISIONQUERY_TEST_DATABASE_URL` pointing at a superuser's `postgresql://` URL on a server with TimescaleDB and pgvector.

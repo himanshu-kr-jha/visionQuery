@@ -67,6 +67,7 @@ _Avoid_: incident, investigation, bookmark, folder, evidence
 What films for a Deployment, known by a name unique within it.
 Either pulled, reached by the Deployment at its URL, or pushed, publishing its video to the Deployment at a path of its own.
 A pulled Camera's URL is secret in its user, password, path and query, because cameras put their credentials in any of them; only its scheme, host and port are shown.
+A pushed Camera publishes with credentials of its own, a user and a password chosen for it, of which the Deployment keeps only a hash, and which let it publish to its path and nowhere else.
 A removed Camera's name is free for another, but its Footage and Tracks still say which Camera saw them.
 _Avoid_: stream, channel, feed, device, source
 
