@@ -104,7 +104,7 @@ COMPOSE ?= docker compose
 # The one-shot jobs (restart: "no" in compose.yaml; tests/test_compose.py checks the list):
 # `up --wait` fails on a service that exited, so they are left out of it. Everything else
 # is started and waited for.
-ONE_SHOTS ?= migrate triton-scrape
+ONE_SHOTS ?= migrate triton-scrape register-fake-cameras
 # Seconds `make up` gives the migrations to finish, and then every healthcheck.
 MIGRATE_TIMEOUT ?= 300
 WAIT_TIMEOUT ?= 300

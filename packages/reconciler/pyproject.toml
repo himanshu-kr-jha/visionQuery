@@ -1,0 +1,21 @@
+[project]
+name = "visionquery-reconciler"
+version = "0.1.0"
+description = "Keeps MediaMTX's paths and publishers matching the camera registry."
+requires-python = "==3.14.*"
+dependencies = [
+    "prometheus-client>=0.26.0",
+    "pydantic>=2.14",
+    "visionquery-memory",
+    "visionquery-runtime",
+]
+
+[project.scripts]
+visionquery-reconciler = "visionquery.reconciler.serve:main"
+
+[build-system]
+requires = ["uv_build>=0.11.7,<0.12"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "visionquery.reconciler"

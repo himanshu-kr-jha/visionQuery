@@ -159,7 +159,8 @@ Run everything from the repository root.
 | ...with Triton on a machine without a GPU | `make up COMPOSE_FILE=compose.yaml:compose.no-gpu.yaml COMPOSE_PROFILES=gpu` |
 | Download the sample videos the fake cameras loop (about 400 MB, once) | `make fetch-samples` (`uv run scripts/fetch_samples.py`) |
 | ...with fake cameras looping them into MediaMTX | `make up COMPOSE_PROFILES=dev` |
-| Watch a fake camera | `ffplay -rtsp_transport tcp rtsp://127.0.0.1:8554/gym-g299`, or <http://127.0.0.1:8889/gym-g299> |
+| Watch a fake camera, as VisionQuery reads it (`VISIONQUERY_MEDIAMTX_READ_PASSWORD` from `.env`) | `ffplay -rtsp_transport tcp rtsp://visionquery-reader:<password>@127.0.0.1:8554/gym-g299`, or <http://127.0.0.1:8889/gym-g299> |
+| Check that MediaMTX receives every registered camera's video (exits 1 naming one that it does not) | `docker compose exec reconciler visionquery-reconciler status` |
 | Stop the stack, every profile included; keeps the data (`make down VOLUMES=1` deletes it) | `make down` |
 | Rebuild after changing code: `make up` does it; a bare `docker compose up` builds only an absent image | `make up` |
 | Stack tests (bring the stack up for real) | `make test-stack` (`uv run pytest -m stack`) |
@@ -214,13 +215,19 @@ Every published port listens on `VISIONQUERY_BIND_ADDRESS`, or MediaMTX's camera
 Every VisionQuery process runs from the one image the root `Dockerfile` builds (ADR 0013; `<project>-app:dev`: image tags are global to the Docker daemon, so every built image is named for its Compose project, or two projects would fight over one tag), choosing its process by its Compose `command`; `migrate` is a one-shot service that runs `visionquery-migrate` once Postgres is healthy, with the password in `PGPASSWORD` rather than in the URL.
 It is the only service given the superuser's password (ADR 0016): every other service that connects to the memory does so as `visionquery_runtime` (`visionquery.memory.roles.RUNTIME`) with `VISIONQUERY_POSTGRES_RUNTIME_PASSWORD`, and `postgres-exporter` as `visionquery_monitoring` with `VISIONQUERY_POSTGRES_MONITORING_PASSWORD`, which `migrate` gives them after every run (`tests/test_compose.py` checks all three).
 Every long-running service that runs that image must declare `depends_on: migrate: condition: service_completed_successfully` and must not declare `build:` itself: only `migrate` builds it, because Compose stamps the building service's name into the image's labels, so two builders of one tag race and every `make up` would recreate every container (`tests/test_compose.py` enforces both); and the stack is started with `make up` because `up --wait` returns while `migrate` still runs (it needs Docker Engine 25+, Compose 2.30+ for `compose wait`, and the Dockerfile frontend pinned by digest in the Dockerfile's first line for `COPY --parents`; images are pulled by nobody, `pull_policy: never`).
-Profiles: `gpu` adds Triton with the model repository in `docker/triton/models/`, `observability` adds Prometheus (`docker/prometheus/prometheus.yml`, which must scrape every long-running service) and Grafana, and `dev` adds `fake-cameras` (`docker/fake-cameras/`), which loops the videos `VISIONQUERY_FAKE_CAMERAS` names into MediaMTX, one RTSP path per camera, and is the only long-running service Prometheus does not scrape (`UNSCRAPED` in `tests/test_compose.py`).
+MediaMTX holds no camera in its configuration (ADR 0015): the `reconciler` service (`visionquery-reconciler`) gives it one path per camera of the registry every `VISIONQUERY_RECONCILE_INTERVAL` seconds (5), and a publisher per pushed camera, so a camera added, changed or removed, and a restarted MediaMTX, are put right within one cycle.
+Nobody may publish but a camera with its own credentials to its own path, and nobody may read but the `visionquery-reader` user, which every reader uses and which may do nothing else (ADR 0002); the control API belongs to the `visionquery-api` user alone, whose password (`VISIONQUERY_MEDIAMTX_API_PASSWORD`) only the reconciler holds, so a reader cannot rewrite MediaMTX's users or read a pulled camera's URL (ADR 0015); `tests/test_compose.py` checks `mediamtx.yml` grants nothing more and that only the reconciler gets the API password, and the reconciler, which rewrites MediaMTX's users, keeps every user that file declares but refuses one with a password other than the two it is given (its own and the readers'), because MediaMTX never shows a password back.
+A path MediaMTX refuses (a pulled URL it cannot use) is reported (the `visionquery_reconciler_failed_paths` gauge, one WARNING naming the camera's id and path) and never stops the rest of the cycle; `status` counts a camera as receiving only when its inbound bytes grow between two samples a second apart.
+A publisher's password is hashed with argon2id at 19 MiB, two passes, one lane (ADR 0015), so a flood of wrong passwords from the RTSP port cannot exhaust MediaMTX.
+Profiles: `gpu` adds Triton with the model repository in `docker/triton/models/`, `observability` adds Prometheus (`docker/prometheus/prometheus.yml`, which must scrape every long-running service) and Grafana, and `dev` adds `fake-cameras` (`docker/fake-cameras/`), which loops the videos `VISIONQUERY_FAKE_CAMERAS` names into MediaMTX, one RTSP path per camera, each publishing as the user of its name with `VISIONQUERY_FAKE_CAMERA_PASSWORD`, and is the only long-running service Prometheus does not scrape (`UNSCRAPED` in `tests/test_compose.py`).
+Before them the dev profile's one-shot `register-fake-cameras` registers each as a pushed camera with those credentials (`scripts/register_fake_cameras.py`, run in the VisionQuery image with the script mounted).
 The sample videos are listed with their checksums and licenses in `samples/manifest.toml` and downloaded by `make fetch-samples`; they are never committed.
-`scripts/` and `docker/fake-cameras/` hold development tools that are not packages: pytest and pyright include them, and their tests are `tests/test_fetch_samples.py` and `tests/test_fake_cameras.py`.
+`scripts/` and `docker/fake-cameras/` hold development tools that are not packages: pytest and pyright include them, and their tests are `tests/test_fetch_samples.py`, `tests/test_fake_cameras.py` and, because it needs a real Postgres and MediaMTX, `packages/reconciler/tests/test_register_fake_cameras.py`.
+The reconciler's tests run a real MediaMTX container with the Deployment's `mediamtx.yml`, and real ffmpeg containers publishing and reading, from `packages/reconciler/tests/real_mediamtx.py` (on pytest's and pyright's path), so they need Docker as the memory's tests do.
 Every image is pinned to an exact tag and its digest; MediaMTX's configuration is `docker/mediamtx/mediamtx.yml`.
 `tests/test_compose.py` checks all of this without starting anything (it needs the `docker` CLI, not the daemon) and runs with `make check`.
 The stack tests in `tests/test_stack.py` bring each profile up under a throwaway project with ephemeral ports and take it down with its volumes; they are marked `stack`, left out of `make check`, and include Triton only with `VISIONQUERY_TEST_TRITON=gpu` (or `=cpu` without a GPU), because its image is about 9 GB to download and 25 GB on disk.
-The tests read the cameras with an ffprobe container on the project's network (`mediamtx:8554`), not `--network host`, so they do not depend on a Linux host.
+The tests read the cameras with an ffprobe container on the project's network (`mediamtx:8554`, as the `visionquery-reader` user), not `--network host`, so they do not depend on a Linux host.
 The `dev` profile's stack test uses test patterns and samples it makes itself, so it needs no download; the real samples are tested only with `VISIONQUERY_TEST_SAMPLES=1`, which runs `make fetch-samples` first.
 
 The memory's and the api's tests run against a real Postgres with TimescaleDB and pgvector, from the fixtures in `packages/conftest.py`.
@@ -279,6 +286,7 @@ A package's tests live in `packages/<package>/tests/`; tests about the workspace
 | `perception` | Perception Workers: NVDEC decode, batched Triton calls via CUDA shared memory, per-camera tracking, Keyframes and embeddings (ADR 0007). |
 | `linker` | Continuous confident linking and query-time Following (ADR 0004). |
 | `recorder` | Copy-only Footage recording in epoch-aligned segments with an NTP-anchored clock. |
+| `reconciler` | Keeps MediaMTX's paths and publishers matching the camera registry (ADR 0015). |
 | `reasoner` | Pluggable LLM interface (local by default) and the Answer builder. |
 | `api` | FastAPI over `tools`. |
 | `runtime` | What every process starts with: env settings, JSON logs scrubbed of credentials, and a Prometheus `/metrics` endpoint (ADR 0012). |
@@ -310,7 +318,7 @@ Import contracts (enforced with import-linter from `.importlinter`, each proven 
 - The packages are layered `api | reasoner > tools > linker > memory > runtime`: a package may import any layer below its own and never one above it, and `api` and `reasoner` never import each other.
   Every chain counts, not only a direct import, so `tools -> api`, `linker -> tools` or `memory -> linker` through any number of modules is a violation.
   The layers are exhaustive: a new package is placed in a layer or beside them.
-- `perception` and `recorder` sit beside the layers: they import only `memory` and `runtime`, never each other, and nothing imports them.
+- `perception`, `recorder` and `reconciler` sit beside the layers: they import only `memory` and `runtime`, never each other, and nothing imports them.
 - Only `memory` imports the database driver.
 - `reasoner` reaches the memory only through `tools`.
 - `api` reaches the memory and the `linker` only through `tools` (ADR 0009), except for the health probe and settings it names (`ignore_imports` in `.importlinter`).

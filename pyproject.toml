@@ -9,6 +9,7 @@ dependencies = [
     "visionquery-perception",
     "visionquery-linker",
     "visionquery-recorder",
+    "visionquery-reconciler",
     "visionquery-reasoner",
     "visionquery-api",
     "visionquery-runtime",
@@ -27,6 +28,7 @@ visionquery-tools = { workspace = true }
 visionquery-perception = { workspace = true }
 visionquery-linker = { workspace = true }
 visionquery-recorder = { workspace = true }
+visionquery-reconciler = { workspace = true }
 visionquery-reasoner = { workspace = true }
 visionquery-api = { workspace = true }
 visionquery-runtime = { workspace = true }
@@ -50,8 +52,9 @@ testpaths = ["tests", "packages"]
 # The stack tests bring the whole Compose stack up, so they run only when asked for, with
 # `make test-stack` (`-m stack` on the command line replaces this `-m`).
 addopts = ["--import-mode=importlib", "--strict-markers", "--strict-config", "-m", "not stack"]
-# The development tools that are not packages: `make fetch-samples` and the fake cameras.
-pythonpath = ["scripts", "docker/fake-cameras"]
+# The development tools that are not packages: `make fetch-samples` and the fake cameras; and
+# the real MediaMTX the reconciler's tests share (real_mediamtx.py).
+pythonpath = ["scripts", "docker/fake-cameras", "packages/reconciler/tests"]
 markers = [
     "stack: brings the Docker Compose stack up for real; run with `make test-stack`",
 ]
@@ -81,6 +84,6 @@ select = [
 typeCheckingMode = "strict"
 pythonVersion = "3.14"
 include = ["conftest.py", "packages", "tests", "scripts", "docker/fake-cameras"]
-extraPaths = ["scripts", "docker/fake-cameras"]
+extraPaths = ["scripts", "docker/fake-cameras", "packages/reconciler/tests"]
 venvPath = "."
 venv = ".venv"

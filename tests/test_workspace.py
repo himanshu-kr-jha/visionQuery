@@ -26,7 +26,10 @@ PACKAGES = _members()
 def test_workspace_members_are_the_named_packages() -> None:
     # CLAUDE.md names these; a new package is added here deliberately, with its CLAUDE.md
     # row and import contracts.
-    named = {"memory", "tools", "perception", "linker", "recorder", "reasoner", "api", "runtime"}
+    named = {
+        "memory", "tools", "perception", "linker", "recorder", "reconciler", "reasoner", "api",
+        "runtime",
+    }  # fmt: skip
     assert named == PACKAGES, (
         f"missing: {sorted(named - PACKAGES)}, unnamed: {sorted(PACKAGES - named)}; a new "
         "package must be added here, to CLAUDE.md and to the contracts in .importlinter"

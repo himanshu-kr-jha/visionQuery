@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Fake cameras for development: loops videos into MediaMTX over RTSP, one path per camera.
 
-The `dev` profile's only service (compose.yaml). Each camera is one ffmpeg that publishes
+The `dev` profile's camera service (compose.yaml). Each camera is one ffmpeg that publishes
 to `<FAKE_CAMERAS_RTSP>/<camera>` and is restarted whenever it exits, which is how a camera
 comes back after MediaMTX restarts. It is a development tool, never part of a Deployment.
+
+MediaMTX lets a camera publish only with its own credentials: with FAKE_CAMERAS_PASSWORD set,
+each camera publishes as the user named for it, with that password, which is how
+scripts/register_fake_cameras.py registers them. Without it a camera publishes without
+credentials, which MediaMTX refuses.
 
     FAKE_CAMERAS="gate=meva-school-g299.avi,lobby=synthetic" fake_cameras.py [run | health]
 
@@ -49,9 +54,10 @@ import signal
 import sys
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import NoReturn
+from urllib.parse import quote
 
 SYNTHETIC = "synthetic"
 #: The test pattern: what a modest camera sends.
@@ -304,6 +310,14 @@ def not_publishing(
     ]
 
 
+def publish_url(rtsp: str, camera: Camera, password: str | None) -> str:
+    """Where a camera publishes: its path under `rtsp`, as itself with `password` if given."""
+    if not password:
+        return f"{rtsp}/{camera.name}"
+    scheme, _, rest = rtsp.partition("://")
+    return f"{scheme}://{camera.name}:{quote(password, safe='')}@{rest}/{camera.name}"
+
+
 @dataclass(frozen=True)
 class Settings:
     cameras: list[Camera]
@@ -318,6 +332,8 @@ class Settings:
     prepare_retry: float = PREPARE_RETRY
     #: Seconds without a new frame after which `health` says a camera is not publishing.
     stale_after: float = STALE_AFTER
+    #: What every camera publishes with, as the user named for it; None to publish without.
+    password: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str]) -> Settings:
@@ -351,6 +367,7 @@ class Settings:
             samples=Path(env.get("FAKE_CAMERAS_SAMPLES", "/samples")),
             cache=Path(env.get("FAKE_CAMERAS_CACHE", "/cache")),
             status=Path(env.get("FAKE_CAMERAS_STATUS", "/tmp/fake-cameras.json")),
+            password=env.get("FAKE_CAMERAS_PASSWORD") or None,
         )
 
 
@@ -463,7 +480,7 @@ class Publisher:
                 path.unlink()
 
     async def _camera(self, camera: Camera) -> NoReturn:
-        url = f"{self._settings.rtsp}/{camera.name}"
+        url = publish_url(self._settings.rtsp, camera, self._settings.password)
         video = self._video(camera)
         if video is None:
             if camera.source != SYNTHETIC:

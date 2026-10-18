@@ -2,8 +2,10 @@
 
 A camera is added in one of two ways. A **pulled** camera is reached by its `rtsp://` or
 `rtsps://` URL, which MediaMTX pulls into the path `pulled/<id>`; a **pushed** camera publishes
-to a MediaMTX path the Operator chose. Either way `Camera.path` is the MediaMTX path its video
-is on, unique among the cameras not removed.
+to a MediaMTX path the Operator chose, with `PublishCredentials` of its own (and nobody can
+publish to one that has none). Either way `Camera.path` is the MediaMTX path its video is on,
+unique among the cameras not removed. The reconciler (`visionquery.reconciler`) makes MediaMTX
+follow the registry: a pulled camera's URL and a pushed camera's credentials can be changed.
 
 **A camera URL's user, password, path and query are all secret** (ADR 0014): cameras carry
 their credentials in any of them (a UniFi Protect token is the path, an XMEye login is in the
@@ -16,9 +18,12 @@ identified in logs by its id, name and path. Errors never quote a URL, not even 
 refused, and no error of the database driver, which may repeat the row it refused, is passed on.
 Any URL of the right form is accepted, so none is refused for what its path or query holds.
 
+A pushed camera's password is never kept: only its argon2id hash, which is what MediaMTX checks
+a publisher against.
+
 **A removed camera keeps its row** (and its id, which is never reused), because its Footage
-and Tracks outlive it; its name and push path are free again, and its secrets (credentials,
-path and query) are forgotten.
+and Tracks outlive it; its name and push path are free again, and its secrets (pull or publish
+credentials, path and query) are forgotten.
 
 The registry works on the connection it is given. Outside a transaction each operation commits
 on its own; inside one the caller opened (`with connection.transaction():`) each runs in a
@@ -35,10 +40,13 @@ from datetime import datetime
 from typing import Any, LiteralString
 
 import psycopg
-from pydantic import GetCoreSchemaHandler
+from argon2 import PasswordHasher
+from argon2.exceptions import Argon2Error, InvalidHashError
+from pydantic import GetCoreSchemaHandler, SecretStr
 from pydantic_core import core_schema
 
 __all__ = [
+    "PASSWORD_MINIMUM",
     "PULLED_PATHS",
     "Camera",
     "CameraError",
@@ -49,6 +57,7 @@ __all__ = [
     "CameraRegistryError",
     "CameraUrl",
     "InvalidCameraError",
+    "PublishCredentials",
 ]
 
 _log = logging.getLogger(__name__)
@@ -103,25 +112,26 @@ class CameraRegistryError(CameraError):
 # --- pull URLs --------------------------------------------------------------------------------
 
 #: RFC 3986's characters, less `@` outside the user and password: a URL's credentials run to
-#: its last `@`, so one in the path would make the host ambiguous.
+#: its last `@`, so one in the path would make the host ambiguous. Credentials are a user and a
+#: password (empty or not) or neither, the one form MediaMTX accepts for a source (ADR 0014).
 _UNRESERVED = r"A-Za-z0-9\-._~"
 _SUB_DELIMS = r"!$&'()*+,;="
 _ESCAPE = r"%[0-9A-Fa-f]{2}"
 _USER = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}]|{_ESCAPE})+"
 _PASSWORD = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}:]|{_ESCAPE})*"
-_PASSWORD_REQUIRED = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}:]|{_ESCAPE})+"
 _SEGMENT = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}:]|{_ESCAPE})*"
 _QUERY = rf"(?:[{_UNRESERVED}{_SUB_DELIMS}:/?]|{_ESCAPE})*"
 _URL = re.compile(
     rf"(?P<scheme>(?i:rtsps?))://"
-    rf"(?:(?P<credentials>{_USER}(?::{_PASSWORD})?|:{_PASSWORD_REQUIRED})@)?"
+    rf"(?:(?P<credentials>{_USER}:{_PASSWORD})@)?"
     r"(?P<host>\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9_.\-]+)"
     r"(?::(?P<port>[0-9]{1,5}))?"
     rf"(?P<rest>(?:/{_SEGMENT})*(?:\?{_QUERY})?)"
 )
 _LABEL = re.compile(r"[a-z0-9](?:[a-z0-9_-]{0,61}[a-z0-9])?")
 _URL_FORM = (
-    "must be rtsp:// or rtsps:// followed by [user[:password]@]host[:port][/path][?query], "
+    "must be rtsp:// or rtsps:// followed by [user:password@]host[:port][/path][?query] "
+    "(a user and a password, which may be empty, or neither: MediaMTX accepts no other), "
     "with any space, @, /, ?, # or % in the user or password percent-encoded"
 )
 
@@ -289,6 +299,113 @@ def _push_path(path: str) -> str:
     return path
 
 
+# --- publish credentials ----------------------------------------------------------------------
+
+#: A user a camera can put in its URL as it is, and MediaMTX reads as a plain credential.
+_PUBLISH_USER = re.compile(r"[A-Za-z0-9._-]{1,64}")
+#: MediaMTX's user that matches anyone, with any password or none.
+_ANYONE = "any"
+PASSWORD_MINIMUM = 16
+PASSWORD_LIMIT = 256
+#: argon2id at 19 MiB, two passes and one lane (OWASP's first choice, ADR 0015), which MediaMTX
+#: verifies on every publish attempt, from anyone who reaches the RTSP port: argon2-cffi's
+#: defaults (64 MiB, three passes, four lanes) would let a flood of wrong passwords take
+#: gigabytes and every core of MediaMTX's host.
+_HASHER = PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1)
+
+
+class PublishCredentials:
+    """The user and password a pushed camera publishes to its path with.
+
+    Only an argon2id hash of the password is kept, from the moment the credentials are made
+    (`PublishCredentials.of`): MediaMTX checks a publisher against it (`argon2:` + the hash), and
+    `verify` does here. Neither the password nor the hash is shown by `str`, `repr` or pydantic's
+    serialisation, which gives only the user.
+    """
+
+    __slots__ = ("_password_hash", "_user")
+
+    def __init__(self, user: str, password_hash: str) -> None:
+        """Credentials as the registry stored them; make new ones with `of`."""
+        self._user = user
+        self._password_hash = password_hash
+
+    @classmethod
+    def of(cls, user: str, password: str | SecretStr) -> PublishCredentials:
+        """New credentials, the password hashed; `InvalidCameraError` never quotes it."""
+        if not _PUBLISH_USER.fullmatch(user):
+            raise InvalidCameraError(
+                "a publish user must be 1 to 64 letters, digits, and . _ or -, so that a camera "
+                "can put it in its URL as it is"
+            )
+        if user.lower() == _ANYONE:
+            raise InvalidCameraError(f"{_ANYONE!r} means anyone to MediaMTX")
+        if isinstance(password, SecretStr):
+            password = password.get_secret_value()
+        if not PASSWORD_MINIMUM <= len(password) <= PASSWORD_LIMIT:
+            raise InvalidCameraError(
+                f"a publish password must be {PASSWORD_MINIMUM} to {PASSWORD_LIMIT} characters"
+            )
+        if any(unicodedata.category(c) in {"Cc", "Cf", "Cs", "Co", "Cn"} for c in password):
+            raise InvalidCameraError(
+                "a publish password must not hold control or invisible characters"
+            )
+        return cls(user, _HASHER.hash(password))
+
+    @property
+    def user(self) -> str:
+        return self._user
+
+    @property
+    def password_hash(self) -> str:
+        """The password's argon2id hash, as a PHC string (`$argon2id$v=19$...`)."""
+        return self._password_hash
+
+    def verify(self, password: str) -> bool:
+        """Whether `password` is the one these credentials were made with."""
+        try:
+            return _HASHER.verify(self._password_hash, password)
+        except Argon2Error, InvalidHashError:
+            return False
+
+    def __repr__(self) -> str:
+        return f"PublishCredentials(user={self._user!r}, password=***)"
+
+    def __eq__(self, other: object) -> bool:
+        return (
+            isinstance(other, PublishCredentials)
+            and other._user == self._user
+            and other._password_hash == self._password_hash
+        )
+
+    def __hash__(self) -> int:
+        return hash((self._user, self._password_hash))
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source: Any, handler: GetCoreSchemaHandler
+    ) -> core_schema.CoreSchema:
+        return core_schema.is_instance_schema(
+            cls,
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                _publish_user,
+                return_schema=core_schema.typed_dict_schema(
+                    {"user": core_schema.typed_dict_field(core_schema.str_schema())}
+                ),
+            ),
+        )
+
+
+def _publish_user(credentials: PublishCredentials) -> dict[str, str]:
+    return {"user": credentials.user}
+
+
+def _publish_columns(credentials: PublishCredentials | None) -> tuple[str | None, str | None]:
+    if credentials is None:
+        return None, None
+    return credentials.user, credentials.password_hash
+
+
 # --- the registry -----------------------------------------------------------------------------
 
 
@@ -305,6 +422,9 @@ class Camera:
     pull_url: CameraUrl | None
     added_at: datetime
     removed_at: datetime | None
+    #: What a pushed camera publishes with; None for a pulled camera, and for a pushed one
+    #: nobody may publish to yet.
+    publish_credentials: PublishCredentials | None = None
 
     @property
     def pushed(self) -> bool:
@@ -313,17 +433,24 @@ class Camera:
 
 
 _COLUMNS: LiteralString = (
-    "id, name, pull_url, pull_credentials, pull_target, push_path, added_at, removed_at"
+    "id, name, pull_url, pull_credentials, pull_target, push_path, added_at, removed_at, "
+    "publish_user, publish_password_hash"
 )
 
 
 def _camera(row: tuple[Any, ...]) -> Camera:
-    camera_id, name, pull_url, credentials, target, push_path, added_at, removed_at = row
+    (
+        camera_id, name, pull_url, credentials, target, push_path, added_at, removed_at,
+        publish_user, publish_password_hash,
+    ) = row  # fmt: skip
     # The registry and `CameraUrl` are one module's, and only they see a URL's parts.
     stored = CameraUrl._stored  # pyright: ignore[reportPrivateUsage]
     url = None if pull_url is None else stored(pull_url, credentials, target)
     path = push_path if push_path is not None else f"{PULLED_PATHS}{camera_id}"
-    return Camera(camera_id, name, path, url, added_at, removed_at)
+    publish = (
+        None if publish_user is None else PublishCredentials(publish_user, publish_password_hash)
+    )
+    return Camera(camera_id, name, path, url, added_at, removed_at, publish)
 
 
 class CameraRegistry:
@@ -346,12 +473,17 @@ class CameraRegistry:
         self._report("camera added", camera)
         return camera
 
-    def add_pushed(self, name: str, path: str) -> Camera:
-        """Add a camera that will publish to the MediaMTX path `path`."""
+    def add_pushed(
+        self, name: str, path: str, credentials: PublishCredentials | None = None
+    ) -> Camera:
+        """Add a camera that will publish to the MediaMTX path `path` with `credentials`;
+        without them nobody may publish to it until it is given some."""
         name, path = _name(name), _push_path(path)
+        user, password_hash = _publish_columns(credentials)
         camera = self._write(
-            "INSERT INTO cameras (name, push_path) VALUES (%s, %s)",
-            (name, path),
+            "INSERT INTO cameras (name, push_path, publish_user, publish_password_hash) "
+            "VALUES (%s, %s, %s, %s)",
+            (name, path, user, password_hash),
             name=name,
             path=path,
         )
@@ -382,16 +514,59 @@ class CameraRegistry:
         self._report("camera renamed", camera)
         return camera
 
+    def change_pull_url(self, camera_id: int, url: CameraUrl | str) -> Camera:
+        """Give a pulled camera not removed a new URL; its path stays its id's."""
+        if not isinstance(url, CameraUrl):
+            url = CameraUrl(url)
+        self._of_kind(camera_id, pushed=False)
+        camera = self._write(
+            "UPDATE cameras SET pull_url = %s, pull_credentials = %s, pull_target = %s "
+            "WHERE id = %s AND removed_at IS NULL AND pull_url IS NOT NULL",
+            (url._bare, url._credentials, url._target, camera_id),  # pyright: ignore[reportPrivateUsage]
+            camera_id=camera_id,
+        )
+        self._report("camera URL changed", camera)
+        return camera
+
+    def change_publish_credentials(
+        self, camera_id: int, credentials: PublishCredentials | None
+    ) -> Camera:
+        """Give a pushed camera not removed new credentials to publish with, or with None take
+        them away, so that nobody may publish to it."""
+        self._of_kind(camera_id, pushed=True)
+        user, password_hash = _publish_columns(credentials)
+        camera = self._write(
+            "UPDATE cameras SET publish_user = %s, publish_password_hash = %s "
+            "WHERE id = %s AND removed_at IS NULL AND push_path IS NOT NULL",
+            (user, password_hash, camera_id),
+            camera_id=camera_id,
+        )
+        self._report("camera publish credentials changed", camera)
+        return camera
+
     def remove(self, camera_id: int) -> None:
         """Remove a camera: it leaves the list, frees its name and path, and forgets its
         credentials, path and query, but stays known by its id."""
         camera = self._write(
-            "UPDATE cameras SET removed_at = now(), pull_credentials = NULL, pull_target = NULL "
+            "UPDATE cameras SET removed_at = now(), pull_credentials = NULL, pull_target = NULL, "
+            "publish_user = NULL, publish_password_hash = NULL "
             "WHERE id = %s AND removed_at IS NULL",
             (camera_id,),
             camera_id=camera_id,
         )
         self._report("camera removed", camera)
+
+    def _of_kind(self, camera_id: int, *, pushed: bool) -> None:
+        """Refuse to edit a pulled camera as a pushed one, or the other way round."""
+        camera = self.get(camera_id)
+        if camera.removed_at is not None:
+            raise CameraNotFoundError(camera_id)
+        if camera.pushed and not pushed:
+            raise InvalidCameraError(f"camera {camera_id} is pushed: it has no URL to change")
+        if pushed and not camera.pushed:
+            raise InvalidCameraError(
+                f"camera {camera_id} is pulled: it has no publish credentials to change"
+            )
 
     def _write(
         self,

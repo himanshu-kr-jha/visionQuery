@@ -23,7 +23,8 @@ SECRET = "s3cr3t-Pa55"
         ("rtsp://10.0.0.7/stream1", "rtsp://10.0.0.7/***"),
         ("rtsp://10.0.0.7:554/Streaming/Channels/101", "rtsp://10.0.0.7:554/***"),
         (f"rtsp://admin:{SECRET}@10.0.0.7:554/stream1", "rtsp://***@10.0.0.7:554/***"),
-        ("rtsp://admin@cam-7.example.internal/live", "rtsp://***@cam-7.example.internal/***"),
+        # A user with an empty password is written `user:@host`, as MediaMTX requires.
+        ("rtsp://admin:@cam-7.example.internal/live", "rtsp://***@cam-7.example.internal/***"),
         (f"rtsps://viewer:{SECRET}@[fd00::7]:322/main", "rtsps://***@[fd00::7]:322/***"),
         ("rtsp://10.0.0.7/cam/realmonitor?channel=1&subtype=0", "rtsp://10.0.0.7/***"),
         ("rtsps://192.168.1.1:7441/Xk9aQ2bLm4ZtTq1R?enableSrtp", "rtsps://192.168.1.1:7441/***"),
@@ -31,8 +32,7 @@ SECRET = "s3cr3t-Pa55"
         # A password may hold any character, percent-encoded where the URL needs it.
         ("rtsp://admin:p%40ss%2Fw%3Ard!$@10.0.0.7/s", "rtsp://***@10.0.0.7/***"),
         ("rtsp://admin:a:b@10.0.0.7/s", "rtsp://***@10.0.0.7/***"),
-        # A password without a user, and underscores in host names.
-        (f"rtsp://:{SECRET}@10.0.0.7/s", "rtsp://***@10.0.0.7/***"),
+        # Underscores in host names.
         ("rtsp://cam_1.lan/s", "rtsp://cam_1.lan/***"),
         # The scheme and the host are case-insensitive, and are kept in lower case.
         ("RTSP://Admin:PW@CAM.Example/Live", "rtsp://***@cam.example/***"),
@@ -130,6 +130,13 @@ def test_a_url_cannot_be_pickled_because_that_would_carry_the_full_url() -> None
         "rtsp://10.0.0.7/stream1\n",
         " rtsp://10.0.0.7/stream1",
         "rtsp://10.0.0.7/stream1#frag",
+        # MediaMTX refuses a password without a user, and a user without a password (which is
+        # written `user:@host`), so the registry does too and a pulled Camera never makes the
+        # reconciler fail (ADR 0014).
+        f"rtsp://:{SECRET}@10.0.0.7/s",
+        "rtsp://:@10.0.0.7/s",
+        "rtsp://admin@10.0.0.7/s",
+        f"rtsp://{SECRET}@10.0.0.7/s",
         "rtsp://10.0.0.7/a%zz",
         "rtsp://10.0.0.7/café",
         # An unescaped @, / or # in a password: it must be percent-encoded.
