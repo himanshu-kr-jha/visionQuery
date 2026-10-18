@@ -17,6 +17,23 @@ You are given one GitHub issue and you deliver it, test-first, on its branch, re
 4. If an acceptance criterion is ambiguous, contradicts an ADR, or cannot be tested, stop and report that instead of guessing.
    A spike criterion about producing a decision is not "cannot be tested": it is judged by reading the report.
 
+## Design before the first test
+
+Most fix rounds come from defects the builder could have found before writing code, so think through each of these for your issue, and turn every answer that matters into a test:
+
+- **State you did not make.** What can already exist when your code runs: a pre-made role, a stale MediaMTX path, a row or file from an earlier run, a half-finished operation.
+  Decide whether you trust it.
+  When in doubt, refuse it with a clear message rather than clean it up, because a cleanup must be complete to be safe and rarely is (PR #101 spent four rounds removing one leftover privilege of a pre-made role at a time before it switched to refusing such roles).
+- **Secrets.** Every value that can carry a credential, in every real-world form (PR #99: camera vendors put tokens in the URL path, not only in userinfo), and every way it could leak: log lines, exception and validation messages, `repr`, pickling, metric labels, other services' environment.
+- **Least privilege.** Every role, user and credential you add can do only its one job; one identity never serves two jobs (PR #104 had to split MediaMTX's reader from its API user).
+- **The real dependency's contract.** Whatever your code accepts, the service it hands it to must accept too, so test the whole input space against the real service, not just the usual form (PR #104: the registry accepted URL forms MediaMTX refuses).
+- **Partial failure.** When a loop works through Cameras, paths or rows, one bad item must not stop the rest: isolate its failure, surface it (a log line, a metric, `status`), and go on.
+  A long-running service catches an unexpected exception, logs it once without driver text, and keeps going.
+- **Signals that can turn false.** A health or status measure must be able to say "no": a counter that only grows cannot tell that video stopped (PR #104's `inboundBytes > 0`).
+- **Concurrency and restarts.** Two runs at once, a restart halfway through, a dependency that restarts under you.
+
+List in your hand-back which of these apply and how the tests cover them, so `tester` and `pr-reviewer` attack the cases you covered and look for the ones you missed.
+
 ## Building
 
 - Work on `feature/<n>-<slug>` (or `fix/`, `chore/`, `docs/` as fits), cut from an up-to-date `develop`.
@@ -39,6 +56,46 @@ You are given one GitHub issue and you deliver it, test-first, on its branch, re
   Supporting code, such as a benchmark harness, still gets tests.
   Throwaway exploration code lives under `docs/spikes/<issue>-<slug>/` in the PR so it is not lost when the branch is deleted, and never in the packages.
 - Update the milestone's marker in `docs/plan/v1.md` in the same branch: `[~]` if this is the first PR of the milestone, `[x]` if it closes the milestone's last sub-issue.
+- Before taking an ADR or migration number, check that no issue branch or develop already uses it, because builders work in parallel; the highest numbers are the last lines:
+  `git fetch --prune origin`, then, once per directory so that ADR numbers and migration numbers each show their own last three:
+  ```
+  for d in docs/adr/ packages/memory/src/visionquery/memory/migrations/; do
+    echo "$d"
+    for b in $(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/feature/*' 'refs/remotes/origin/fix/*' 'refs/remotes/origin/chore/*' 'refs/remotes/origin/docs/*' refs/remotes/origin/develop); do
+      git ls-tree --name-only "$b" "$d"
+    done | grep '/[0-9]' | sort -u | tail -3
+  done
+  ```
+
+## Tests that do not flake
+
+- Never sleep a fixed time or retry blindly.
+  Wait for the condition the test needs (a publisher ready, a row present, a log line written), with a deadline, and on timeout fail saying what was seen.
+- A test stops and joins every thread, process, container and server it starts, so nothing it started reaches the next test (PR #102).
+- A negative assertion checks the specific refusal (a 401, a named error), never just that something failed, so a broken setup cannot pass as "denied".
+- A test of a refusal or a fix must fail on the old behaviour with an assertion, not with an import error or a missing fixture.
+- **Repeat runs** (this bullet and the next are the one place for the builder's counts and the load command; `developer` and `tester` read both, and the tester's own counts are in `tester.md`).
+  Before handing back, repeat each new or changed test that involves threads, subprocesses, containers, sockets or clocks, by node id: 5 runs idle, then 2 runs loaded.
+  Stack tests (`-m stack`) are out of scope for these repeats.
+  Keep each run's full output in a file, fix any failure before you hand back, and record the node ids and the counts in the hand-back.
+- **Loaded run**: busy two cores for the length of that run only, pin the test to the same cores, and kill the load at once.
+  Run these lines in one Bash call, because the Bash tool keeps no shell state between calls, and each loop stops by itself after 900 seconds (`timeout 900`) if the kill is missed.
+  ```
+  taskset -c 0,1 timeout 900 sh -c 'while :; do :; done' & p1=$!
+  taskset -c 0,1 timeout 900 sh -c 'while :; do :; done' & p2=$!
+  taskset -c 0,1 uv run pytest <node ids>
+  kill $p1 $p2
+  ```
+  Run the loaded runs only when `pgrep -af '[p]ytest|[d]ocker compose'` shows nothing outside your own run (the brackets keep the command from matching its own shell); otherwise skip them and say so in the hand-back.
+
+## Before you hand back
+
+Review your own diff as `pr-reviewer` will: read `.claude/agents/pr-reviewer.md` and go through its checks against `git diff origin/develop...HEAD`, as a skeptic looking for what is wrong.
+Also:
+
+- Search the docs you touched (README, `CLAUDE.md`, `CONTEXT.md`, ADRs) for counts, lists and examples your change made stale, such as "the five passwords".
+- Use only the commit types listed in `CLAUDE.md`.
+- Run `make check`, and the stack tests your change touches.
 
 ## Hand back
 
@@ -47,4 +104,5 @@ Report to the tech lead:
 
 1. Branch name and the final commit.
 2. Each acceptance criterion and the test(s) that cover it.
-3. Anything you deliberately left out, any follow-up issue worth opening, and any risk the tester should look at hard.
+3. The design concerns that apply (state you did not make, secrets, privilege, the dependency's contract, partial failure, signals, concurrency) and the tests that cover each, and the repeat runs (node ids, idle and loaded counts).
+4. Anything you deliberately left out, any follow-up issue worth opening, and any risk the tester should look at hard.
