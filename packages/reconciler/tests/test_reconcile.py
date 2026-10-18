@@ -328,8 +328,12 @@ def test_only_a_cameras_own_credentials_publish_to_it_and_only_visionquery_reads
         refused = mediamtx.read("dock")
         assert refused.returncode != 0
         assert "401" in refused.stderr
-        assert mediamtx.read("dock", "dock", DOCK_PASSWORD).returncode != 0
-        assert mediamtx.read("dock", READER_USER, "not-the-password").returncode != 0
+        camera = mediamtx.read("dock", "dock", DOCK_PASSWORD)
+        assert camera.returncode != 0
+        assert "401" in camera.stderr
+        wrong = mediamtx.read("dock", READER_USER, "not-the-password")
+        assert wrong.returncode != 0
+        assert "401" in wrong.stderr
         assert mediamtx.read("dock", READER_USER, mediamtx.reader_password).returncode == 0
 
 
@@ -477,7 +481,9 @@ def test_the_api_user_calls_the_api_but_can_neither_read_nor_publish(
     assert mediamtx.api_status(API_USER, "not-the-password") != 200
     assert mediamtx.publish("dock", API_USER, mediamtx.api_password).returncode != 0
     with mediamtx.publishing("dock", "dock", DOCK_PASSWORD):
-        assert mediamtx.read("dock", API_USER, mediamtx.api_password).returncode != 0
+        refused = mediamtx.read("dock", API_USER, mediamtx.api_password)
+        assert refused.returncode != 0
+        assert "401" in refused.stderr
 
 
 def test_each_users_permissions_are_as_declared_and_survive_the_reconcilers_writes(

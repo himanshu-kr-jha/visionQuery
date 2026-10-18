@@ -205,20 +205,34 @@ class MediaMTX:
             time.sleep(0.2)
 
     def read(
-        self, path: str, user: str | None = None, password: str | None = None
+        self,
+        path: str,
+        user: str | None = None,
+        password: str | None = None,
+        timeout: float = 30,
     ) -> subprocess.CompletedProcess[str]:
         """Read one frame of `path`, as the recorder would; ffmpeg exits 0 only when it did.
 
-        A read that fails for any reason but MediaMTX refusing the credentials (401 or 403) is
-        tried again, twice: a publisher that has only just become ready may not have sent a
-        frame a reader can start from yet, and a refusal is never transient."""
+        A refusal (401 or 403) is returned at once, as it is never transient. Any other failure is
+        tried again until `timeout` seconds have passed, because a publisher that has only just
+        become ready may not have sent a frame a reader can start from yet. The result is the last
+        attempt's, with every attempt's stderr in it, so a read that never succeeds says why."""
         url = f"rtsp://{_credentials(user, password)}{RTSP}/{path}"
-        for _ in range(2):
+        deadline = time.monotonic() + timeout
+        errors: list[str] = []
+        while True:
             read = self._read_once(url)
-            if read.returncode == 0 or "401" in read.stderr or "403" in read.stderr:
-                return read
-            time.sleep(1)
-        return self._read_once(url)
+            errors.append(read.stderr)
+            if (
+                read.returncode == 0
+                or "401" in read.stderr
+                or "403" in read.stderr
+                or time.monotonic() >= deadline
+            ):
+                return subprocess.CompletedProcess(
+                    read.args, read.returncode, read.stdout, "\n--- attempt ---\n".join(errors)
+                )
+            time.sleep(0.5)
 
     def _read_once(self, url: str) -> subprocess.CompletedProcess[str]:
         return _docker(
