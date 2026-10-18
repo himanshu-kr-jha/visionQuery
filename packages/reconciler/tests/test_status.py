@@ -10,7 +10,7 @@ from collections.abc import Iterator
 
 import pytest
 from pydantic import SecretStr
-from real_mediamtx import SERVICE_USER, MediaMTX
+from real_mediamtx import API_USER, READER_USER, MediaMTX
 from visionquery.memory.cameras import CameraRegistry, PublishCredentials
 from visionquery.memory.connection import connect
 from visionquery.memory.migrate import migrate
@@ -37,7 +37,8 @@ def registry(migrated: str) -> Iterator[CameraRegistry]:
 def environment(monkeypatch: pytest.MonkeyPatch, migrated: str, mediamtx: MediaMTX) -> None:
     monkeypatch.setenv("VISIONQUERY_DATABASE__URL", migrated)
     monkeypatch.setenv("VISIONQUERY_MEDIAMTX__URL", mediamtx.api_url)
-    monkeypatch.setenv("VISIONQUERY_MEDIAMTX__PASSWORD", mediamtx.password)
+    monkeypatch.setenv("VISIONQUERY_MEDIAMTX__PASSWORD", mediamtx.api_password)
+    monkeypatch.setenv("VISIONQUERY_MEDIAMTX__READER_PASSWORD", mediamtx.reader_password)
     # As in the container, where the running reconciler holds the default metrics port.
     monkeypatch.delenv("VISIONQUERY_METRICS_PORT", raising=False)
 
@@ -52,8 +53,10 @@ def _status(capsys: pytest.CaptureFixture[str]) -> tuple[int, list[dict[str, obj
 
 
 def _reconcile(registry: CameraRegistry, mediamtx: MediaMTX) -> None:
-    client = MediaMTXClient(mediamtx.api_url, SERVICE_USER, SecretStr(mediamtx.password))
-    Reconciler(client).reconcile(registry.list())
+    client = MediaMTXClient(mediamtx.api_url, API_USER, SecretStr(mediamtx.api_password))
+    Reconciler(client, {READER_USER: SecretStr(mediamtx.reader_password)}).reconcile(
+        registry.list()
+    )
 
 
 @pytest.mark.usefixtures("environment")
@@ -111,3 +114,47 @@ def test_mediamtx_unreachable_fails_the_status_saying_so(
         mediamtx.start()
     assert code == 1
     assert "MediaMTX could not be reached" in str(lines[-1]["message"])
+
+
+class _Sampled:
+    """MediaMTX's path states as two samples of a camera's bytes, in the order they are asked."""
+
+    def __init__(self, *inbound: int) -> None:
+        self._inbound = list(inbound)
+
+    def __call__(self) -> dict[str, dict[str, object]]:
+        return {"dock": {"ready": True, "inboundBytes": self._inbound.pop(0)}}
+
+
+@pytest.mark.usefixtures("environment")
+def test_a_camera_whose_bytes_stopped_growing_is_not_receiving(
+    registry: CameraRegistry, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # MediaMTX counts a path's bytes since it was made and never lowers the count, so a camera
+    # that stopped sending would read as receiving by its total.
+    registry.add_pushed("Dock", "dock")
+    monkeypatch.setattr("visionquery.reconciler.serve._SAMPLE_SECONDS", 0.01)
+    sampled = _Sampled(5_000_000, 5_000_000)
+    monkeypatch.setattr(MediaMTXClient, "paths", lambda _client: sampled())  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+
+    code, lines = _status(capsys)
+
+    assert code == 1
+    (camera,) = [line for line in lines if line.get("camera") == "Dock"]
+    assert camera["receiving"] is False
+    assert lines[-1]["message"] == "status: 1 cameras, 0 receiving video"
+
+
+@pytest.mark.usefixtures("environment")
+def test_a_camera_whose_bytes_grow_between_two_samples_is_receiving(
+    registry: CameraRegistry, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry.add_pushed("Dock", "dock")
+    monkeypatch.setattr("visionquery.reconciler.serve._SAMPLE_SECONDS", 0.01)
+    sampled = _Sampled(5_000_000, 5_100_000)
+    monkeypatch.setattr(MediaMTXClient, "paths", lambda _client: sampled())  # pyright: ignore[reportUnknownLambdaType, reportUnknownArgumentType]
+
+    code, lines = _status(capsys)
+
+    assert code == 0, lines
+    assert lines[-1]["message"] == "status: 1 cameras, 1 receiving video"

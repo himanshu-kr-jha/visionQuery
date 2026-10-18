@@ -3,10 +3,11 @@
     visionquery-recorder            run until stopped (SIGTERM or SIGINT)
     visionquery-recorder health     exit 0 while the camera registry was read recently, 1 otherwise
 
-It reads each camera's video from MediaMTX over RTSP, as the `visionquery` user (ADR 0015), at
-the path the registry gives it, and copies it into Segments under `VISIONQUERY_FOOTAGE_DIR`, one
-directory per camera id (`visionquery.recorder.fleet`). Footage is Visual Data and never leaves
-the Deployment (ADR 0002): the recorder writes it to its own disk and sends it nowhere.
+It reads each camera's video from MediaMTX over RTSP, as the `visionquery-reader` user (ADR 0015,
+the one that may read and do nothing else), at the path the registry gives it, and copies it into
+Segments under `VISIONQUERY_FOOTAGE_DIR`, one directory per camera id
+(`visionquery.recorder.fleet`). Footage is Visual Data and never leaves the Deployment (ADR 0002):
+the recorder writes it to its own disk and sends it nowhere.
 
 When it starts, before any camera is recorded, it finishes every Segment a crash left unfinished
 (`segment.recover`), whichever camera it was, and holds a lock on the Footage directory for as
@@ -84,7 +85,7 @@ class MediaMTXReader(BaseModel):
     #: An `rtsp://` or `rtsps://` URL to MediaMTX itself, without credentials (they go in `user`
     #: and `password`) or a path (each camera's is the registry's).
     rtsp_url: str = "rtsp://127.0.0.1:8554"
-    user: str = "visionquery"
+    user: str = "visionquery-reader"
     password: SecretStr
 
     @field_validator("rtsp_url")

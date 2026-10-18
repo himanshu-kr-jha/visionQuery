@@ -13,13 +13,14 @@ logStructured: true
 
 # Who may do what (ADR 0002: Visual Data never leaves the Deployment). Nobody may publish but a
 # camera, with its own credentials, to its own path, which the reconciler adds to this list; and
-# nobody may read but VisionQuery's own processes. The order matters only for the environment
-# override below.
+# nobody may read but VisionQuery's own readers. The order matters only for the environment
+# overrides below.
 #
 # The reconciler rewrites this list to add the cameras' publishers, and MediaMTX never shows a
-# password back, so it keeps every user here as it is but cannot keep a password other than its
-# own: a user with any other password makes it refuse to change the list. A camera's publisher is
-# a user whose one permission is to publish to one path; none is listed here.
+# password back, so it keeps every user here as it is but cannot keep a password other than the
+# two it is given (its own and the reader's): a user with any other password makes it refuse to
+# change the list. A camera's publisher is a user whose one permission is to publish to one
+# path; none is listed here.
 authMethod: internal
 authInternalUsers:
   # The healthcheck, from inside the container.
@@ -34,16 +35,24 @@ authInternalUsers:
     ips: []
     permissions:
       - action: metrics
-  # VisionQuery's own processes: the reconciler drives the API, and the recorder and the
-  # Perception Workers read. The password is set by Compose from
-  # VISIONQUERY_MEDIAMTX_API_PASSWORD (MTX_AUTHINTERNALUSERS_2_PASS), so the value here is never
-  # the one in use.
-  - user: visionquery
+  # VisionQuery's readers: the recorder, the Perception Workers and the live view. They may
+  # read and do nothing else, so a reader that is compromised cannot rewrite this list or read
+  # a pulled camera's URL from the API. The password is set by Compose from
+  # VISIONQUERY_MEDIAMTX_READ_PASSWORD (MTX_AUTHINTERNALUSERS_2_PASS), so the value here is
+  # never the one in use.
+  - user: visionquery-reader
     pass: set-by-MTX_AUTHINTERNALUSERS_2_PASS
     ips: []
     permissions:
-      - action: api
       - action: read
+  # The reconciler, which alone drives the control API (it sets every camera's path and
+  # publisher) and so alone holds this password, VISIONQUERY_MEDIAMTX_API_PASSWORD
+  # (MTX_AUTHINTERNALUSERS_3_PASS). It may not read or publish.
+  - user: visionquery-api
+    pass: set-by-MTX_AUTHINTERNALUSERS_3_PASS
+    ips: []
+    permissions:
+      - action: api
 # Credentials are sent in the clear (Basic): MediaMTX can check a hashed password, as every
 # camera's publisher's is, only that way.
 rtspAuthMethods: [basic]

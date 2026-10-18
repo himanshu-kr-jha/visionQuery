@@ -4,7 +4,7 @@ Every statement about when something happened rests on Footage's timestamps, and
 
 ## Decision
 
-The recorder (`visionquery-recorder`) reads every Camera from MediaMTX over RTSP, as the `visionquery` user (ADR 0015), through one ffmpeg per Camera that copies the video, never decoding it, into fragmented MP4 on a pipe.
+The recorder (`visionquery-recorder`) reads every Camera from MediaMTX over RTSP, as the `visionquery-reader` user (ADR 0015), through one ffmpeg per Camera that copies the video, never decoding it, into fragmented MP4 on a pipe.
 The recorder itself cuts that stream into Segments, at Fragment (keyframe) boundaries: one Segment per epoch-aligned window of `VISIONQUERY_SEGMENT_SECONDS` (300 by default, and always a divisor of a day, so no Segment straddles midnight), rolling at the first Fragment that starts at or after its window's end.
 
 - **Time.** A Segment's times are when its Fragments arrived at the recorder, on a timebase that reads the kernel's NTP-disciplined clock when the Segment opens and carries that reading forward with the monotonic clock, so a wall clock stepped under a running Segment moves nothing.

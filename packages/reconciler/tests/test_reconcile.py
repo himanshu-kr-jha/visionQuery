@@ -8,9 +8,10 @@ read from by real ffmpeg containers.
 from collections.abc import Iterator
 from typing import Any
 
+import psycopg
 import pytest
 from pydantic import SecretStr
-from real_mediamtx import SERVICE_USER, MediaMTX
+from real_mediamtx import API_USER, READER_USER, MediaMTX
 from visionquery.memory.cameras import CameraRegistry, PublishCredentials
 from visionquery.memory.connection import connect
 from visionquery.memory.migrate import migrate
@@ -30,7 +31,10 @@ def registry(database: str) -> Iterator[CameraRegistry]:
 
 @pytest.fixture
 def reconciler(mediamtx: MediaMTX) -> Reconciler:
-    return Reconciler(MediaMTXClient(mediamtx.api_url, SERVICE_USER, SecretStr(mediamtx.password)))
+    return Reconciler(
+        MediaMTXClient(mediamtx.api_url, API_USER, SecretStr(mediamtx.api_password)),
+        {READER_USER: SecretStr(mediamtx.reader_password)},
+    )
 
 
 def _publishers(mediamtx: MediaMTX) -> dict[str, list[dict[str, Any]]]:
@@ -69,7 +73,7 @@ def test_a_pushed_camera_can_publish_with_its_credentials_after_one_reconcile(
     assert published.returncode == 0, published.stderr
     # And VisionQuery's own services read it.
     with mediamtx.publishing("site-a/dock", "dock", DOCK_PASSWORD):
-        read = mediamtx.read("site-a/dock", SERVICE_USER, mediamtx.password)
+        read = mediamtx.read("site-a/dock", READER_USER, mediamtx.reader_password)
         assert read.returncode == 0, read.stderr
 
 
@@ -80,7 +84,7 @@ def test_a_pulled_camera_is_pulled_from_its_url_after_one_reconcile(
     # VisionQuery's services do: so the pull goes over RTSP, with credentials in the URL.
     registry.add_pushed("Dock", "dock", PublishCredentials.of("dock", DOCK_PASSWORD))
     pulled = registry.add_pulled(
-        "Dock again", f"rtsp://{SERVICE_USER}:{mediamtx.password}@127.0.0.1:8554/dock"
+        "Dock again", f"rtsp://{READER_USER}:{mediamtx.reader_password}@127.0.0.1:8554/dock"
     )
 
     changes = reconciler.reconcile(registry.list())
@@ -93,7 +97,7 @@ def test_a_pulled_camera_is_pulled_from_its_url_after_one_reconcile(
     assert conf["rtspTransport"] == "tcp"
     with mediamtx.publishing("dock", "dock", DOCK_PASSWORD):
         mediamtx.wait_until_published(pulled.path)
-        read = mediamtx.read(pulled.path, SERVICE_USER, mediamtx.password)
+        read = mediamtx.read(pulled.path, READER_USER, mediamtx.reader_password)
         assert read.returncode == 0, read.stderr
 
 
@@ -183,7 +187,7 @@ def test_a_pushed_camera_without_credentials_has_a_path_nobody_may_publish_to(
     assert "dock" in mediamtx.path_configs()
     assert _publishers(mediamtx) == {}
     assert mediamtx.publish("dock").returncode != 0
-    assert mediamtx.publish("dock", SERVICE_USER, mediamtx.password).returncode != 0
+    assert mediamtx.publish("dock", READER_USER, mediamtx.reader_password).returncode != 0
 
 
 # --- twice, and drift -------------------------------------------------------------------------
@@ -238,10 +242,7 @@ def test_publishers_changed_behind_the_reconcilers_back_are_put_right(
     registry.add_pushed("Dock", "dock", PublishCredentials.of("dock", DOCK_PASSWORD))
     reconciler.reconcile(registry.list())
     expected = _snapshot(mediamtx)
-    users = mediamtx.users()
-    for user in users:
-        if user["user"] == SERVICE_USER:
-            user["pass"] = mediamtx.password
+    users = mediamtx.with_known_passwords(mediamtx.users())
     stranger: dict[str, Any] = {
         "user": "stranger",
         "pass": "",
@@ -264,10 +265,7 @@ def test_a_user_whose_password_cannot_be_kept_is_refused_and_nothing_is_written(
     # MediaMTX never shows a password back, so the reconciler, which rewrites the list of
     # users, can keep only those without one, and its own.
     registry.add_pushed("Dock", "dock", PublishCredentials.of("dock", DOCK_PASSWORD))
-    users = mediamtx.users()
-    for user in users:
-        if user["user"] == SERVICE_USER:
-            user["pass"] = mediamtx.password
+    users = mediamtx.with_known_passwords(mediamtx.users())
     other: dict[str, Any] = {
         "user": "viewer",
         "pass": "a-viewers-password",
@@ -323,13 +321,184 @@ def test_only_a_cameras_own_credentials_publish_to_it_and_only_visionquery_reads
     assert mediamtx.publish("dock", "gate", GATE_PASSWORD).returncode != 0
     assert mediamtx.publish("unregistered").returncode != 0
     assert mediamtx.publish("unregistered", "dock", DOCK_PASSWORD).returncode != 0
-    assert mediamtx.publish("dock", SERVICE_USER, mediamtx.password).returncode != 0
+    assert mediamtx.publish("dock", READER_USER, mediamtx.reader_password).returncode != 0
 
     with mediamtx.publishing("dock", "dock", DOCK_PASSWORD):
         # Reading: only VisionQuery's own services, not anyone, nor the camera itself.
         refused = mediamtx.read("dock")
         assert refused.returncode != 0
         assert "401" in refused.stderr
-        assert mediamtx.read("dock", "dock", DOCK_PASSWORD).returncode != 0
-        assert mediamtx.read("dock", SERVICE_USER, "not-the-password").returncode != 0
-        assert mediamtx.read("dock", SERVICE_USER, mediamtx.password).returncode == 0
+        camera = mediamtx.read("dock", "dock", DOCK_PASSWORD)
+        assert camera.returncode != 0
+        assert "401" in camera.stderr
+        wrong = mediamtx.read("dock", READER_USER, "not-the-password")
+        assert wrong.returncode != 0
+        assert "401" in wrong.stderr
+        assert mediamtx.read("dock", READER_USER, mediamtx.reader_password).returncode == 0
+
+
+# --- a path MediaMTX refuses ------------------------------------------------------------------
+
+
+def _store_a_url_mediamtx_refuses(database: str, name: str) -> int:
+    """A pulled camera whose URL has a password but no user, as the registry once accepted and
+    MediaMTX refuses ("password was provided but username is missing"); the registry itself no
+    longer takes one, so the row is written as it was left. The camera's id."""
+    with psycopg.connect(database, autocommit=True) as connection:
+        row = connection.execute(
+            "INSERT INTO cameras (name, pull_url, pull_credentials, pull_target) "
+            "VALUES (%s, 'rtsp://cam.invalid', ':refused-pa55word', '/s') RETURNING id",
+            (name,),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def test_a_path_mediamtx_refuses_does_not_cost_the_other_cameras_theirs(
+    mediamtx: MediaMTX, registry: CameraRegistry, reconciler: Reconciler, database: str
+) -> None:
+    bad = _store_a_url_mediamtx_refuses(database, "Bad")
+    registry.add_pushed("Dock", "dock", PublishCredentials.of("dock", DOCK_PASSWORD))
+    good = registry.add_pulled("Gate 2", "rtsp://10.0.0.7/s")
+    mediamtx.api("POST", "/v3/config/paths/add/intruder", {"source": "publisher"})
+
+    changes = reconciler.reconcile(registry.list())
+
+    assert changes.failed == (f"pulled/{bad}",)
+    # The same reconcile did everything else: the cameras after the bad one, the stale path,
+    # and the publisher of the pushed one.
+    assert set(changes.added) == {"dock", good.path}
+    assert changes.removed == ("intruder",)
+    assert changes.publishers
+    assert set(mediamtx.path_configs()) == {"dock", good.path}
+    assert mediamtx.publish("dock", "dock", DOCK_PASSWORD).returncode == 0
+    # And it is the same next cycle: the bad path is reported again, nothing else changes.
+    again = reconciler.reconcile(registry.list())
+    assert again.failed == (f"pulled/{bad}",)
+    assert not again
+
+
+def test_a_path_mediamtx_refuses_stops_neither_a_replacement_nor_a_publisher_after_a_restart(
+    mediamtx: MediaMTX, registry: CameraRegistry, reconciler: Reconciler, database: str
+) -> None:
+    _store_a_url_mediamtx_refuses(database, "Bad")
+    registry.add_pushed("Dock", "dock", PublishCredentials.of("dock", DOCK_PASSWORD))
+    gate = registry.add_pulled("Gate 2", "rtsp://admin:old-pw@10.0.0.7/s")
+    reconciler.reconcile(registry.list())
+    registry.change_pull_url(gate.id, "rtsp://admin:new-pw@10.0.0.8/main")
+    mediamtx.restart()
+
+    changes = reconciler.reconcile(registry.list())
+
+    assert len(changes.failed) == 1
+    assert set(changes.added) == {"dock", gate.path}
+    assert changes.publishers
+    assert mediamtx.publish("dock", "dock", DOCK_PASSWORD).returncode == 0
+
+
+#: Forms of URL the registry accepts, the odd ones among them: MediaMTX must accept each, or a
+#: Camera the registry took would stop the reconciler's work (ADR 0014).
+ACCEPTED_URLS = [
+    "rtsp://cam/a",
+    "rtsp://cam_1/a",
+    "rtsp://user:@cam/",
+    "rtsp://u:p@cam/%2F",
+    "rtsp://[::1]:554/",
+    "rtsp://cam",
+    "rtsp://cam?x",
+    "rtsp://cam/?",
+    "rtsps://cam:7441/x?enableSrtp=true",
+    "rtsp://cam/a'b",
+    "rtsp://u%40x:p@cam/",
+    "rtsp://cam/a$b",
+    "rtsp://cam/a(b)*",
+    "rtsp://cam.",
+    "rtsp://u:p:q@cam/",
+    "rtsp://cam/%41",
+    "rtsp://cam/a:b",
+    "rtsp://u:%20@cam/",
+    "rtsp://%3a:p@cam/",
+    "rtsp://u:p@[fd00::7]:322/main",
+    "rtsp://cam//a",
+    "rtsp://cam/a/../b",
+    "rtsp://cam:65535/a",
+    "rtsp://1.2.3.4/a",
+    "rtsp://cam/a;b",
+    "rtsp://cam/a=b&c",
+    "rtsp://u:p@cam:554",
+    "RTSP://U:P@CAM/X",
+    "rtsp://cam/?a/b",
+    "rtsp://cam/%00",
+    "rtsp://cam/%e2%82",
+    "rtsp://us%00er:p@cam/",
+    "rtsp://cam/a%20b",
+    "rtsp://cam/a+b",
+    "rtsp://cam/a,b",
+    "rtsp://192.168.1.10:554/user=admin&password=x&channel=1&stream=0.sdp?",
+]
+
+
+def test_mediamtx_accepts_every_url_the_registry_does(
+    mediamtx: MediaMTX, registry: CameraRegistry, reconciler: Reconciler
+) -> None:
+    cameras = [registry.add_pulled(f"Camera {i}", url) for i, url in enumerate(ACCEPTED_URLS)]
+
+    changes = reconciler.reconcile(registry.list())
+
+    assert changes.failed == ()
+    assert set(changes.added) == {camera.path for camera in cameras}
+
+
+# --- who may do what with the control API, and who may read -----------------------------------
+
+
+def test_the_reader_reads_but_can_neither_call_the_api_nor_publish(
+    mediamtx: MediaMTX, registry: CameraRegistry, reconciler: Reconciler
+) -> None:
+    registry.add_pushed("Dock", "dock", PublishCredentials.of("dock", DOCK_PASSWORD))
+    reconciler.reconcile(registry.list())
+
+    for method, path in (
+        ("GET", "/v3/config/global/get"),
+        ("GET", "/v3/config/paths/list"),
+        ("PATCH", "/v3/config/global/patch"),
+        ("POST", "/v3/config/paths/add/x"),
+    ):
+        assert mediamtx.api_status(READER_USER, mediamtx.reader_password, method, path) != 200
+    assert mediamtx.publish("dock", READER_USER, mediamtx.reader_password).returncode != 0
+    with mediamtx.publishing("dock", "dock", DOCK_PASSWORD):
+        read = mediamtx.read("dock", READER_USER, mediamtx.reader_password)
+        assert read.returncode == 0, read.stderr
+
+
+def test_the_api_user_calls_the_api_but_can_neither_read_nor_publish(
+    mediamtx: MediaMTX, registry: CameraRegistry, reconciler: Reconciler
+) -> None:
+    registry.add_pushed("Dock", "dock", PublishCredentials.of("dock", DOCK_PASSWORD))
+    reconciler.reconcile(registry.list())
+
+    assert mediamtx.api_status(API_USER, mediamtx.api_password) == 200
+    assert mediamtx.api_status(API_USER, "not-the-password") != 200
+    assert mediamtx.publish("dock", API_USER, mediamtx.api_password).returncode != 0
+    with mediamtx.publishing("dock", "dock", DOCK_PASSWORD):
+        refused = mediamtx.read("dock", API_USER, mediamtx.api_password)
+        assert refused.returncode != 0
+        assert "401" in refused.stderr
+
+
+def test_each_users_permissions_are_as_declared_and_survive_the_reconcilers_writes(
+    mediamtx: MediaMTX, registry: CameraRegistry, reconciler: Reconciler
+) -> None:
+    registry.add_pushed("Dock", "dock", PublishCredentials.of("dock", DOCK_PASSWORD))
+    reconciler.reconcile(registry.list())
+
+    permissions = {
+        user["user"]: [p["action"] for p in user["permissions"]]
+        for user in mediamtx.users()
+        if user["user"] in {API_USER, READER_USER}
+    }
+    assert permissions == {API_USER: ["api"], READER_USER: ["read"]}
+    # The reconciler wrote the users back with the passwords they were given.
+    assert mediamtx.api_status(API_USER, mediamtx.api_password) == 200
+    with mediamtx.publishing("dock", "dock", DOCK_PASSWORD):
+        assert mediamtx.read("dock", READER_USER, mediamtx.reader_password).returncode == 0

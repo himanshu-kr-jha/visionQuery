@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from publishers import PASSWORD, open_paths
 from pydantic import SecretStr
-from real_mediamtx import SERVICE_USER, MediaMTX
+from real_mediamtx import READER_USER, MediaMTX
 from visionquery.memory.cameras import Camera
 from visionquery.recorder.camera import Timing
 from visionquery.recorder.ffmpeg import Source
@@ -30,7 +30,7 @@ TIMING = Timing(segment=timedelta(seconds=2), first_wait=0.2, last_wait=1.0, sta
 
 def sources(server: MediaMTX, ffmpeg: Path) -> Callable[[Camera], Source]:
     def source(camera: Camera) -> Source:
-        url = server.rtsp_url(camera.path, SERVICE_USER, server.password)
+        url = server.rtsp_url(camera.path, READER_USER, server.reader_password)
         return Source(url=SecretStr(url), ffmpeg=str(ffmpeg), stall_after=TIMING.stall_after)
 
     return source

@@ -31,6 +31,12 @@ type Json = dict[str, Any]
 class MediaMTXError(Exception):
     """MediaMTX could not be reached, or refused what it was asked."""
 
+    def __init__(self, message: str, *, refused: bool = False) -> None:
+        super().__init__(message)
+        #: Whether MediaMTX answered and said no (as opposed to not answering): a refusal of
+        #: one request says nothing of the next, an unreachable MediaMTX says it of all.
+        self.refused = refused
+
 
 class MediaMTXClient:
     """Asks MediaMTX's control API at `url` as `user`, who must have the `api` permission."""
@@ -97,18 +103,20 @@ class MediaMTXClient:
         request.add_header("Authorization", f"Basic {base64.b64encode(token).decode()}")
         asked = f"{method} {endpoint.partition('?')[0]}"
         failed: str
+        refused = False
         try:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
                 return cast(Json, json.loads(response.read() or b"{}"))
         except urllib.error.HTTPError as error:
             failed = f"MediaMTX refused {asked}: {error.code} {_said(error)}"
+            refused = True
         except (urllib.error.URLError, OSError) as error:
             reason = error.reason if isinstance(error, urllib.error.URLError) else error
             failed = f"MediaMTX could not be reached for {asked}: {type(reason).__name__}"
         except ValueError:
             failed = f"MediaMTX answered {asked} with something that is not JSON"
         # Raised outside the `except`, so no traceback carries the request or its body.
-        raise MediaMTXError(scrub(_URL.sub("***", failed)))
+        raise MediaMTXError(scrub(_URL.sub("***", failed)), refused=refused)
 
 
 def _quoted(name: str) -> str:

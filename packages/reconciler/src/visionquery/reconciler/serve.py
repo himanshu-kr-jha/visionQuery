@@ -8,14 +8,22 @@
 Every `VISIONQUERY_RECONCILE_INTERVAL` seconds (5) it reads the cameras not removed and makes
 MediaMTX match them (`visionquery.reconciler.reconcile`), so a change to the registry, and a
 restarted MediaMTX, which forgets everything its API was told, are both put right within one
-cycle. A cycle that fails (the database or MediaMTX unreachable, or MediaMTX holding a user it
-must not overwrite) is logged once, as a WARNING, for as long as the same one of those fails
-(MediaMTX restarting, say, refuses and then resets connections), and the next cycle tries
-again; an INFO says when a cycle succeeds again. Nothing logged names a credential: a database
-failure is named by its category only, and MediaMTX's errors are scrubbed.
+cycle. A cycle that fails (the database or MediaMTX unreachable, MediaMTX holding a user it must not
+overwrite, or anything unexpected, named by its class only) is logged once, as a WARNING, for
+as long as the same one of those fails (MediaMTX restarting, say, refuses and then resets
+connections), and the next cycle tries again; an INFO says when a cycle succeeds again. Nothing
+logged names a credential: a database failure is named by its category only, and MediaMTX's
+errors are scrubbed.
 
-After each successful cycle it writes a heartbeat file holding the time until which it counts
-as healthy, three cycles on, which `health` (Compose's healthcheck) reads.
+MediaMTX may refuse one camera's path (a source it cannot use). That does not fail the cycle,
+which still does everything else: the cycle is "degraded", counted as such, the failing paths
+are the `visionquery_reconciler_failed_paths` gauge, and each Camera whose path fails is logged
+once as a WARNING naming its id and path (never its URL), and an INFO when it works again. The
+reconciler stays healthy: it is doing its job, and what is wrong is that camera's URL, which
+only an Operator can change; `status` says that camera has no video arriving.
+
+After each successful or degraded cycle it writes a heartbeat file holding the time until which
+it counts as healthy, three cycles on, which `health` (Compose's healthcheck) reads.
 
 `status` changes nothing: it logs one line per camera not removed, saying whether MediaMTX has
 its path ready with video arriving (INFO) or not (WARNING), and a `status: N cameras, M
@@ -36,10 +44,10 @@ from urllib.parse import urlsplit
 
 from prometheus_client import Counter, Gauge
 from pydantic import BaseModel, Field, SecretStr, field_validator
-from visionquery.memory.cameras import CameraRegistry, CameraRegistryError
+from visionquery.memory.cameras import Camera, CameraRegistry, CameraRegistryError
 from visionquery.memory.connection import Connection, ConnectionFailedError, connect
 from visionquery.memory.settings import DatabaseSettings
-from visionquery.reconciler.mediamtx import MediaMTXClient, MediaMTXError
+from visionquery.reconciler.mediamtx import Json, MediaMTXClient, MediaMTXError
 from visionquery.reconciler.reconcile import Changes, ReconcileError, Reconciler
 from visionquery.runtime import Settings, start
 
@@ -66,8 +74,12 @@ _STATEMENT_TIMEOUT_MS = 5000
 
 _CYCLES = Counter(
     "visionquery_reconciler_cycles",
-    "Reconcile cycles run, by outcome (ok or failed).",
+    "Reconcile cycles run, by outcome (ok, degraded or failed).",
     ["outcome"],
+)
+_FAILED_PATHS = Gauge(
+    "visionquery_reconciler_failed_paths",
+    "Paths MediaMTX refused in the last cycle (0 when it refused none).",
 )
 _CHANGES = Counter(
     "visionquery_reconciler_changes",
@@ -88,8 +100,15 @@ class MediaMTXSettings(BaseModel):
 
     #: An `http://` or `https://` URL, without credentials, which go in `user` and `password`.
     url: str = "http://127.0.0.1:9997"
-    user: str = "visionquery"
+    #: Who drives the API: a user with the `api` permission only, whose password only the
+    #: reconciler holds.
+    user: str = "visionquery-api"
     password: SecretStr
+    #: The readers' user, with the `read` permission only. The reconciler never reads with it:
+    #: it holds its password only to write the user back unchanged when it writes the users,
+    #: because MediaMTX never shows a password back.
+    reader_user: str = "visionquery-reader"
+    reader_password: SecretStr
 
     @field_validator("url")
     @classmethod
@@ -143,12 +162,15 @@ class _Loop:
         self._heartbeat = heartbeat
         mediamtx = settings.mediamtx
         self._reconciler = Reconciler(
-            MediaMTXClient(mediamtx.url, mediamtx.user, mediamtx.password)
+            MediaMTXClient(mediamtx.url, mediamtx.user, mediamtx.password),
+            {mediamtx.reader_user: mediamtx.reader_password},
         )
         self._connection: Connection | None = None
-        #: What the last cycle failed on (the database, the registry, MediaMTX, or a refusal);
-        #: None after a success, and before the first cycle.
+        #: What the last cycle failed on (the database, the registry, MediaMTX, a refusal, or
+        #: something unexpected); None after a success, and before the first cycle.
         self._failing: str | None = None
+        #: The paths MediaMTX refused in the last cycle.
+        self._refused: frozenset[str] = frozenset()
 
     def cycle(self) -> None:
         failing: str
@@ -166,13 +188,42 @@ class _Loop:
             failing, problem = "mediamtx", str(error)
         except ReconcileError as error:
             failing, problem = "refused", str(error)
+        except Exception as error:
+            # The class only: a driver's message may quote a URL or a credential.
+            self.close()
+            failing = f"unexpected {type(error).__name__}"
+            problem = f"an unexpected {type(error).__name__}"
         else:
-            self._succeeded(len(cameras), changes)
+            self._succeeded(cameras, changes)
             return
         _CYCLES.labels("failed").inc()
         if failing != self._failing:
             _log.warning("reconciling failed, and is retried every cycle: %s", problem)
         self._failing = failing
+
+    def _report_refused(self, cameras: Sequence[Camera], changes: Changes) -> None:
+        """One WARNING per Camera whose path MediaMTX newly refuses, naming its id and path
+        only, and an INFO per Camera that works again."""
+        refused = frozenset(changes.failed)
+        _FAILED_PATHS.set(len(refused))
+        for camera in cameras:
+            if camera.path in refused - self._refused:
+                _log.warning(
+                    "MediaMTX refused the path of camera %d (%s), and it is tried again every "
+                    "cycle; the camera's URL is probably not one MediaMTX can pull from",
+                    camera.id,
+                    camera.path,
+                    extra={"camera_id": camera.id, "path": camera.path},
+                )
+            elif camera.path in self._refused - refused:
+                _log.info(
+                    "MediaMTX accepts the path of camera %d (%s) again",
+                    camera.id,
+                    camera.path,
+                    extra={"camera_id": camera.id, "path": camera.path},
+                )
+        # A path nobody has any more (the Camera was removed) is no longer refused.
+        self._refused = refused
 
     def close(self) -> None:
         if self._connection is not None:
@@ -188,9 +239,10 @@ class _Loop:
             )
         return self._connection
 
-    def _succeeded(self, cameras: int, changes: Changes) -> None:
-        _CYCLES.labels("ok").inc()
-        _CAMERAS.set(cameras)
+    def _succeeded(self, cameras: Sequence[Camera], changes: Changes) -> None:
+        _CYCLES.labels("degraded" if changes.failed else "ok").inc()
+        _CAMERAS.set(len(cameras))
+        self._report_refused(cameras, changes)
         _LAST_SUCCESS.set_to_current_time()
         if self._failing is not None:
             _log.info("reconciling again: MediaMTX matches the camera registry")
@@ -229,6 +281,19 @@ def health(heartbeat: Path = HEARTBEAT) -> int:
     return 0 if time.time() < healthy_until else 1
 
 
+#: How long `status` waits between its two samples of the bytes each path received.
+_SAMPLE_SECONDS = 1.0
+
+
+def _arriving(before: Json | None, after: Json | None) -> bool:
+    """Whether a path is ready and its inbound bytes grew between two samples: the counter never
+    falls, so a camera that stopped would still read as receiving by its total."""
+    if not after or not after.get("ready"):
+        return False
+    grown = int(after.get("inboundBytes") or 0) - int((before or {}).get("inboundBytes") or 0)
+    return grown > 0
+
+
 class _StatusSettings(ReconcilerSettings):
     #: `status` runs beside the reconciler, which holds the metrics port: any free one.
     metrics_port: int = 0
@@ -242,6 +307,8 @@ def status(settings: ReconcilerSettings) -> int:
     try:
         with connect(settings.database.url.get_secret_value(), _CONNECT_TIMEOUT) as connection:
             cameras = CameraRegistry(connection).list()
+        sampled = client.paths()
+        time.sleep(_SAMPLE_SECONDS)
         paths = client.paths()
     except ConnectionFailedError as error:
         problem = f"the database could not be reached: {error.category} ({error.cause})"
@@ -250,8 +317,7 @@ def status(settings: ReconcilerSettings) -> int:
     else:
         receiving = 0
         for camera in cameras:
-            path = paths.get(camera.path) or {}
-            arriving = bool(path.get("ready")) and int(path.get("inboundBytes") or 0) > 0
+            arriving = _arriving(sampled.get(camera.path), paths.get(camera.path))
             receiving += arriving
             _log.log(
                 logging.INFO if arriving else logging.WARNING,

@@ -18,7 +18,7 @@ import pytest
 from prometheus_client import REGISTRY
 from publishers import PASSWORD, open_paths
 from pydantic import SecretStr
-from real_mediamtx import SERVICE_USER, MediaMTX
+from real_mediamtx import READER_USER, MediaMTX
 from visionquery.memory.cameras import Camera
 from visionquery.recorder.camera import Backoff, Timing, record_camera
 from visionquery.recorder.ffmpeg import Source
@@ -36,7 +36,7 @@ def dock(mediamtx: MediaMTX) -> MediaMTX:
 
 
 def source(server: MediaMTX, ffmpeg: Path, path: str) -> Source:
-    url = server.rtsp_url(path, SERVICE_USER, server.password)
+    url = server.rtsp_url(path, READER_USER, server.reader_password)
     return Source(url=SecretStr(url), ffmpeg=str(ffmpeg), stall_after=TIMING.stall_after)
 
 
@@ -156,7 +156,7 @@ def test_a_camera_not_publishing_yet_is_tried_again_with_backoff_until_it_is(
     assert sum("no video yet" in r.getMessage() for r in warnings) == 1, "once, not per attempt"
     assert any("receiving video after" in r.getMessage() for r in caplog.records)
     assert all(PASSWORD not in r.getMessage() for r in caplog.records)
-    assert all(dock.password not in r.getMessage() for r in caplog.records)
+    assert all(dock.reader_password not in r.getMessage() for r in caplog.records)
 
 
 def test_a_stream_that_drops_is_finished_and_recorded_again_when_it_is_back(

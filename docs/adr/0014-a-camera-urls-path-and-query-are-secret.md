@@ -16,6 +16,9 @@ The user, password, path and query of a pulled Camera's URL are all secret.
 - The registry never logs a URL, redacted or not: a Camera is identified in logs by its id, name and path.
 - A URL is no longer refused for what its path or query holds.
   It is refused only when it is malformed: not `rtsp://` or `rtsps://`, a bad host or port, a character a URL cannot hold unescaped, or an `@` outside the user and password.
+- Its credentials, when it has any, are `user:password@`, with a user, a colon and a password that may be empty (`user:@host`), because that is the one form MediaMTX accepts for a source.
+  MediaMTX refuses a password without a user (`rtsp://:pw@host/`: "password was provided but username is missing") and a user without a colon (`rtsp://user@host/`: "username was provided but password is missing; if the password is intentionally empty, use 'user:@host'"), and a pulled Camera it refuses would be a path the reconciler cannot make (ADR 0015).
+  The registry refuses both forms, so what it accepts is what MediaMTX accepts; the reconciler's tests add every other form the registry takes to a real MediaMTX to keep it so.
 
 ## Consequences
 

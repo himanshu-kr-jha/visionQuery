@@ -450,14 +450,18 @@ def test_visionquery_processes_do_not_run_as_root(default_stack: Stack) -> None:
     assert whoami.stdout.strip() not in {"", "0"}
 
 
-def test_mediamtx_api_answers_the_visionquery_user_only(default_stack: Stack) -> None:
+def test_mediamtx_api_answers_the_api_user_only(default_stack: Stack) -> None:
     url = default_stack.url("mediamtx", 9997, "/v3/paths/list")
     password = default_stack.secret("VISIONQUERY_MEDIAMTX_API_PASSWORD")
-    status, body = _get(url, ("visionquery", password))
+    status, body = _get(url, ("visionquery-api", password))
     assert status == 200, body
     assert json.loads(body)["items"] == []
     assert _get(url)[0] == 401
-    assert _get(url, ("visionquery", "wrong"))[0] == 401
+    assert _get(url, ("visionquery-api", "wrong"))[0] == 401
+    # The readers' user reads and may not call the API, which could rewrite who may publish.
+    reader = default_stack.secret("VISIONQUERY_MEDIAMTX_READ_PASSWORD")
+    assert _get(url, ("visionquery-reader", reader))[0] == 401
+    assert _get(url, ("visionquery-api", reader))[0] == 401
 
 
 #: The reconciler's cycle in the stack (VISIONQUERY_RECONCILE_INTERVAL), and what a cycle may
@@ -480,7 +484,7 @@ def _wait_for_paths(stack: Stack, wanted: set[str], timeout: float) -> None:
     def matches() -> tuple[bool | None, str]:
         try:
             url = stack.url("mediamtx", 9997, "/v3/config/paths/list")
-            status, body = _get(url, ("visionquery", password))
+            status, body = _get(url, ("visionquery-api", password))
         except (AssertionError, OSError) as error:
             return None, f"MediaMTX's API cannot be reached: {error}"
         if status != 200:
@@ -524,7 +528,7 @@ def test_mediamtx_advertises_a_host_a_browser_can_send_webrtc_media_to(
 ) -> None:
     url = default_stack.url("mediamtx", 9997, "/v3/config/global/get")
     password = default_stack.secret("VISIONQUERY_MEDIAMTX_API_PASSWORD")
-    status, body = _get(url, ("visionquery", password))
+    status, body = _get(url, ("visionquery-api", password))
     assert status == 200, body
     config = json.loads(body)
     assert config["webrtcAdditionalHosts"] == ["127.0.0.1"]
@@ -995,8 +999,8 @@ def _make_samples(directory: Path) -> None:
 
 def _reading(stack: Stack, camera: str) -> str:
     """Where VisionQuery's processes read a camera: only they may (ADR 0002)."""
-    password = quote(stack.secret("VISIONQUERY_MEDIAMTX_API_PASSWORD"), safe="")
-    return f"rtsp://visionquery:{password}@mediamtx:8554/{camera}"
+    password = quote(stack.secret("VISIONQUERY_MEDIAMTX_READ_PASSWORD"), safe="")
+    return f"rtsp://visionquery-reader:{password}@mediamtx:8554/{camera}"
 
 
 def _try_probe(stack: Stack, camera: str, seconds: float) -> tuple[dict[str, Any] | None, str]:
@@ -1033,7 +1037,7 @@ def _probe(stack: Stack, camera: str, seconds: float) -> dict[str, Any]:
 def _paths(stack: Stack) -> dict[str, dict[str, Any]]:
     """MediaMTX's paths, by name, as its API lists them."""
     url = stack.url("mediamtx", 9997, "/v3/paths/list")
-    status, body = _get(url, ("visionquery", stack.secret("VISIONQUERY_MEDIAMTX_API_PASSWORD")))
+    status, body = _get(url, ("visionquery-api", stack.secret("VISIONQUERY_MEDIAMTX_API_PASSWORD")))
     assert status == 200, body
     return {item["name"]: item for item in json.loads(body)["items"]}
 
@@ -1304,7 +1308,11 @@ def test_the_webrtc_live_view_is_refused_without_visionquerys_credentials(
     assert offer() == 401
     assert offer(("lobby", dev_stack.secret("VISIONQUERY_FAKE_CAMERA_PASSWORD"))) == 401
     # With them MediaMTX goes on to the offer, which is deliberately not one it can answer.
-    assert offer(("visionquery", dev_stack.secret("VISIONQUERY_MEDIAMTX_API_PASSWORD"))) == 400
+    assert (
+        offer(("visionquery-reader", dev_stack.secret("VISIONQUERY_MEDIAMTX_READ_PASSWORD"))) == 400
+    )
+    # The API user does not read.
+    assert offer(("visionquery-api", dev_stack.secret("VISIONQUERY_MEDIAMTX_API_PASSWORD"))) == 401
 
 
 def test_mediamtx_has_a_ready_path_for_exactly_the_configured_cameras(dev_stack: Stack) -> None:

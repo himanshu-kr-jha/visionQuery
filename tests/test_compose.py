@@ -193,11 +193,36 @@ def test_the_no_gpu_override_only_drops_tritons_gpu_reservation() -> None:
     assert without == with_gpu
 
 
-@pytest.mark.parametrize("secret", _secrets())
+#: Secrets only a profile's services use, which those services refuse to run without.
+PROFILE_SECRETS = {"VISIONQUERY_FAKE_CAMERA_PASSWORD": "dev"}
+
+
+@pytest.mark.parametrize("secret", [s for s in _secrets() if s not in PROFILE_SECRETS])
 def test_compose_refuses_to_run_without_each_secret(secret: str) -> None:
     result = _compose("config", "--quiet", profiles=PROFILES, env={secret: None})
     assert result.returncode != 0
     assert secret in result.stderr
+
+
+@pytest.mark.parametrize("secret", sorted(PROFILE_SECRETS))
+def test_a_profiles_secret_is_not_needed_while_its_profile_is_off(secret: str) -> None:
+    # `${NAME:?}` would fail `docker compose config`, and so `make up`, for every profile; the
+    # profile's own services refuse an empty value instead (their tests).
+    for profiles in ((), tuple(p for p in PROFILES if p != PROFILE_SECRETS[secret])):
+        result = _compose("config", "--quiet", profiles=profiles, env={secret: None})
+        assert result.returncode == 0, result.stderr
+    config = _config(profiles=(), env={secret: None})
+    assert not set(PROFILE_SERVICES[PROFILE_SECRETS[secret]]) & set(_services(config))
+
+
+@pytest.mark.parametrize("secret", sorted(PROFILE_SECRETS))
+def test_a_profiles_services_get_its_secret_empty_when_it_is_missing_for_them_to_refuse(
+    secret: str,
+) -> None:
+    services = _services(_config(profiles=[PROFILE_SECRETS[secret]], env={secret: None}))
+    registers = services["register-fake-cameras"]["environment"]
+    assert registers[secret] == ""
+    assert services["fake-cameras"]["environment"]["FAKE_CAMERAS_PASSWORD"] == ""
 
 
 def test_the_secrets_are_the_passwords() -> None:
@@ -206,10 +231,24 @@ def test_the_secrets_are_the_passwords() -> None:
         "VISIONQUERY_FAKE_CAMERA_PASSWORD",
         "VISIONQUERY_GRAFANA_ADMIN_PASSWORD",
         "VISIONQUERY_MEDIAMTX_API_PASSWORD",
+        "VISIONQUERY_MEDIAMTX_READ_PASSWORD",
         "VISIONQUERY_POSTGRES_MONITORING_PASSWORD",
         "VISIONQUERY_POSTGRES_PASSWORD",
         "VISIONQUERY_POSTGRES_RUNTIME_PASSWORD",
     ]
+
+
+def test_the_readme_counts_and_names_the_secrets_as_env_example_has_them() -> None:
+    words = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine"]
+    readme = (ROOT / "README.md").read_text()
+    counted = re.findall(
+        r"\b(" + "|".join(words) + r") (?:secrets|passwords) it leaves empty", readme
+    )
+    assert counted
+    assert set(counted) == {words[len(_secrets())]}
+    upgrading = readme.split("#### Upgrading an existing `.env`")[1]
+    for secret in _secrets():
+        assert f"`{secret}`" in upgrading
 
 
 def test_env_example_documents_exactly_the_variables_compose_reads() -> None:
@@ -701,9 +740,9 @@ def _mediamtx_users() -> list[dict[str, Any]]:
     return yaml.safe_load(MEDIAMTX.read_text())["authInternalUsers"]
 
 
-def test_mediamtx_lets_nobody_publish_or_read_but_whom_the_reconciler_and_visionquery_say() -> None:
+def test_mediamtx_lets_nobody_publish_or_read_but_whom_the_reconciler_and_the_readers_say() -> None:
     # ADR 0002: Visual Data never leaves the Deployment through MediaMTX. A camera publishes
-    # with its own credentials, which the reconciler adds; only VisionQuery's own user reads.
+    # with its own credentials, which the reconciler adds; only the readers' user reads.
     config = yaml.safe_load(MEDIAMTX.read_text())
     assert config["authMethod"] == "internal"
     granted = {
@@ -712,7 +751,10 @@ def test_mediamtx_lets_nobody_publish_or_read_but_whom_the_reconciler_and_vision
         for permission in user["permissions"]
     }
     assert {action for _, action in granted if action in {"publish", "playback"}} == set()
-    assert {user for user, action in granted if action == "read"} == {"visionquery"}
+    assert {user for user, action in granted if action == "read"} == {"visionquery-reader"}
+    # The control API can rewrite the users: only the reconciler's user has it (and, from inside
+    # the container, the healthcheck).
+    assert {user for user, action in granted if action == "api"} == {"any", "visionquery-api"}
     # No path but those the reconciler adds: publishing anywhere else is refused.
     assert config["paths"] in ({}, None)
     # A hashed password can be checked only against Basic credentials.
@@ -727,73 +769,79 @@ def test_only_loopback_and_prometheus_reach_mediamtx_without_a_password() -> Non
     }
 
 
-def test_the_visionquery_users_password_is_the_api_password_compose_sets() -> None:
-    (index,) = [i for i, user in enumerate(_mediamtx_users()) if user["user"] == "visionquery"]
-    services = _services(_config(env={"VISIONQUERY_MEDIAMTX_API_PASSWORD": "chosen"}))
+def test_mediamtx_has_a_reader_and_an_api_user_with_a_password_of_their_own() -> None:
+    users = _mediamtx_users()
+    named = {user["user"]: (i, user) for i, user in enumerate(users) if user["user"] != "any"}
+    assert set(named) == {"visionquery-reader", "visionquery-api"}
+    # Each may do one thing: the readers read, and nothing else; the reconciler drives the API.
+    assert [p["action"] for p in named["visionquery-reader"][1]["permissions"]] == ["read"]
+    assert [p["action"] for p in named["visionquery-api"][1]["permissions"]] == ["api"]
+    services = _services(
+        _config(
+            env={
+                "VISIONQUERY_MEDIAMTX_API_PASSWORD": "chosen-api",
+                "VISIONQUERY_MEDIAMTX_READ_PASSWORD": "chosen-read",
+            }
+        )
+    )
     environment = services["mediamtx"]["environment"]
-    assert environment[f"MTX_AUTHINTERNALUSERS_{index}_PASS"] == "chosen"
-    assert [k for k in environment if k.startswith("MTX_AUTHINTERNALUSERS_")] == [
-        f"MTX_AUTHINTERNALUSERS_{index}_PASS"
-    ]
+    assert environment[f"MTX_AUTHINTERNALUSERS_{named['visionquery-api'][0]}_PASS"] == "chosen-api"
+    assert (
+        environment[f"MTX_AUTHINTERNALUSERS_{named['visionquery-reader'][0]}_PASS"] == "chosen-read"
+    )
+    assert len([k for k in environment if k.startswith("MTX_AUTHINTERNALUSERS_")]) == 2
 
 
-def test_the_reconciler_drives_mediamtx_as_visionquery_once_both_are_up() -> None:
+def test_only_the_reconciler_and_mediamtx_are_given_the_api_password() -> None:
     config = _config(
-        env={"VISIONQUERY_MEDIAMTX_API_PASSWORD": "chosen", "VISIONQUERY_RECONCILE_INTERVAL": "2"}
+        profiles=PROFILES,
+        env={
+            "VISIONQUERY_MEDIAMTX_API_PASSWORD": "the-api-password",
+            "VISIONQUERY_MEDIAMTX_READ_PASSWORD": "the-read-password",
+        },
+    )
+    holders = {
+        service: {
+            name for name, value in definition.get("environment", {}).items() if "the-api" in value
+        }
+        for service, definition in _services(config).items()
+    }
+    # MediaMTX checks it; the reconciler presents it; nothing else has it, in any profile (the
+    # recorder reads, so it has the readers' password and never this one).
+    assert {s: names for s, names in holders.items() if names} == {
+        "mediamtx": {"MTX_AUTHINTERNALUSERS_3_PASS"},
+        "reconciler": {"VISIONQUERY_MEDIAMTX__PASSWORD"},
+    }
+    # The readers' password is the reconciler's too (it writes the user back), MediaMTX's, and the
+    # recorder's, which reads with it.
+    readers = {
+        service
+        for service, definition in _services(config).items()
+        if any("the-read" in value for value in definition.get("environment", {}).values())
+    }
+    assert readers == {"mediamtx", "reconciler", "recorder"}
+
+
+def test_the_reconciler_drives_mediamtx_as_the_api_user_once_both_are_up() -> None:
+    config = _config(
+        env={
+            "VISIONQUERY_MEDIAMTX_API_PASSWORD": "chosen",
+            "VISIONQUERY_MEDIAMTX_READ_PASSWORD": "chosen-read",
+            "VISIONQUERY_RECONCILE_INTERVAL": "2",
+        }
     )
     reconciler = _services(config)["reconciler"]
     assert reconciler["command"] == ["visionquery-reconciler"]
     environment = reconciler["environment"]
     assert environment["VISIONQUERY_MEDIAMTX__URL"] == "http://mediamtx:9997"
     assert environment["VISIONQUERY_MEDIAMTX__PASSWORD"] == "chosen"
+    assert environment["VISIONQUERY_MEDIAMTX__READER_PASSWORD"] == "chosen-read"
     assert "VISIONQUERY_MEDIAMTX__USER" not in environment
     assert environment["VISIONQUERY_RECONCILE_INTERVAL"] == "2"
     assert _example()["VISIONQUERY_RECONCILE_INTERVAL"] == "5"
     assert reconciler["depends_on"]["mediamtx"]["condition"] == "service_healthy"
     assert reconciler["healthcheck"]["test"] == ["CMD", "visionquery-reconciler", "health"]
     assert "ports" not in reconciler
-
-
-def test_the_recorder_reads_mediamtx_as_visionquery_into_a_footage_volume_of_its_own() -> None:
-    config = _config(
-        env={"VISIONQUERY_MEDIAMTX_API_PASSWORD": "chosen", "VISIONQUERY_SEGMENT_SECONDS": "60"}
-    )
-    recorder = _services(config)["recorder"]
-    assert recorder["command"] == ["visionquery-recorder"]
-    environment = recorder["environment"]
-    assert environment["VISIONQUERY_MEDIAMTX__RTSP_URL"] == "rtsp://mediamtx:8554"
-    assert environment["VISIONQUERY_MEDIAMTX__PASSWORD"] == "chosen"
-    assert "VISIONQUERY_MEDIAMTX__USER" not in environment
-    assert environment["VISIONQUERY_SEGMENT_SECONDS"] == "60"
-    assert _example()["VISIONQUERY_SEGMENT_SECONDS"] == "300"
-    assert environment["VISIONQUERY_FOOTAGE_DIR"] == "/footage"
-    (mount,) = recorder["volumes"]
-    assert (mount["type"], mount["source"], mount["target"]) == ("volume", "footage", "/footage")
-    assert not mount.get("read_only")
-    # Footage is Visual Data (ADR 0002): no other service mounts it, and nothing is published.
-    mounting = [
-        name
-        for name, service in _services(config).items()
-        if any(m.get("source") == "footage" for m in service.get("volumes", []))
-    ]
-    assert mounting == ["recorder"]
-    assert "ports" not in recorder
-    assert recorder["depends_on"]["mediamtx"]["condition"] == "service_healthy"
-    assert recorder["healthcheck"]["test"] == ["CMD", "visionquery-recorder", "health"]
-
-
-def test_the_image_ships_the_ffmpeg_the_fake_cameras_run_and_a_footage_directory() -> None:
-    """One ffmpeg, pinned once in each Dockerfile, so the recorder's tests (which take it from
-    the root Dockerfile) and the fake cameras exercise the same build."""
-    stage = re.compile(r"^FROM (\S+) AS ffmpeg$", re.M)
-    dockerfile = (ROOT / "Dockerfile").read_text()
-    fake_cameras = (ROOT / "docker" / "fake-cameras" / "Dockerfile").read_text()
-    (ours,) = stage.findall(dockerfile)
-    assert stage.findall(fake_cameras) == [ours]
-    runtime = dockerfile[dockerfile.index("AS runtime") :]
-    assert "COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg" in runtime
-    # A named volume takes the ownership of the directory it is first mounted on.
-    assert re.search(r"mkdir /footage\s*\\?\s*&& chown visionquery:visionquery /footage", runtime)
 
 
 def test_the_fake_cameras_are_registered_and_reconciled_before_they_publish() -> None:
@@ -949,3 +997,52 @@ def test_the_default_cameras_loop_the_fetched_samples() -> None:
 def test_make_fetch_samples_runs_the_script_with_uv() -> None:
     (command,) = [c for c in _make_dry_run("fetch-samples") if "fetch_samples" in c]
     assert command == "uv run scripts/fetch_samples.py"
+
+
+def test_the_recorder_reads_mediamtx_as_the_reader_into_a_footage_volume_of_its_own() -> None:
+    config = _config(
+        env={
+            "VISIONQUERY_MEDIAMTX_API_PASSWORD": "the-api-password",
+            "VISIONQUERY_MEDIAMTX_READ_PASSWORD": "chosen-read",
+            "VISIONQUERY_SEGMENT_SECONDS": "60",
+        }
+    )
+    recorder = _services(config)["recorder"]
+    assert recorder["command"] == ["visionquery-recorder"]
+    environment = recorder["environment"]
+    assert environment["VISIONQUERY_MEDIAMTX__RTSP_URL"] == "rtsp://mediamtx:8554"
+    # The readers' password, never the API user's: a reader must not be able to drive the API.
+    assert environment["VISIONQUERY_MEDIAMTX__PASSWORD"] == "chosen-read"
+    assert "VISIONQUERY_MEDIAMTX__READER_PASSWORD" not in environment
+    assert not [v for v in environment.values() if "the-api" in str(v)]
+    assert "VISIONQUERY_MEDIAMTX__USER" not in environment
+    assert environment["VISIONQUERY_SEGMENT_SECONDS"] == "60"
+    assert _example()["VISIONQUERY_SEGMENT_SECONDS"] == "300"
+    assert environment["VISIONQUERY_FOOTAGE_DIR"] == "/footage"
+    (mount,) = recorder["volumes"]
+    assert (mount["type"], mount["source"], mount["target"]) == ("volume", "footage", "/footage")
+    assert not mount.get("read_only")
+    # Footage is Visual Data (ADR 0002): no other service mounts it, and nothing is published.
+    mounting = [
+        name
+        for name, service in _services(config).items()
+        if any(m.get("source") == "footage" for m in service.get("volumes", []))
+    ]
+    assert mounting == ["recorder"]
+    assert "ports" not in recorder
+    assert recorder["depends_on"]["mediamtx"]["condition"] == "service_healthy"
+    assert recorder["healthcheck"]["test"] == ["CMD", "visionquery-recorder", "health"]
+
+
+def test_the_image_ships_the_ffmpeg_the_fake_cameras_run_and_a_footage_directory() -> None:
+    """One ffmpeg, pinned once in each Dockerfile, so the recorder's tests (which take it from
+    the root Dockerfile) and the fake cameras exercise the same build."""
+    stage = re.compile(r"^FROM (\S+) AS ffmpeg$", re.M)
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    fake_cameras = (ROOT / "docker" / "fake-cameras" / "Dockerfile").read_text()
+    (ours,) = stage.findall(dockerfile)
+    assert stage.findall(fake_cameras) == [ours]
+    runtime = dockerfile[dockerfile.index("AS runtime") :]
+    assert "COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg" in runtime
+    # A named volume takes the ownership of the directory it is first mounted on.
+    assert re.search(r"mkdir /footage\s*\\?\s*&& chown visionquery:visionquery /footage", runtime)

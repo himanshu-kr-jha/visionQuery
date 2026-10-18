@@ -28,7 +28,7 @@ def test_segments_are_five_minutes_unless_told_otherwise(
     assert settings.segment_seconds == 300
     assert settings.footage_dir == tmp_path
     assert settings.mediamtx.rtsp_url == "rtsp://127.0.0.1:8554"
-    assert settings.mediamtx.user == "visionquery"
+    assert settings.mediamtx.user == "visionquery-reader"
 
     monkeypatch.setenv("VISIONQUERY_SEGMENT_SECONDS", "60")
     assert RecorderSettings.load().segment_seconds == 60
@@ -63,7 +63,7 @@ def test_the_footage_directory_is_required(monkeypatch: pytest.MonkeyPatch) -> N
     [
         "http://mediamtx:8554",
         "rtsp://",
-        "rtsp://visionquery:secret@mediamtx:8554",
+        "rtsp://visionquery-reader:secret@mediamtx:8554",
         "rtsp://mediamtx:8554/dock",
         "rtsp://mediamtx:port",
         "mediamtx:8554",
@@ -82,7 +82,7 @@ def test_mediamtx_is_an_rtsp_url_without_credentials_or_a_path(
     assert "secret" not in str(raised.value)
 
 
-def test_a_camera_is_read_from_its_path_as_visionquery() -> None:
+def test_a_camera_is_read_from_its_path_as_the_reader() -> None:
     reader = MediaMTXReader(rtsp_url="rtsp://mediamtx:8554", password=SecretStr("p@ss/w:rd#1?"))
     camera = Camera(12, "Gate 2", "pulled/12", None, ADDED, None)
 
@@ -90,7 +90,7 @@ def test_a_camera_is_read_from_its_path_as_visionquery() -> None:
 
     assert (
         source.url.get_secret_value()
-        == "rtsp://visionquery:p%40ss%2Fw%3Ard%231%3F@mediamtx:8554/pulled/12"
+        == "rtsp://visionquery-reader:p%40ss%2Fw%3Ard%231%3F@mediamtx:8554/pulled/12"
     )
     assert "p@ss" not in repr(source)
 
@@ -101,5 +101,5 @@ def test_an_rtsps_mediamtx_is_read_over_tls() -> None:
 
     assert (
         source_for(reader)(camera).url.get_secret_value()
-        == "rtsps://visionquery:pw@mediamtx:8322/dock"
+        == "rtsps://visionquery-reader:pw@mediamtx:8322/dock"
     )

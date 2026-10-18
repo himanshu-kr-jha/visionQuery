@@ -58,6 +58,17 @@ def test_publish_credentials_keep_only_a_hash_of_the_password() -> None:
     assert not credentials.verify("")
 
 
+def test_the_password_hash_is_costly_enough_to_resist_guessing_but_cheap_enough_to_check() -> None:
+    # MediaMTX checks this hash on every publish attempt from the RTSP port, whose password
+    # nobody needs to know to try, so a flood of wrong ones must not exhaust its memory:
+    # argon2id at OWASP's 19 MiB, two passes, one lane (ADR 0015), not argon2-cffi's 64 MiB,
+    # three passes and four lanes, which a few hundred concurrent attempts would turn into
+    # gigabytes.
+    credentials = PublishCredentials.of("dock", PASSWORD)
+    assert credentials.password_hash.startswith("$argon2id$v=19$m=19456,t=2,p=1$")
+    assert credentials.verify(PASSWORD)
+
+
 def test_publish_credentials_accept_a_secret_and_show_neither_password_nor_hash() -> None:
     credentials = PublishCredentials.of("dock", SecretStr(PASSWORD))
     assert credentials.verify(PASSWORD)

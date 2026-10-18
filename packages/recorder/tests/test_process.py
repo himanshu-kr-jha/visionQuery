@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 from publishers import PASSWORD, open_paths
 from pydantic import SecretStr
-from real_mediamtx import SERVICE_USER, MediaMTX
+from real_mediamtx import READER_USER, MediaMTX
 from visionquery.memory.cameras import CameraRegistry
 from visionquery.memory.connection import connect
 from visionquery.memory.migrate import migrate
@@ -59,8 +59,8 @@ def settings(
         database=DatabaseSettings(url=SecretStr(database_url)),
         mediamtx=MediaMTXReader(
             rtsp_url=f"rtsp://127.0.0.1:{server.rtsp_port}",
-            user=SERVICE_USER,
-            password=SecretStr(server.password),
+            user=READER_USER,
+            password=SecretStr(server.reader_password),
         ),
         footage_dir=footage,
         segment_seconds=segment_seconds,
@@ -291,7 +291,7 @@ def test_a_recorder_killed_mid_segment_recovers_it_playable_when_started_again(
         "PATH": f"{ffmpeg.parent}{os.pathsep}{os.environ['PATH']}",
         "VISIONQUERY_DATABASE__URL": migrated,
         "VISIONQUERY_MEDIAMTX__RTSP_URL": f"rtsp://127.0.0.1:{mediamtx.rtsp_port}",
-        "VISIONQUERY_MEDIAMTX__PASSWORD": mediamtx.password,
+        "VISIONQUERY_MEDIAMTX__PASSWORD": mediamtx.reader_password,
         "VISIONQUERY_FOOTAGE_DIR": str(footage),
         "VISIONQUERY_SEGMENT_SECONDS": "60",
         "VISIONQUERY_METRICS_PORT": "0",
@@ -324,7 +324,7 @@ def test_a_recorder_killed_mid_segment_recovers_it_playable_when_started_again(
     assert frame_hashes(ffmpeg, stopped.path)
     assert recovered.time_to <= stopped.time_from
     assert "recovered" in out
-    assert mediamtx.password not in out
+    assert mediamtx.reader_password not in out
 
 
 def _fragments(camera: Path) -> int:
