@@ -8,7 +8,8 @@ The row in `schema_migrations` that records a file is written in the same transa
 file's statements, so a migration that fails leaves nothing behind and nothing recorded, while
 the ones before it stay applied. The record keeps the SHA-256 of the file's bytes.
 Only the record's owner, the role that migrates, may write it: every run takes back from any
-other role, and from PUBLIC, every privilege on it but `SELECT`.
+other role, and from PUBLIC, every privilege on it but `SELECT`, before applying anything and
+again after, since a migration may grant on it too.
 
 **A run refuses when the files and the record disagree, naming each file.**
 Migrations are append-only: an applied file that was edited, renamed, renumbered or removed
@@ -32,6 +33,11 @@ Connecting gives up after `CONNECT_TIMEOUT` seconds unless the URL sets its own,
 transaction runs with a `lock_timeout` (`LOCK_TIMEOUT`) so a blocked statement fails its file by
 name, and waiting for the advisory lock is logged every few seconds, however long it takes.
 A connection that breaks mid-file leaves its outcome unknown; rerunning is safe.
+
+**The Deployment's roles get their logins.**
+After a run, the command lets the roles every other process connects as log in (ADR 0016,
+`visionquery.memory.roles`) with the passwords in `VISIONQUERY_RUNTIME_PASSWORD` and
+`VISIONQUERY_MONITORING_PASSWORD`, each when it is set; `status` never does.
 
 The command reads `VISIONQUERY_DATABASE__URL` and exits 0 when the schema is up to date, 1
 when a migration failed or the database could not be connected to (a fixed message by
@@ -60,9 +66,10 @@ from typing import Annotated, LiteralString
 import psycopg
 from psycopg import sql
 from psycopg.pq import TransactionStatus
-from pydantic import Field
+from pydantic import Field, SecretStr
 from visionquery.memory._sql import transaction_control
 from visionquery.memory.connection import ConnectionFailedError, connect
+from visionquery.memory.roles import MONITORING, RUNTIME, enable_logins
 from visionquery.memory.settings import DatabaseSettings
 from visionquery.runtime import Settings, start
 
@@ -225,10 +232,23 @@ def migrate(
         pending, problems = _plan(files, misnamed, _applied(connection))
         if problems:
             raise MigrationRefusedError(problems)
-        for migration in pending:
-            _apply(connection, migration, lock_timeout)
-            connection.execute(_RESET)
-        return tuple(migration.name for migration in pending)
+        applied: list[str] = []
+        failed = True
+        try:
+            for migration in pending:
+                _apply(connection, migration, lock_timeout)
+                applied.append(migration.name)
+                connection.execute(_RESET)
+            failed = False
+        finally:
+            # A migration may have granted on the record too (`ON ALL TABLES IN SCHEMA`), and
+            # what it did stays even when a later one fails.
+            if applied and not connection.broken:
+                if failed:
+                    _seal_after_failure(connection)
+                else:
+                    _seal(connection)
+        return tuple(applied)
 
 
 _RECORD = b"""
@@ -270,6 +290,21 @@ _PRIVILEGES: dict[str, LiteralString] = {
     "TRIGGER": "TRIGGER",
     "MAINTAIN": "MAINTAIN",
 }
+
+
+def _seal_after_failure(connection: psycopg.Connection) -> None:
+    """Seal while an error propagates, which must reach the caller with the failing file's name.
+
+    A seal that fails here is logged by its category only (libpq's text may name the server)
+    and the original error carries on.
+    """
+    try:
+        _seal(connection)
+    except psycopg.Error as error:
+        _log.warning(
+            "could not seal the record after a failed migration",
+            extra={"error": type(error).__name__},
+        )
 
 
 def _seal(connection: psycopg.Connection) -> None:
@@ -591,6 +626,18 @@ class MigrateSettings(Settings):
     lock_timeout: Annotated[float, Field(gt=0)] = LOCK_TIMEOUT
     #: Seconds to wait for a connection, unless the URL sets `connect_timeout`.
     connect_timeout: Annotated[int, Field(ge=1)] = CONNECT_TIMEOUT
+    #: The passwords the runtime and monitoring roles log in with, given to them after every
+    #: run that migrated or found nothing to do; a role whose password is not set is left as
+    #: it is (unable to log in, unless an earlier run gave it a password).
+    #: An empty variable counts as unset, like every setting (`env_ignore_empty`), so it never
+    #: clears a verifier.
+    runtime_password: SecretStr | None = None
+    monitoring_password: SecretStr | None = None
+
+    def logins(self) -> dict[str, str]:
+        """The password of each role that one is set for."""
+        passwords = {RUNTIME: self.runtime_password, MONITORING: self.monitoring_password}
+        return {r: p.get_secret_value() for r, p in passwords.items() if p is not None}
 
 
 def _arguments(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -623,6 +670,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         applied = migrate(
             url, connect_timeout=settings.connect_timeout, lock_timeout=settings.lock_timeout
         )
+        if logins := settings.logins():
+            enable_logins(url, logins, connect_timeout=settings.connect_timeout)
     except MigrationRefusedError as error:
         files = [problem.file for problem in error.problems]
         _log.critical("%s", error, extra={"error": type(error).__name__, "files": files})

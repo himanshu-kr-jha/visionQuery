@@ -6,7 +6,7 @@ from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, FastAPI, Request, Response, status
 from pydantic import BaseModel
-from visionquery.api.probe import ConnectionProblem, DatabaseHealth
+from visionquery.api.probe import Checking, ConnectionProblem, DatabaseState
 
 __all__ = [
     "DatabaseStatus",
@@ -18,10 +18,14 @@ __all__ = [
 
 
 class DatabaseStatus(BaseModel):
-    """Whether the api can reach the Deployment's database, and if not, why."""
+    """Whether the api can reach the Deployment's database, and if not, why.
 
-    status: Literal["connected", "unreachable"]
-    #: Why it is unreachable, as a fixed category; never the URL or any part of it.
+    "checking" while the first look at it has not finished, when nothing is known yet.
+    """
+
+    status: Literal["connected", "unreachable", "checking"]
+    #: Why it is unreachable, as a fixed category; never the URL or any part of it. Only an
+    #: unreachable database has one.
     problem: ConnectionProblem | None
 
 
@@ -32,9 +36,9 @@ class Health(BaseModel):
     database: DatabaseStatus
 
 
-def current_database_health(request: Request) -> DatabaseHealth:
+def current_database_health(request: Request) -> DatabaseState:
     """The dependency that looks at the database: the check `create_app` was given."""
-    check: Callable[[], DatabaseHealth] = request.app.state.database_health
+    check: Callable[[], DatabaseState] = request.app.state.database_health
     return check()
 
 
@@ -43,7 +47,7 @@ def current_database_health(request: Request) -> DatabaseHealth:
 operator_router = APIRouter(prefix="/api")
 
 
-def create_app(*, database_health: Callable[[], DatabaseHealth]) -> FastAPI:
+def create_app(*, database_health: Callable[[], DatabaseState]) -> FastAPI:
     """The api over the dependencies it is given, which it keeps on `app.state`.
 
     Every dependency is an argument, so one that is forgotten is an error here and now, not a
@@ -66,14 +70,20 @@ def create_app(*, database_health: Callable[[], DatabaseHealth]) -> FastAPI:
         summary="Whether the Deployment is ready to serve: its database can be reached",
     )
     def health(
-        response: Response, database: Annotated[DatabaseHealth, Depends(current_database_health)]
+        response: Response, database: Annotated[DatabaseState, Depends(current_database_health)]
     ) -> Health:
         """Readiness, not liveness: 200 only while the api can do its work.
 
         A running api that cannot reach the database answers 503 here, so the Compose
         healthcheck (which asks this) marks it unhealthy rather than letting an api that
-        can answer nothing look fine. The body names the problem by category only.
+        can answer nothing look fine. The body names the problem by category only. Before the
+        first look at the database has finished it is not ready either, but claims no problem.
         """
+        if isinstance(database, Checking):
+            response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+            return Health(
+                status="unhealthy", database=DatabaseStatus(status="checking", problem=None)
+            )
         if not database.connected:
             response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
             return Health(

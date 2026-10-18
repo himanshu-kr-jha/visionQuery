@@ -31,6 +31,10 @@ def test_the_schema_describes_health_and_its_unhealthy_answer() -> None:
     assert {"$ref": "#/components/schemas/ConnectionProblem"} in problem["anyOf"]
     categories = schema["components"]["schemas"]["ConnectionProblem"]["enum"]
     assert "authentication failed" in categories
+    # Not knowing yet is a status of its own, never a reason the database cannot be reached.
+    assert "still checking" not in categories
+    status = schema["components"]["schemas"]["DatabaseStatus"]["properties"]["status"]
+    assert status["enum"] == ["connected", "unreachable", "checking"]
 
 
 def test_the_schema_is_rendered_the_same_every_time_and_ends_with_a_newline() -> None:
