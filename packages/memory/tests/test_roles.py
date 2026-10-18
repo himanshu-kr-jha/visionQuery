@@ -16,9 +16,8 @@ from urllib.parse import quote, urlsplit
 
 import psycopg
 import pytest
-from psycopg import sql
 from visionquery.memory.cameras import CameraRegistry
-from visionquery.memory.migrate import MIGRATIONS, migrate
+from visionquery.memory.migrate import MIGRATIONS, MigrationFailedError, migrate
 from visionquery.memory.roles import MONITORING, RUNTIME, enable_logins
 
 RUNTIME_PASSWORD = "runtime p@ss/w:rd#1?%&= '\"\\"
@@ -77,107 +76,33 @@ def test_migrating_makes_both_roles_with_no_powers_of_their_own(database: str) -
         assert set(member_of) == {(MONITORING, "pg_monitor")}
 
 
-def test_a_role_made_beforehand_with_powers_loses_them(database: str, postgres: str) -> None:
-    # Roles belong to the server, so the name may be taken already, by anyone.
-    with psycopg.connect(postgres, autocommit=True) as admin:
-        exists = admin.execute("SELECT FROM pg_roles WHERE rolname = %s", (RUNTIME,)).fetchone()
-        if exists is None:
-            admin.execute(sql.SQL("CREATE ROLE {}").format(sql.Identifier(RUNTIME)))
-        admin.execute(
-            sql.SQL("ALTER ROLE {} SUPERUSER CREATEDB CREATEROLE BYPASSRLS").format(
-                sql.Identifier(RUNTIME)
-            )
-        )
-        admin.execute(sql.SQL("GRANT pg_write_all_data TO {}").format(sql.Identifier(RUNTIME)))
-    migrate(database)
-    with psycopg.connect(database) as connection:
-        row = connection.execute(
-            "SELECT rolsuper, rolcreatedb, rolcreaterole, rolbypassrls FROM pg_roles"
-            " WHERE rolname = %s",
-            (RUNTIME,),
-        ).fetchone()
-        assert row == (False, False, False, False)
-        member = connection.execute(
-            "SELECT pg_has_role(%s, 'pg_write_all_data', 'MEMBER')", (RUNTIME,)
-        ).fetchone()
-        assert member == (False,)
-
-
-def test_a_role_made_beforehand_loses_every_other_leftover_too(
-    database: str, postgres: str
-) -> None:
-    name = urlsplit(database).path.lstrip("/")
-    with psycopg.connect(postgres, autocommit=True) as admin:
-        for role in (RUNTIME, MONITORING):
-            ident = sql.Identifier(role)
-            admin.execute(
-                sql.SQL(
-                    "DO $$ BEGIN CREATE ROLE {} LOGIN; EXCEPTION WHEN duplicate_object THEN"
-                    " NULL; END $$"
-                ).format(ident)
-            )
-            admin.execute(
-                sql.SQL(
-                    "ALTER ROLE {} LOGIN PASSWORD 'old-password' CONNECTION LIMIT 3"
-                    " VALID UNTIL '2999-01-01'"
-                ).format(ident)
-            )
-            admin.execute(sql.SQL("ALTER ROLE {} SET work_mem = '1GB'").format(ident))
-            admin.execute(
-                sql.SQL("ALTER ROLE {} IN DATABASE {} SET statement_timeout = '1s'").format(
-                    ident, sql.Identifier(name)
-                )
-            )
-            admin.execute(
-                sql.SQL("GRANT CREATE, TEMPORARY ON DATABASE {} TO {}").format(
-                    sql.Identifier(name), ident
-                )
-            )
-    with psycopg.connect(database, autocommit=True) as admin:
-        for role in (RUNTIME, MONITORING):
-            admin.execute(
-                sql.SQL("GRANT CREATE ON SCHEMA public TO {}").format(sql.Identifier(role))
-            )
-
-    migrate(database)
-
-    with psycopg.connect(database) as connection:
-        for role in (RUNTIME, MONITORING):
-            row = connection.execute(
-                "SELECT rolcanlogin, rolconnlimit,"
-                " (rolvaliduntil IS NULL OR rolvaliduntil = 'infinity'), rolpassword IS NULL,"
-                " has_database_privilege(%(r)s, current_database(), 'CREATE'),"
-                " has_database_privilege(%(r)s, current_database(), 'TEMPORARY'),"
-                " has_schema_privilege(%(r)s, 'public', 'CREATE'),"
-                " (SELECT count(*) FROM pg_db_role_setting s WHERE s.setrole = a.oid)"
-                " FROM pg_authid a WHERE rolname = %(r)s",
-                {"r": role},
-            ).fetchone()
-            assert row == (False, -1, True, True, False, False, False, 0), role
-    # The login comes back with the next run, with the password it is configured with.
-    enable_logins(database, {RUNTIME: RUNTIME_PASSWORD})
-    psycopg.connect(_as(database, RUNTIME, RUNTIME_PASSWORD), connect_timeout=5).close()
-
-
-def test_two_databases_on_one_server_both_migrate(database: str, postgres: str) -> None:
+def test_a_second_database_on_the_server_is_refused_its_roles(database: str, postgres: str) -> None:
+    # One Postgres server holds one memory: the roles belong to the server, and the first
+    # database's migration made them.
     migrate(database)
     other = urlsplit(postgres)._replace(path="/roles_second").geturl()
     with psycopg.connect(postgres, autocommit=True) as admin:
         admin.execute("DROP DATABASE IF EXISTS roles_second WITH (FORCE)")
         admin.execute("CREATE DATABASE roles_second TEMPLATE template0")
     try:
-        assert "0003_roles.sql" in migrate(other)
+        with pytest.raises(MigrationFailedError, match=r"0003_roles\.sql") as failed:
+            migrate(other)
+        assert RUNTIME in str(failed.value.__cause__)
+        assert MONITORING in str(failed.value.__cause__)
     finally:
         with psycopg.connect(postgres, autocommit=True) as admin:
             admin.execute("DROP DATABASE roles_second WITH (FORCE)")
 
 
+def test_migrating_again_does_not_refuse_its_own_roles(database: str) -> None:
+    assert "0003_roles.sql" in migrate(database)
+    enable_logins(database, {RUNTIME: RUNTIME_PASSWORD})
+    # 0003 is applied, so it is not run again, whatever the server now holds.
+    assert migrate(database) == ()
+
+
 def test_neither_role_can_log_in_until_given_a_password(database: str) -> None:
     migrate(database)
-    with psycopg.connect(database, autocommit=True) as admin:
-        # Another test may have let them log in already: roles belong to the server.
-        for role in (RUNTIME, MONITORING):
-            admin.execute(sql.SQL("ALTER ROLE {} NOLOGIN").format(sql.Identifier(role)))
     with pytest.raises(psycopg.OperationalError):
         psycopg.connect(_as(database, RUNTIME, RUNTIME_PASSWORD), connect_timeout=5)
 
