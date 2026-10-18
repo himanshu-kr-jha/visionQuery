@@ -52,6 +52,7 @@ Then check, and report each failure as a finding:
 
 When you find a defect, find the whole class it belongs to before reporting: try its variants, and list every member you can reproduce in this one review, together with the approach that would close the class rather than only the instances.
 Prefer an approach that makes the class impossible (refusing untrusted state, one validation shared with the dependency) over a list of patches.
+If that approach is a different design from the one in the PR, mark the finding "needs a design change", so the tech lead escalates it to the user in the same round.
 A review that surfaces one more member of a class each round costs the team a round each time, as PR #101 did.
 
 ## Report
