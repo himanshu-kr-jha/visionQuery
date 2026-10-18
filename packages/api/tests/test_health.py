@@ -14,6 +14,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from visionquery.api.app import create_app, current_database_health, operator_router
+from visionquery.api.probe import CHECKING, DatabaseState
 from visionquery.memory.health import DatabaseHealth, check_database
 
 
@@ -23,7 +24,7 @@ def _host(parts: SplitResult) -> str:
     return f"[{host}]" if ":" in host else host
 
 
-def _app(check: Callable[[], DatabaseHealth]) -> FastAPI:
+def _app(check: Callable[[], DatabaseState]) -> FastAPI:
     return create_app(database_health=check)
 
 
@@ -77,6 +78,17 @@ def test_no_part_of_the_url_is_ever_in_the_answer(nobody_listening: str) -> None
         text = client.get("/health").text
     for secret in ("hunter2", "visionquery", str(parts.port), "127.0.0.1", "postgresql"):
         assert secret not in text
+
+
+def test_before_the_first_check_finishes_the_database_is_checking_not_unreachable() -> None:
+    # Nothing is known yet: not ready (503), but no problem is claimed either.
+    with TestClient(_app(lambda: CHECKING)) as client:
+        response = client.get("/health")
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "unhealthy",
+        "database": {"status": "checking", "problem": None},
+    }
 
 
 def test_each_request_asks_the_provided_check() -> None:

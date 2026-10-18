@@ -1,7 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { FETCH_TIMEOUT_MS } from "./api/health";
+import { CHECK_AGAIN_MS, FETCH_TIMEOUT_MS } from "./api/health";
 import { DeploymentHealth } from "./DeploymentHealth";
 
 function answer(status: number, body: unknown) {
@@ -57,6 +57,28 @@ describe("DeploymentHealth", () => {
     expect(report().state).toBe("unhealthy");
   });
 
+  it("keeps checking, never saying unreachable, while the api has not looked yet", async () => {
+    const CHECKING = { status: "unhealthy", database: { status: "checking", problem: null } };
+    const fetch = vi
+      .fn()
+      .mockImplementationOnce(() => Promise.resolve(Response.json(CHECKING, { status: 503 })))
+      .mockImplementation(() => Promise.resolve(Response.json(HEALTHY)));
+    vi.stubGlobal("fetch", fetch);
+
+    render(<DeploymentHealth />);
+
+    await vi.waitFor(() => {
+      expect(fetch).toHaveBeenCalledTimes(1);
+    });
+    expect(report().state).toBe("checking");
+    expect(report().text).not.toMatch(/unreachable|Unhealthy/i);
+
+    expect(
+      await screen.findByText("Healthy", {}, { timeout: CHECK_AGAIN_MS + 2000 }),
+    ).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("says so when the Deployment itself cannot be reached", async () => {
     vi.stubGlobal(
       "fetch",
@@ -105,6 +127,34 @@ describe("DeploymentHealth", () => {
   it.each([
     ["a 200 whose body says unhealthy", () => Response.json(UNHEALTHY, { status: 200 })],
     ["a 503 whose body says healthy", () => Response.json(HEALTHY, { status: 503 })],
+    [
+      "a 503 whose body says the database is connected",
+      () =>
+        Response.json(
+          { status: "unhealthy", database: { status: "connected", problem: null } },
+          { status: 503 },
+        ),
+    ],
+    [
+      "a 503 with an unreachable database and no problem",
+      () =>
+        Response.json(
+          { status: "unhealthy", database: { status: "unreachable", problem: null } },
+          { status: 503 },
+        ),
+    ],
+    [
+      "a 503 still checking that names a problem",
+      () =>
+        Response.json(
+          { status: "unhealthy", database: { status: "checking", problem: "timed out" } },
+          { status: 503 },
+        ),
+    ],
+    [
+      "a 200 still checking",
+      () => Response.json({ status: "healthy", database: { status: "checking", problem: null } }),
+    ],
     [
       "a healthy report that names a problem",
       () =>

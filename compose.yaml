@@ -142,13 +142,14 @@ services:
       # /health reports readiness, not just that the process runs: it answers 503 while the api
       # cannot reach the database, so an api that could answer nothing is not marked healthy.
       # The image has no curl or wget, so its own Python asks; urlopen fails on that 503.
+      # An answer can take the api's whole deadline for the database (5 s), so it waits longer.
       test:
         - CMD
         - python
         - -c
-        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=4)
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=6)
       interval: 10s
-      timeout: 5s
+      timeout: 7s
       retries: 3
       start_period: 30s
       start_interval: 1s
