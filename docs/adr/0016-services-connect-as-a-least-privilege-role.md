@@ -6,9 +6,11 @@ The Postgres exporter connects as `visionquery_monitoring`, a member of `pg_moni
 
 The roles are made by a migration (`0003_roles.sql`), so an existing Deployment gets them at its next `make up` like any other schema change.
 The migration grants the runtime role the rows of every table there is and, through default privileges, of every table and sequence the migrating role creates later, so a later migration never grants anything for it, unless it adds a schema, on which it grants `USAGE`.
-Roles belong to the server rather than to one database, so the migration makes each one only when missing, and strips one that existed of every attribute, membership, login, password, connection limit and setting, and in this database of everything it owns (reassigned to the migrating role) and every privilege and default privilege it holds, on any object of any schema, procedures and parameters included (`REASSIGN OWNED` then `DROP OWNED`), but those it gives.
-For the same reason one Postgres server holds one memory: two memories on a server would share the runtime role, so it would read and write both, and each `visionquery-migrate` would overwrite the other's password.
-Two runs of `0003` at the same moment against databases of one server can also fail with "tuple concurrently updated"; rerunning is safe.
+Roles belong to the server rather than to one database, so one Postgres server holds one memory: two memories on a server would share the runtime role, so it would read and write both, and each `visionquery-migrate` would overwrite the other's password.
+The migration therefore makes both roles fresh and refuses when either already exists, whoever made it: it raises an exception naming the role(s), so it fails, is rolled back with nothing applied (earlier migrations stay), and `visionquery-migrate` exits 1 naming `0003_roles.sql`.
+It does not clean a role it did not make, because what such a role holds (attributes, grants, default privileges, owned objects, other roles' membership in it and `ADMIN` option on it) cannot be known to be all found and taken back, and trusting it would be worse.
+The operator drops the role by hand (`DROP OWNED BY` in each database that holds anything of it, then `DROP ROLE`), once nothing needs it, or gives the memory a server of its own, and migrates again.
+Migrating a memory that already applied `0003` does not refuse, because `0003` is not run again.
 
 A migration is shipped and checksummed, so it holds no password: both roles are made unable to log in.
 After every run, `visionquery-migrate` gives each its login with the password it is configured with (`VISIONQUERY_RUNTIME_PASSWORD`, `VISIONQUERY_MONITORING_PASSWORD`, which Compose fills from `.env`), sending the server a SCRAM verifier made on the client, never the password.
