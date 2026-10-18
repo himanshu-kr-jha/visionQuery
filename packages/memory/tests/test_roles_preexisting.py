@@ -169,8 +169,8 @@ def test_what_a_pre_existing_role_holds_beyond_current_objects_does_not_survive(
         "visionquery_monitoring": set(),
     }
     assert not any(row == (True,) for row in schema.values())
-    assert procedure == {role: (False,) for role in ROLES}
-    assert parameter == {role: (False,) for role in ROLES}
+    assert procedure == dict.fromkeys(ROLES, (False,))
+    assert parameter == dict.fromkeys(ROLES, (False,))
     assert owner == migrating
     assert defaults == [
         ("S", "visionquery_runtime", "SELECT"),
