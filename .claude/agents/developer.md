@@ -37,7 +37,7 @@ If the parent itself depends on unmerged work, change nothing and report: a bran
   Find every other member of that kind within the issue's scope and the current design, and cover each with a test, or close the kind inside that design, and say in your hand-back how you know the class is closed.
   Fixing one instance per round is how PR #101 needed four rounds.
   If closing the class needs a different approach, stop and report it as a design change (see below).
-- Repeat the tests you added or changed as the "Repeat runs" bullet in `.claude/agents/senior-developer.md` says (read it there: the counts and the load command are kept only there).
+- Repeat the tests you added or changed as the "Repeat runs" and "Loaded run" bullets in `.claude/agents/senior-developer.md` say (read them there: the builder's counts and the load command are kept only there).
   Run the tester's count (10 runs, 3 loaded) only on a test you changed to fix a flake.
 - Address exactly the findings you were given.
   If a finding is wrong, do not "fix" it: explain why in your report.

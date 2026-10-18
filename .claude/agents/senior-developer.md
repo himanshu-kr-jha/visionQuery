@@ -57,7 +57,15 @@ List in your hand-back which of these apply and how the tests cover them, so `te
   Throwaway exploration code lives under `docs/spikes/<issue>-<slug>/` in the PR so it is not lost when the branch is deleted, and never in the packages.
 - Update the milestone's marker in `docs/plan/v1.md` in the same branch: `[~]` if this is the first PR of the milestone, `[x]` if it closes the milestone's last sub-issue.
 - Before taking an ADR or migration number, check that no issue branch or develop already uses it, because builders work in parallel; the highest numbers are the last lines:
-  `git fetch --prune origin`, then `for b in $(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/feature/*' 'refs/remotes/origin/fix/*' 'refs/remotes/origin/chore/*' 'refs/remotes/origin/docs/*' refs/remotes/origin/develop); do git ls-tree --name-only "$b" docs/adr/ packages/memory/src/visionquery/memory/migrations/; done | sort -u | tail`.
+  `git fetch --prune origin`, then, once per directory so that ADR numbers and migration numbers each show their own last three:
+  ```
+  for d in docs/adr/ packages/memory/src/visionquery/memory/migrations/; do
+    echo "$d"
+    for b in $(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/feature/*' 'refs/remotes/origin/fix/*' 'refs/remotes/origin/chore/*' 'refs/remotes/origin/docs/*' refs/remotes/origin/develop); do
+      git ls-tree --name-only "$b" "$d"
+    done | grep '/[0-9]' | sort -u | tail -3
+  done
+  ```
 
 ## Tests that do not flake
 
@@ -66,18 +74,19 @@ List in your hand-back which of these apply and how the tests cover them, so `te
 - A test stops and joins every thread, process, container and server it starts, so nothing it started reaches the next test (PR #102).
 - A negative assertion checks the specific refusal (a 401, a named error), never just that something failed, so a broken setup cannot pass as "denied".
 - A test of a refusal or a fix must fail on the old behaviour with an assertion, not with an import error or a missing fixture.
-- **Repeat runs** (this section is the one place for the numbers and the load command; `developer` and `tester` read it here).
+- **Repeat runs** (this bullet and the next are the one place for the builder's counts and the load command; `developer` and `tester` read both, and the tester's own counts are in `tester.md`).
   Before handing back, repeat each new or changed test that involves threads, subprocesses, containers, sockets or clocks, by node id: 5 runs idle, then 2 runs loaded.
   Stack tests (`-m stack`) are out of scope for these repeats.
   Keep each run's full output in a file, fix any failure before you hand back, and record the node ids and the counts in the hand-back.
 - **Loaded run**: busy two cores for the length of that run only, pin the test to the same cores, and kill the load at once.
+  Run these lines in one Bash call, because the Bash tool keeps no shell state between calls, and each loop stops by itself after 900 seconds (`timeout 900`) if the kill is missed.
   ```
-  taskset -c 0,1 sh -c 'while :; do :; done' & p1=$!
-  taskset -c 0,1 sh -c 'while :; do :; done' & p2=$!
+  taskset -c 0,1 timeout 900 sh -c 'while :; do :; done' & p1=$!
+  taskset -c 0,1 timeout 900 sh -c 'while :; do :; done' & p2=$!
   taskset -c 0,1 uv run pytest <node ids>
   kill $p1 $p2
   ```
-  Never run it while another agent runs stack tests or other timing-sensitive tests on the machine; if unsure, skip the loaded runs and say so in the hand-back.
+  Run the loaded runs only when `pgrep -af '[p]ytest|[d]ocker compose'` shows nothing outside your own run (the brackets keep the command from matching its own shell); otherwise skip them and say so in the hand-back.
 
 ## Before you hand back
 
