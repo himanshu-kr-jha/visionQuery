@@ -59,7 +59,7 @@ docker compose --profile dev exec fake-cameras ffmpeg -v error -rtsp_transport t
 make down VOLUMES=1
 ```
 
-1. `make bootstrap` checks the prerequisites, writes `.env` from `.env.example` with a generated password for each of the three secrets it leaves empty (an `.env` that exists is never changed, only checked to set them), and installs the Python packages and the web app's from their lockfiles (`make sync`).
+1. `make bootstrap` checks the prerequisites, writes `.env` from `.env.example` with a generated password for each of the five secrets it leaves empty (an `.env` that exists is never changed, only checked to set them), and installs the Python packages and the web app's from their lockfiles (`make sync`).
    Running it again is safe.
 2. `make up COMPOSE_PROFILES=dev` builds the images and starts the stack with fake cameras, returning once every service is healthy (the first build takes a few minutes).
 3. The api answers `{"status":"healthy", ...}` once it reaches the database, and the last check reads one frame from a fake camera through MediaMTX, from inside the stack, so it needs nothing more on the machine.
@@ -71,13 +71,13 @@ CI's `setup-guide` job runs exactly these commands on a clean runner (its checko
 ### Running the stack
 
 1. Configure the stack, which `make bootstrap` does for you.
-   It is `.env` (git ignores it), a copy of `.env.example` with the three passwords it leaves empty set, for example each to the output of `openssl rand -hex 24`.
+   It is `.env` (git ignores it), a copy of `.env.example` with the five passwords it leaves empty set, for example each to the output of `openssl rand -hex 24`.
    Every other variable has a working default, and `.env.example` explains each.
 2. Start it: `make up`.
    It builds the images (rebuilding only what changed, so edited code is what runs; a bare `docker compose up` builds only an image that is absent and never rebuilds), then starts Postgres and runs the database migrations and waits for them to succeed (`MIGRATE_TIMEOUT`, 300 s), and only then starts the long-running services and waits for their healthchecks (`WAIT_TIMEOUT`, 300 s).
    `docker compose up --wait` alone would return while a migration is still running, so a failed or stuck migration stops `make up` with an error and the migration's log.
    It starts Postgres (TimescaleDB and pgvector), MediaMTX and the VisionQuery api, and returns once every service is healthy.
-   Postgres listens on `127.0.0.1:15432` (user and database `visionquery`), MediaMTX on `127.0.0.1:8554` (RTSP) and `127.0.0.1:9997` (API, user `visionquery`), and the api on `127.0.0.1:8080`, where <http://127.0.0.1:8080/health> says whether it can reach the database.
+   Postgres listens on `127.0.0.1:15432` (superuser and database `visionquery`), MediaMTX on `127.0.0.1:8554` (RTSP) and `127.0.0.1:9997` (API, user `visionquery`), and the api on `127.0.0.1:8080`, where <http://127.0.0.1:8080/health> says whether it can reach the database.
 3. Add what you need with profiles:
    - `make up COMPOSE_PROFILES=observability` (or `--profile observability` with `docker compose`): Prometheus on <http://127.0.0.1:9090> scraping every service, and Grafana on <http://127.0.0.1:3000> (user `admin`) reading it.
    - `COMPOSE_PROFILES=gpu` (or `--profile gpu`): Triton on `127.0.0.1:8000` (HTTP) and `8001` (gRPC), on every GPU.
@@ -121,6 +121,9 @@ Every VisionQuery process is configured only through environment variables prefi
 The variables every process reads are listed in [`CLAUDE.md`](CLAUDE.md#architecture); a process that is missing one it needs, or given a metrics address it cannot bind, exits with status 2 after logging which variable to change.
 
 The database schema is applied with `visionquery-migrate`, which reads `VISIONQUERY_DATABASE__URL` (a `postgresql://` URL to a Postgres with TimescaleDB and pgvector) and is safe to run on every start: it applies only what is new, refuses, naming the file, when the migrations and the database disagree, and refuses to touch a database that holds something and is not a VisionQuery memory.
+Only the migrations connect as the superuser `visionquery`: every long-running service connects as `visionquery_runtime`, which reads and writes the memory's rows and nothing more, and the Postgres exporter as `visionquery_monitoring` (`pg_monitor`), each with its password from `.env` ([ADR 0016](docs/adr/0016-services-connect-as-a-least-privilege-role.md)).
+`visionquery-migrate` makes both roles and, after every run, lets them log in with `VISIONQUERY_RUNTIME_PASSWORD` and `VISIONQUERY_MONITORING_PASSWORD`, so a password changed in `.env` takes effect at the next `make up`.
+An `.env` from before these roles lacks their two passwords: `make bootstrap` names them, and each can be set to the output of `openssl rand -hex 24`.
 `visionquery-migrate status` lists the applied and pending migrations and what a run would refuse, changing nothing; against the running stack, `docker compose run --rm migrate visionquery-migrate status`.
 
 The memory's and the api's tests run against a real Postgres: they need Docker (each session starts and removes its own container) or `VISIONQUERY_TEST_DATABASE_URL` pointing at a superuser's `postgresql://` URL on a server with TimescaleDB and pgvector.

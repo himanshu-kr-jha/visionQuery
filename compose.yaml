@@ -112,10 +112,15 @@ services:
     command: ["visionquery-migrate"]
     environment:
       <<: *runtime-environment
+      # The only VisionQuery process that connects as the superuser, which owns the memory.
       # The password is not part of the URL, where `@`, `/`, `:` or `#` in it would break the
       # URL: libpq reads it from PGPASSWORD, so any password works.
       VISIONQUERY_DATABASE__URL: postgresql://visionquery@postgres:5432/visionquery
       PGPASSWORD: ${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}
+      # After migrating, it lets the roles every other process connects as log in with these
+      # (ADR 0016), so changing one in .env takes effect at the next `make up`.
+      VISIONQUERY_RUNTIME_PASSWORD: ${VISIONQUERY_POSTGRES_RUNTIME_PASSWORD:?set VISIONQUERY_POSTGRES_RUNTIME_PASSWORD in .env (see .env.example)}
+      VISIONQUERY_MONITORING_PASSWORD: ${VISIONQUERY_POSTGRES_MONITORING_PASSWORD:?set VISIONQUERY_POSTGRES_MONITORING_PASSWORD in .env (see .env.example)}
     depends_on:
       postgres:
         condition: service_healthy
@@ -130,9 +135,10 @@ services:
       # unreachable from outside it. Who can reach the published port is decided below
       # (VISIONQUERY_BIND_ADDRESS), not here.
       VISIONQUERY_HTTP_HOST: 0.0.0.0
-      # As for migrate: the password is in PGPASSWORD, never in the URL.
-      VISIONQUERY_DATABASE__URL: postgresql://visionquery@postgres:5432/visionquery
-      PGPASSWORD: ${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}
+      # As every long-running service, as the runtime role, which reads and writes the
+      # memory's rows and nothing more (ADR 0016); the password is in PGPASSWORD, never in the URL.
+      VISIONQUERY_DATABASE__URL: postgresql://visionquery_runtime@postgres:5432/visionquery
+      PGPASSWORD: ${VISIONQUERY_POSTGRES_RUNTIME_PASSWORD:?set VISIONQUERY_POSTGRES_RUNTIME_PASSWORD in .env (see .env.example)}
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -331,19 +337,21 @@ services:
       start_period: 30s
       start_interval: 1s
 
-  # Postgres's metrics for Prometheus; never published on the host.
+  # Postgres's metrics for Prometheus; never published on the host. It connects as the
+  # monitoring role (pg_monitor, and none of the memory's rows; ADR 0016), which can log in
+  # once migrate has given it its password.
   postgres-exporter:
     <<: *service
     profiles: [observability]
     image: prometheuscommunity/postgres-exporter:v0.20.1@sha256:ac5ec343104fae0e2d84a27bb8d69b38430a11910c5382cad85d478d2bab713e
     environment:
       DATA_SOURCE_URI: postgres:5432/visionquery?sslmode=disable
-      DATA_SOURCE_USER: visionquery
-      DATA_SOURCE_PASS: ${VISIONQUERY_POSTGRES_PASSWORD:?set VISIONQUERY_POSTGRES_PASSWORD in .env (see .env.example)}
+      DATA_SOURCE_USER: visionquery_monitoring
+      DATA_SOURCE_PASS: ${VISIONQUERY_POSTGRES_MONITORING_PASSWORD:?set VISIONQUERY_POSTGRES_MONITORING_PASSWORD in .env (see .env.example)}
     read_only: true
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--spider", "http://127.0.0.1:9187/"]
       interval: 10s
