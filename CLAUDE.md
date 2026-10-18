@@ -144,9 +144,10 @@ Run everything from the repository root.
 | A single test | `uv run pytest tests/test_import_contracts.py::test_the_workspace_keeps_every_contract` |
 | Every check CI runs, the web app's and the API types' included | `make check` |
 | Apply the database migrations | `VISIONQUERY_DATABASE__URL=postgresql://... uv run visionquery-migrate` |
+| ...and let the service and exporter roles log in with these passwords | `VISIONQUERY_DATABASE__URL=postgresql://... VISIONQUERY_RUNTIME_PASSWORD=... VISIONQUERY_MONITORING_PASSWORD=... uv run visionquery-migrate` |
 | List applied and pending migrations, and what a run would refuse, changing nothing | `VISIONQUERY_DATABASE__URL=postgresql://... uv run visionquery-migrate status` |
 | ...against the running stack | `docker compose run --rm migrate visionquery-migrate status` |
-| Run the api outside Compose (on 127.0.0.1:8080; `VISIONQUERY_HTTP_HOST` and `VISIONQUERY_HTTP_PORT` move it) | `VISIONQUERY_DATABASE__URL=postgresql://... uv run visionquery-api` |
+| Run the api outside Compose (on 127.0.0.1:8080; `VISIONQUERY_HTTP_HOST` and `VISIONQUERY_HTTP_PORT` move it), as the runtime role | `VISIONQUERY_DATABASE__URL=postgresql://visionquery_runtime:...@... uv run visionquery-api` |
 | Web app: lint, type check, tests | `make web` (`make web-lint`, `make web-typecheck`, `make web-test`) |
 | One web test file | `npm --prefix web test -- src/DeploymentHealth.test.tsx` |
 | Web app dev server, forwarding `/health` and `/api` to the api on `VISIONQUERY_API_PORT` (8080) | `npm --prefix web run dev` |
@@ -198,18 +199,21 @@ Its API types are generated, never written: `visionquery-openapi` writes the api
 It is not part of the Compose stack yet; the api will serve it later.
 
 **The api** (`visionquery-api`) is FastAPI served by uvicorn with `log_config=None`, so its logs are the runtime's JSON lines, and with no access log (it would be mostly the healthcheck's).
-`GET /health` reports readiness, not just that the process runs: 200 when the database can be reached and 503 otherwise, naming the problem only by category (`visionquery.memory.connection.ConnectionProblem`, plus "still checking" while the first check runs), never with any part of the URL.
+`GET /health` reports readiness, not just that the process runs: 200 when the database can be reached and 503 otherwise, naming the problem only by category (`visionquery.memory.connection.ConnectionProblem`), never with any part of the URL.
+Until the first check has finished or its deadline has passed, the database's status is "checking", with no problem, and the answer is 503; the web page then keeps saying it is checking and asks again a second later.
 The Compose healthcheck asks it, so an api that could answer nothing is not marked healthy.
+The check has one time budget, `HEALTH_BUDGET_SECONDS` in `visionquery.memory.health` (2 s to connect plus 2 s for its query); the probe gives up on a check one second after that (`DEADLINE_SECONDS`), and every client of `/health` waits longer still: the Compose healthcheck 6 s, the web page 8 s (`tests/test_compose.py` and `tests/test_web.py` keep them above the deadline).
 It stays at the root, for infrastructure; every Operator operation goes under `/api` (`visionquery.api.app.operator_router`) and calls `tools` (ADR 0009), never the memory.
-The health probe is the one exception: `visionquery.api.probe.DatabaseProbe` asks the memory whether the database can be reached, reuses its answer for a second, and logs one WARNING (the problem category only) when the database turns unreachable and one INFO when it is back.
+The health probe is the one exception: `visionquery.api.probe.DatabaseProbe` asks the memory whether the database can be reached, in a worker thread so that no request waits past its deadline, reuses its answer for a second, and logs one WARNING (the problem category only) when the database turns unreachable, one when a check outlives its deadline, and one INFO when the database is back.
 The api gets what it needs as arguments to `create_app` (`database_health` today, the `tools` later), stored on `app.state` and read by routes through `Depends` on `request.app.state`, so a forgotten dependency is an error where the app is made; only `visionquery.api.serve` wires real ones, and tests pass fakes to `create_app` (`app.dependency_overrides` remains available).
 The api imports the memory only in `visionquery.api.probe` and `serve` (import-linter enforces it); the rest takes `DatabaseHealth` and `ConnectionProblem` from the probe module.
 It listens on `127.0.0.1` unless `VISIONQUERY_HTTP_HOST` says otherwise; Compose sets `0.0.0.0` for the container, and `VISIONQUERY_BIND_ADDRESS` decides who can reach the published port.
 FastAPI's interactive docs are off, because they load their scripts from a CDN; the schema is served at `/openapi.json`.
 
-**The stack** is `compose.yaml` (Compose project `visionquery`), configured only through `.env`: copy `.env.example`, which documents every variable, and set the three passwords it leaves empty, or Compose refuses to start.
+**The stack** is `compose.yaml` (Compose project `visionquery`), configured only through `.env`: copy `.env.example`, which documents every variable, and set the five passwords it leaves empty, or Compose refuses to start.
 Every published port listens on `VISIONQUERY_BIND_ADDRESS`, or MediaMTX's camera-facing ones (RTSP, WebRTC) on `VISIONQUERY_MEDIAMTX_BIND_ADDRESS` (both loopback by default) and has a variable of its own; Postgres is on host port 15432.
 Every VisionQuery process runs from the one image the root `Dockerfile` builds (ADR 0013; `<project>-app:dev`: image tags are global to the Docker daemon, so every built image is named for its Compose project, or two projects would fight over one tag), choosing its process by its Compose `command`; `migrate` is a one-shot service that runs `visionquery-migrate` once Postgres is healthy, with the password in `PGPASSWORD` rather than in the URL.
+It is the only service given the superuser's password (ADR 0016): every other service that connects to the memory does so as `visionquery_runtime` (`visionquery.memory.roles.RUNTIME`) with `VISIONQUERY_POSTGRES_RUNTIME_PASSWORD`, and `postgres-exporter` as `visionquery_monitoring` with `VISIONQUERY_POSTGRES_MONITORING_PASSWORD`, which `migrate` gives them after every run (`tests/test_compose.py` checks all three).
 Every long-running service that runs that image must declare `depends_on: migrate: condition: service_completed_successfully` and must not declare `build:` itself: only `migrate` builds it, because Compose stamps the building service's name into the image's labels, so two builders of one tag race and every `make up` would recreate every container (`tests/test_compose.py` enforces both); and the stack is started with `make up` because `up --wait` returns while `migrate` still runs (it needs Docker Engine 25+, Compose 2.30+ for `compose wait`, and the Dockerfile frontend pinned by digest in the Dockerfile's first line for `COPY --parents`; images are pulled by nobody, `pull_policy: never`).
 MediaMTX holds no camera in its configuration (ADR 0015): the `reconciler` service (`visionquery-reconciler`) gives it one path per camera of the registry every `VISIONQUERY_RECONCILE_INTERVAL` seconds (5), and a publisher per pushed camera, so a camera added, changed or removed, and a restarted MediaMTX, are put right within one cycle.
 Nobody may publish but a camera with its own credentials to its own path, and nobody may read but the `visionquery` user (ADR 0002); `tests/test_compose.py` checks `mediamtx.yml` grants nothing more, and the reconciler, which rewrites MediaMTX's users, keeps every user that file declares but refuses one with a password other than its own, because MediaMTX never shows a password back.
@@ -237,11 +241,20 @@ It exits 0 when the schema is up to date, 1 when a migration failed (it is rolle
 It writes only to an empty database (extensions allowed) or to a memory, one whose `public.schema_migrations` has the record's columns and at least one row; any other table, view, sequence, schema besides `public`, type (a relation's row type and array types do not count) or function that no extension owns, or a `schema_migrations` of another shape, makes it refuse and write nothing.
 Every run takes back every privilege on `schema_migrations`, table-level or column-level, but `SELECT` from every role other than its owner (and from PUBLIC), `CASCADE`-ing to what those roles passed on, so only the migrating role can change the record.
 The seal cannot reach a superuser, a member of the owning role, or a member of `pg_write_all_data` or `pg_maintain`; they can still write the record.
-It also protects only a record the migrating role owns, so the Deployment's setup (#74) must make that role its owner (`ALTER TABLE public.schema_migrations OWNER TO ...`) before relying on it.
+It also protects only a record the migrating role owns; in the stack that is the superuser `visionquery`, which made it, and the services' role can only read it.
+Each run seals the record before applying anything and again after, since a migration may grant on it too.
 `visionquery-migrate status` changes nothing: it logs each applied migration (with `applied_at` and `sha256`), each pending one and a `status: N applied, M pending` line, in one read-only transaction and without waiting for a run in progress, and exits 0, or 3 when a run would refuse (1 and 2 as above).
-The role it connects as must be able to create the `timescaledb` and `vector` extensions.
+The role it connects as must be able to create the `timescaledb` and `vector` extensions, create roles and grant `pg_monitor` (in practice, a superuser).
+
+**Roles** (ADR 0016): migration `0003_roles.sql` makes `visionquery_runtime`, which every long-running service connects as and which may only read and write the rows of the memory's tables (those later migrations create included, by default privileges: a migration never grants for it, unless it adds a schema, on which it grants `USAGE`), and `visionquery_monitoring` (`pg_monitor`, no rows) for the Postgres exporter.
+Neither can log in until `visionquery-migrate` gives it a login after a run, with `VISIONQUERY_RUNTIME_PASSWORD` and `VISIONQUERY_MONITORING_PASSWORD` when set (`visionquery.memory.roles.enable_logins`, which sends a SCRAM verifier, never the password); `status` never does.
+Roles belong to the server, so one Postgres server holds one memory in a Deployment (two would share the runtime role and overwrite each other's passwords), and `0003` refuses when either role already exists, whoever made it: it raises an exception naming the role(s), so it is rolled back with nothing applied and `visionquery-migrate` exits 1 naming `0003_roles.sql`.
+It does not clean or trust a role it did not make; the operator drops it by hand (`DROP OWNED BY` in each database holding anything of it, then `DROP ROLE`), or uses a server of its own, then migrates again; a memory that already applied `0003` is not refused, since `0003` is not re-run.
+The tests' `database` fixture (`packages/conftest.py`) holds a server-wide advisory lock for the test, drops both roles before it and after its database is dropped, so tests stay independent, run in parallel safely and leave no roles on the server; a test that makes its own database asks for `server_roles` too.
+An empty `VISIONQUERY_RUNTIME_PASSWORD` or `VISIONQUERY_MONITORING_PASSWORD` counts as unset and never clears a verifier.
 
 Connecting gives up after the URL's `connect_timeout`, else libpq's `PGCONNECT_TIMEOUT` (empty is unset, `0` waits forever as in libpq, and anything but a whole number is a settings error, exit 2, naming it), else `VISIONQUERY_CONNECT_TIMEOUT` (10 s).
+The api's health check is the exception: it gives up after 2 s whatever the URL's `connect_timeout` or `PGCONNECT_TIMEOUT` say (a smaller value is kept; `0` and anything larger are not), and bounds its query with `statement_timeout`, which it appends to the URL's `options`, else to `PGOPTIONS` (whose value it carries over, since an `options` keyword replaces the variable), unless they already set `statement_timeout` themselves; migrations keep the URL's values.
 Validating `VISIONQUERY_DATABASE__URL` (`visionquery.memory.settings`) is best effort: it turns the values libpq would quote back into exit 2 before anything connects, and accepts libpq's multi-host forms (`h1,h2`, `h1:5432,h2:5433`, `?port=,5433`) and IPv6 zones, but not a non-ASCII host name (write its `xn--` form).
 The guarantee that no libpq text reaches a log line is the connection layer's (`visionquery.memory.connection`), which names a failure only by a fixed category, and the runtime keeps the `psycopg` logger at WARNING or above at any level, because psycopg logs failed attempts at DEBUG with libpq's text.
 
@@ -298,6 +311,7 @@ A service that embeds uvicorn must run it with `log_config=None`, because uvicor
 
 A process that uses the memory also declares `database: DatabaseSettings` (from `visionquery.memory.settings`), read from `VISIONQUERY_DATABASE__URL`, a `postgresql://` URL held as a `SecretStr`.
 `visionquery-migrate` reads it, and takes a free metrics port by default because a run lasts seconds.
+A long-running service's URL names `visionquery_runtime`, never the superuser (ADR 0016).
 
 Import contracts (enforced with import-linter from `.importlinter`, each proven by `tests/test_import_contracts.py`):
 

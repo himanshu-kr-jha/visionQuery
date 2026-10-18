@@ -17,7 +17,8 @@ export interface paths {
          *
          *     A running api that cannot reach the database answers 503 here, so the Compose
          *     healthcheck (which asks this) marks it unhealthy rather than letting an api that
-         *     can answer nothing look fine. The body names the problem by category only.
+         *     can answer nothing look fine. The body names the problem by category only. Before the
+         *     first look at the database has finished it is not ready either, but claims no problem.
          */
         get: operations["health"];
         put?: never;
@@ -33,17 +34,19 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         /** @enum {string} */
-        ConnectionProblem: "authentication failed" | "database does not exist" | "server is not accepting connections" | "server has too many connections" | "host name could not be resolved" | "TLS required or failed" | "server rejected a startup option" | "timed out" | "connection refused or host unreachable" | "other connection failure" | "still checking";
+        ConnectionProblem: "authentication failed" | "database does not exist" | "server is not accepting connections" | "server has too many connections" | "host name could not be resolved" | "TLS required or failed" | "server rejected a startup option" | "timed out" | "connection refused or host unreachable" | "other connection failure";
         /**
          * DatabaseStatus
          * @description Whether the api can reach the Deployment's database, and if not, why.
+         *
+         *     "checking" while the first look at it has not finished, when nothing is known yet.
          */
         DatabaseStatus: {
             /**
              * Status
              * @enum {string}
              */
-            status: "connected" | "unreachable";
+            status: "connected" | "unreachable" | "checking";
             problem: components["schemas"]["ConnectionProblem"] | null;
         };
         /**

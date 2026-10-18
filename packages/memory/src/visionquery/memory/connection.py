@@ -7,7 +7,8 @@ validating the URL in `visionquery.memory.settings` is best effort.
 """
 
 import os
-from typing import Literal
+from itertools import pairwise
+from typing import Any, Literal
 
 import psycopg
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
@@ -29,8 +30,6 @@ type ConnectionProblem = Literal[
     "timed out",
     "connection refused or host unreachable",
     "other connection failure",
-    # Not a failure: said while the first check has not finished, so a caller need not wait.
-    "still checking",
 ]
 
 
@@ -97,36 +96,34 @@ def categorize(error: Exception) -> ConnectionProblem:
 
 
 def connect(
-    url: str, connect_timeout: int, *, statement_timeout_ms: int | None = None
+    url: str,
+    connect_timeout: int,
+    *,
+    connect_limit: int | None = None,
+    statement_timeout_ms: int | None = None,
 ) -> psycopg.Connection:
     """An autocommit connection, or `ConnectionFailedError` without a word of libpq's text.
 
     Connecting gives up after the URL's `connect_timeout`, else libpq's `PGCONNECT_TIMEOUT`
     from the environment (empty means unset, and 0 waits forever, as in libpq), else
-    `connect_timeout` seconds.
+    `connect_timeout` seconds. With `connect_limit` it gives up after at most that many seconds
+    whatever the URL or `PGCONNECT_TIMEOUT` say, 0 included: a smaller value of theirs is kept.
+    Each of these bounds one address: a URL naming several hosts may try each in turn.
 
     With `statement_timeout_ms` the connection is also bounded once made: the server cancels a
-    statement that runs longer (unless the URL sets its own `options`), and the kernel drops a
-    connection whose data goes unacknowledged for that long, or whose peer stops answering
-    keepalives, so a server that vanishes mid-query cannot hold the caller forever.
+    statement that runs longer, and the kernel drops a connection whose data goes
+    unacknowledged for that long, or whose peer stops answering keepalives, so a server that
+    vanishes mid-query cannot hold the caller forever. The statement bound is appended to the
+    URL's `options`, else to libpq's `PGOPTIONS` (carried over, since an `options` keyword takes
+    its place), unless they already set `statement_timeout`, which is then theirs to choose.
     """
     try:
         parameters = conninfo_to_dict(url)
-        # A setting in the URL wins, then libpq's environment variable; `None` leaves the
-        # keyword out, so libpq (and psycopg, which enforces the timeout) reads them.
-        ours = "connect_timeout" not in parameters and not os.environ.get("PGCONNECT_TIMEOUT")
-        extra: dict[str, str | int | None] = {"connect_timeout": connect_timeout if ours else None}
+        extra: dict[str, str | int | None] = {
+            "connect_timeout": _connect_timeout(parameters, connect_timeout, connect_limit)
+        }
         if statement_timeout_ms is not None:
-            if "options" not in parameters:
-                extra["options"] = f"-c statement_timeout={statement_timeout_ms}"
-            bounds = {
-                "tcp_user_timeout": statement_timeout_ms,
-                "keepalives": 1,
-                "keepalives_idle": 1,
-                "keepalives_interval": 1,
-                "keepalives_count": 3,
-            }
-            extra |= {k: v for k, v in bounds.items() if k not in parameters}
+            extra |= _statement_bounds(parameters, statement_timeout_ms)
         return psycopg.connect(make_conninfo(url, **extra), autocommit=True)
     # Every exception, not only psycopg's: whatever parsing or connecting raised may quote the
     # URL (psycopg's own ProgrammingError for a bad timeout does), and a traceback would print
@@ -134,3 +131,86 @@ def connect(
     # name, and `from None` drops the original from the chain.
     except Exception as error:
         raise ConnectionFailedError(categorize(error), type(error).__name__) from None
+
+
+def _connect_timeout(parameters: dict[str, Any], default: int, limit: int | None) -> int | None:
+    """The `connect_timeout` keyword to pass; `None` leaves it out, so libpq (and psycopg,
+    which enforces the timeout) read the URL's, then `PGCONNECT_TIMEOUT`."""
+    if limit is None:
+        ours = "connect_timeout" not in parameters and not os.environ.get("PGCONNECT_TIMEOUT")
+        return default if ours else None
+    given: object = parameters.get("connect_timeout", os.environ.get("PGCONNECT_TIMEOUT"))
+    try:
+        # As psycopg reads it; 0 or less is forever, and what cannot be read is the limit too.
+        seconds = int(float(str(given)))
+    except ValueError:
+        return limit
+    return min(seconds, limit) if seconds > 0 else limit
+
+
+def _statement_bounds(parameters: dict[str, Any], milliseconds: int) -> dict[str, str | int]:
+    """The keywords that bound a connected session, leaving out any the URL sets itself."""
+    bounds: dict[str, str | int] = {
+        "tcp_user_timeout": milliseconds,
+        "keepalives": 1,
+        "keepalives_idle": 1,
+        "keepalives_interval": 1,
+        "keepalives_count": 3,
+    }
+    bounds = {k: v for k, v in bounds.items() if k not in parameters}
+    options = _without_dangling_backslash(
+        str(parameters.get("options", os.environ.get("PGOPTIONS", "")))
+    )
+    if "statement_timeout" not in _settings_named(options):
+        bound = f"-c statement_timeout={milliseconds}"
+        bounds["options"] = f"{options} {bound}" if options.strip() else bound
+    return bounds
+
+
+def _settings_named(options: str) -> set[str]:
+    """The settings an `options` value sets, named as the server reads them: in lower case,
+    with `-` as `_`, from `-c name=value`, `-cname=value` and `--name=value`."""
+    words = _split_options(options)
+    named: set[str] = set()
+    for word, following in pairwise([*words, ""]):
+        if word == "-c":
+            setting = following
+        elif word.startswith(("-c", "--")):
+            setting = word[2:]
+        else:
+            continue
+        named.add(setting.partition("=")[0].replace("-", "_").lower())
+    return named
+
+
+#: What the server splits `options` at (`pg_split_opts` uses C's `isspace`): ASCII whitespace
+#: only, so U+00A0 and the control characters `str.isspace` also accepts are part of a word.
+_OPTION_SEPARATORS = " \t\n\v\f\r"
+
+
+def _without_dangling_backslash(options: str) -> str:
+    """`options` without a final backslash that escapes nothing, as the server drops it; kept,
+    it would escape the space of whatever is appended."""
+    escaped = False
+    for character in options:
+        escaped = not escaped and character == "\\"
+    return options[:-1] if escaped else options
+
+
+def _split_options(options: str) -> list[str]:
+    """`options` split into words as the server splits it: at ASCII whitespace, where a
+    backslash makes the character after it part of the word."""
+    words: list[str] = []
+    word, in_word, escaped = "", False, False
+    for character in options:
+        if not escaped and character in _OPTION_SEPARATORS:
+            if in_word:
+                words.append(word)
+            word, in_word = "", False
+        elif not escaped and character == "\\":
+            escaped = in_word = True
+        else:
+            word, in_word, escaped = word + character, True, False
+    if in_word:
+        words.append(word)
+    return words

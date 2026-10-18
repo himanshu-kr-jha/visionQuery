@@ -17,7 +17,8 @@ import subprocess
 import time
 import uuid
 import warnings
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
+from contextlib import contextmanager
 from urllib.parse import quote, urlsplit
 
 import psycopg
@@ -158,9 +159,50 @@ def _remove(name: str) -> None:
         )
 
 
+#: The key of the advisory lock that serves the Deployment's roles to one test at a time.
+ROLES_LOCK = 7_431_074
+ROLE_NAMES = ("visionquery_runtime", "visionquery_monitoring")
+
+
+def _drop_roles(admin: psycopg.Connection) -> None:
+    for role in ROLE_NAMES:
+        admin.execute(sql.SQL("DROP ROLE IF EXISTS {}").format(sql.Identifier(role)))
+
+
+@contextmanager
+def exclusive_roles(postgres: str) -> Generator[None]:
+    """Hold the server's `visionquery_*` roles for one test, with neither existing at the start.
+
+    Roles belong to the server and migration 0003 refuses when either exists, so the tests that
+    migrate take turns (an advisory lock, which also serves sessions running in parallel on one
+    server), start with no such roles and leave none. The caller drops its databases before
+    leaving the block: a role cannot be dropped while a database still grants it anything.
+    """
+    with psycopg.connect(postgres, autocommit=True) as admin:
+        admin.execute("SELECT pg_advisory_lock(%s)", (ROLES_LOCK,))
+        try:
+            _drop_roles(admin)
+            try:
+                yield
+            finally:
+                _drop_roles(admin)
+        finally:
+            admin.execute("SELECT pg_advisory_unlock(%s)", (ROLES_LOCK,))
+
+
 @pytest.fixture
-def database(postgres: str) -> Iterator[str]:
-    """A URL to a new, empty database of its own on `postgres`, dropped after the test."""
+def server_roles(postgres: str) -> Iterator[None]:
+    """For a test that migrates a database it made itself: the server has neither role now."""
+    with exclusive_roles(postgres):
+        yield
+
+
+@pytest.fixture
+def database(postgres: str, server_roles: None) -> Iterator[str]:
+    """A URL to a new, empty database of its own on `postgres`, dropped after the test.
+
+    The server has neither `visionquery_*` role while the test runs, and none afterwards.
+    """
     name = f"test_{uuid.uuid4().hex[:16]}"
     with psycopg.connect(postgres, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE DATABASE {} TEMPLATE template0").format(sql.Identifier(name)))
