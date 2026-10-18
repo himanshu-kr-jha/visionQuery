@@ -3,7 +3,8 @@
 The reconciler's tests import it by name (pytest's `pythonpath` holds this directory), and
 conftest.py makes the fixtures. `running_mediamtx()` runs one container of the MediaMTX release
 `docker/mediamtx/Dockerfile` builds on, with the Deployment's own `docker/mediamtx/mediamtx.yml`
-and a generated password for the `visionquery` user, on a Docker network of its own (as
+and a generated password for each of its two users (`visionquery-api`, which drives the control
+API, and `visionquery-reader`, which reads), on a Docker network of its own (as
 `mediamtx`). Its API is published on an ephemeral loopback port, so the tests reach it as the
 reconciler does: with credentials, and not from MediaMTX's own loopback. Cameras are played by
 ffmpeg containers (the image the fake cameras use) on the same network. The container and the
@@ -33,8 +34,11 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
 MEDIAMTX_CONFIG = ROOT / "docker" / "mediamtx"
-#: The user VisionQuery's own processes reach MediaMTX as.
-SERVICE_USER = "visionquery"
+#: The user the reconciler drives the control API as (permission `api` only).
+API_USER = "visionquery-api"
+#: The user every reader (the recorder, the Perception Workers, the live view) reads as
+#: (permission `read` only).
+READER_USER = "visionquery-reader"
 LABEL = "visionquery-test=1"
 STARTED_LABEL = "visionquery-test-started"
 #: An RTSP URL's camera-facing side, as the publishers and readers on the network see it.
@@ -52,12 +56,12 @@ MEDIAMTX_IMAGE = _base_image(MEDIAMTX_CONFIG / "Dockerfile", "mediamtx")
 FFMPEG_IMAGE = _base_image(ROOT / "docker" / "fake-cameras" / "Dockerfile", "ffmpeg")
 
 
-def _service_user_index() -> int:
-    """Where the `visionquery` user is in the configuration file, whose password MediaMTX
-    reads from `MTX_AUTHINTERNALUSERS_<index>_PASS` as Compose sets it."""
+def _password_variable(name: str) -> str:
+    """The variable MediaMTX reads user `name`'s password from as Compose sets it:
+    `MTX_AUTHINTERNALUSERS_<index>_PASS`, the index being the user's place in the file."""
     users = yaml.safe_load((MEDIAMTX_CONFIG / "mediamtx.yml").read_text())["authInternalUsers"]
-    (index,) = [i for i, user in enumerate(users) if user["user"] == SERVICE_USER]
-    return index
+    (index,) = [i for i, user in enumerate(users) if user["user"] == name]
+    return f"MTX_AUTHINTERNALUSERS_{index}_PASS"
 
 
 def _docker(*arguments: str, timeout: float = 60) -> subprocess.CompletedProcess[str]:
@@ -95,8 +99,10 @@ class MediaMTX:
     network: str
     #: The control API, as the reconciler is given it.
     api_url: str
-    #: The `visionquery` user's password.
-    password: str
+    #: The `visionquery-api` user's password.
+    api_password: str
+    #: The `visionquery-reader` user's password.
+    reader_password: str
 
     def restart(self) -> None:
         """Restart MediaMTX, which forgets everything set through its API."""
@@ -122,17 +128,42 @@ class MediaMTX:
                 time.sleep(0.2)
 
     def api(self, method: str, path: str, body: object = None) -> Any:
-        """Ask the control API as the `visionquery` user; the JSON it answers."""
+        """Ask the control API as the `visionquery-api` user; the JSON it answers."""
         request = urllib.request.Request(
             self.api_url + path,
             method=method,
             data=None if body is None else json.dumps(body).encode(),
             headers={"Content-Type": "application/json"},
         )
-        token = f"{SERVICE_USER}:{self.password}".encode()
+        token = f"{API_USER}:{self.api_password}".encode()
         request.add_header("Authorization", "Basic " + base64.b64encode(token).decode())
         with urllib.request.urlopen(request, timeout=10) as response:
             return json.loads(response.read() or b"null")
+
+    def api_status(
+        self,
+        user: str | None,
+        password: str | None,
+        method: str = "GET",
+        path: str = "/v3/config/global/get",
+    ) -> int:
+        """The HTTP status the control API gives `user` for a request (401 for bad credentials,
+        403 for a user without the `api` permission); 0 if the connection was refused."""
+        request = urllib.request.Request(self.api_url + path, method=method)
+        if user is not None:
+            token = f"{user}:{password}".encode()
+            request.add_header("Authorization", "Basic " + base64.b64encode(token).decode())
+        try:
+            with urllib.request.urlopen(request, timeout=10) as response:
+                return int(response.status)
+        except urllib.error.HTTPError as error:
+            return error.code
+
+    def with_known_passwords(self, users: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """`users` (as `users()` shows them) with the two VisionQuery users' passwords put back,
+        which is what writing the list through the API needs."""
+        known = {API_USER: self.api_password, READER_USER: self.reader_password}
+        return [{**user, "pass": known.get(user["user"], user["pass"])} for user in users]
 
     def path_configs(self) -> dict[str, dict[str, Any]]:
         """Every configured path, by name, with all its settings."""
@@ -210,7 +241,7 @@ def running_mediamtx() -> Generator[MediaMTX]:
     """A MediaMTX container on a network of its own, removed with the network afterwards."""
     suffix = uuid.uuid4().hex[:12]
     network, container = f"vq-test-net-{suffix}", f"vq-test-mediamtx-{suffix}"
-    password = secrets.token_hex(24)
+    api_password, reader_password = secrets.token_hex(24), secrets.token_hex(24)
     port = _free_port()
     assert _docker("network", "create", "--label", LABEL, network).returncode == 0
     try:
@@ -218,7 +249,8 @@ def running_mediamtx() -> Generator[MediaMTX]:
             "run", "--detach", "--name", container, "--network", network,
             "--network-alias", "mediamtx",
             "--label", LABEL, "--label", f"{STARTED_LABEL}={int(time.time())}",
-            "--env", f"MTX_AUTHINTERNALUSERS_{_service_user_index()}_PASS={password}",
+            "--env", f"{_password_variable(API_USER)}={api_password}",
+            "--env", f"{_password_variable(READER_USER)}={reader_password}",
             "--volume", f"{MEDIAMTX_CONFIG}:/etc/mediamtx:ro",
             # A port of its own, not an ephemeral one, which a restart would change.
             "--publish", f"127.0.0.1:{port}:9997",
@@ -227,7 +259,9 @@ def running_mediamtx() -> Generator[MediaMTX]:
         )  # fmt: skip
         assert started.returncode == 0, started.stderr
         try:
-            server = MediaMTX(container, network, f"http://127.0.0.1:{port}", password)
+            server = MediaMTX(
+                container, network, f"http://127.0.0.1:{port}", api_password, reader_password
+            )
             server.wait_until_ready()
             yield server
         finally:

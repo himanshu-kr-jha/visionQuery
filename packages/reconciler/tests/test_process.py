@@ -8,17 +8,19 @@ import logging
 import os
 import threading
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
+import psycopg
 import pytest
 from prometheus_client import REGISTRY
 from pydantic import SecretStr
-from real_mediamtx import SERVICE_USER, MediaMTX
-from visionquery.memory.cameras import CameraRegistry, PublishCredentials
+from real_mediamtx import API_USER, READER_USER, MediaMTX
+from visionquery.memory.cameras import Camera, CameraRegistry, PublishCredentials
 from visionquery.memory.connection import connect
 from visionquery.memory.migrate import migrate
 from visionquery.memory.settings import DatabaseSettings
+from visionquery.reconciler.reconcile import Changes, Reconciler
 from visionquery.reconciler.serve import (
     MediaMTXSettings,
     ReconcilerSettings,
@@ -51,7 +53,11 @@ def _settings(database_url: str, mediamtx: MediaMTX) -> ReconcilerSettings:
     return ReconcilerSettings.model_construct(
         database=DatabaseSettings(url=SecretStr(database_url)),
         mediamtx=MediaMTXSettings(
-            url=mediamtx.api_url, user=SERVICE_USER, password=SecretStr(mediamtx.password)
+            url=mediamtx.api_url,
+            user=API_USER,
+            password=SecretStr(mediamtx.api_password),
+            reader_user=READER_USER,
+            reader_password=SecretStr(mediamtx.reader_password),
         ),
         reconcile_interval=CYCLE,
     )
@@ -214,7 +220,8 @@ def test_no_camera_credential_reaches_the_logs(
     assert "reconciled" in logged
     for secret in ("pulled-pa55word", DOCK_PASSWORD, pushed.publish_credentials.password_hash):
         assert secret not in logged
-    assert mediamtx.password not in logged
+    assert mediamtx.api_password not in logged
+    assert mediamtx.reader_password not in logged
 
 
 def test_each_cycle_is_counted(
@@ -261,12 +268,15 @@ def test_settings_are_read_from_the_environment(monkeypatch: pytest.MonkeyPatch)
         VISIONQUERY_DATABASE__URL="postgresql://vq@postgres:5432/vq",
         VISIONQUERY_MEDIAMTX__URL="http://mediamtx:9997",
         VISIONQUERY_MEDIAMTX__PASSWORD="api-password",
+        VISIONQUERY_MEDIAMTX__READER_PASSWORD="reader-password",
         VISIONQUERY_RECONCILE_INTERVAL="2.5",
     )
     settings = ReconcilerSettings.load()
     assert settings.mediamtx.url == "http://mediamtx:9997"
-    assert settings.mediamtx.user == "visionquery"
+    assert settings.mediamtx.user == "visionquery-api"
     assert settings.mediamtx.password.get_secret_value() == "api-password"
+    assert settings.mediamtx.reader_user == "visionquery-reader"
+    assert settings.mediamtx.reader_password.get_secret_value() == "reader-password"
     assert settings.reconcile_interval == 2.5
 
 
@@ -275,6 +285,7 @@ def test_the_cycle_defaults_to_five_seconds(monkeypatch: pytest.MonkeyPatch) -> 
         monkeypatch,
         VISIONQUERY_DATABASE__URL="postgresql://vq@postgres:5432/vq",
         VISIONQUERY_MEDIAMTX__PASSWORD="api-password",
+        VISIONQUERY_MEDIAMTX__READER_PASSWORD="reader-password",
     )
     settings = ReconcilerSettings.load()
     assert settings.reconcile_interval == 5
@@ -285,16 +296,29 @@ def test_the_cycle_defaults_to_five_seconds(monkeypatch: pytest.MonkeyPatch) -> 
     ("variables", "named"),
     [
         ({}, "VISIONQUERY_MEDIAMTX__PASSWORD"),
-        ({"VISIONQUERY_MEDIAMTX__PASSWORD": "p", "VISIONQUERY_RECONCILE_INTERVAL": "0"}, None),
+        ({"VISIONQUERY_MEDIAMTX__PASSWORD": "p"}, "VISIONQUERY_MEDIAMTX__READER_PASSWORD"),
         (
             {
                 "VISIONQUERY_MEDIAMTX__PASSWORD": "p",
+                "VISIONQUERY_MEDIAMTX__READER_PASSWORD": "r",
+                "VISIONQUERY_RECONCILE_INTERVAL": "0",
+            },
+            None,
+        ),
+        (
+            {
+                "VISIONQUERY_MEDIAMTX__PASSWORD": "p",
+                "VISIONQUERY_MEDIAMTX__READER_PASSWORD": "r",
                 "VISIONQUERY_MEDIAMTX__URL": "http://visionquery:p@mediamtx:9997",
             },
             "VISIONQUERY_MEDIAMTX__URL",
         ),
         (
-            {"VISIONQUERY_MEDIAMTX__PASSWORD": "p", "VISIONQUERY_MEDIAMTX__URL": "rtsp://m:8554"},
+            {
+                "VISIONQUERY_MEDIAMTX__PASSWORD": "p",
+                "VISIONQUERY_MEDIAMTX__READER_PASSWORD": "r",
+                "VISIONQUERY_MEDIAMTX__URL": "rtsp://m:8554",
+            },
             "VISIONQUERY_MEDIAMTX__URL",
         ),
     ],
@@ -330,3 +354,89 @@ def test_the_health_command_reads_the_heartbeat(
     with pytest.raises(SystemExit) as exited:
         main(["health"])
     assert exited.value.code == 0
+
+
+# --- what goes wrong in a cycle ---------------------------------------------------------------
+
+
+def _store_a_url_mediamtx_refuses(database: str, name: str) -> int:
+    with psycopg.connect(database, autocommit=True) as connection:
+        row = connection.execute(
+            "INSERT INTO cameras (name, pull_url, pull_credentials, pull_target) "
+            "VALUES (%s, 'rtsp://cam.invalid', ':refused-pa55word', '/s') RETURNING id",
+            (name,),
+        ).fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+def test_a_camera_mediamtx_refuses_is_named_once_and_costs_no_other_camera_anything(
+    mediamtx: MediaMTX,
+    migrated: str,
+    registry: CameraRegistry,
+    start: Callable[[ReconcilerSettings], Running],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="visionquery.reconciler")
+    bad = _store_a_url_mediamtx_refuses(migrated, "Bad")
+    registry.add_pushed("Dock", "dock", PublishCredentials.of("dock", DOCK_PASSWORD))
+    degraded = _cycles("degraded")
+
+    running = start(_settings(migrated, mediamtx))
+
+    _within(CYCLE + SLACK, lambda: "dock" in mediamtx.path_configs())
+    _within(CYCLE + SLACK, lambda: mediamtx.publish("dock", "dock", DOCK_PASSWORD).returncode == 0)
+    _within(10 * CYCLE + SLACK, lambda: _cycles("degraded") >= degraded + 3)
+    # The gauge says how many paths MediaMTX refuses, and the reconciler is still healthy: what
+    # is wrong is that camera's URL, which a restart would not change.
+    assert REGISTRY.get_sample_value("visionquery_reconciler_failed_paths") == 1
+    assert health(running.heartbeat) == 0
+    refused = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(refused) == 1, [r.getMessage() for r in refused]
+    assert f"camera {bad} (pulled/{bad})" in refused[0].getMessage()
+    logged = "\n".join(f"{r.getMessage()} {vars(r)}" for r in caplog.records)
+    assert "refused-pa55word" not in logged
+    assert "cam.invalid" not in logged
+
+    # Once the camera is removed, nothing is refused any more.
+    registry.remove(bad)
+    _within(
+        CYCLE + SLACK, lambda: REGISTRY.get_sample_value("visionquery_reconciler_failed_paths") == 0
+    )
+
+
+def test_an_unexpected_failure_is_logged_once_by_its_class_and_the_loop_carries_on(
+    mediamtx: MediaMTX,
+    migrated: str,
+    registry: CameraRegistry,
+    start: Callable[[ReconcilerSettings], Running],
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    caplog.set_level(logging.INFO, logger="visionquery.reconciler")
+    registry.add_pushed("Dock", "dock")
+    reconcile = Reconciler.reconcile
+    calls = 0
+
+    def unreliable(self: Reconciler, cameras: Sequence[Camera]) -> Changes:
+        nonlocal calls
+        calls += 1
+        if calls <= 3:
+            raise KeyError("postgresql://vq:db-pa55word@db/vq")
+        return reconcile(self, cameras)
+
+    monkeypatch.setattr(Reconciler, "reconcile", unreliable)
+    failed = _cycles("failed")
+
+    running = start(_settings(migrated, mediamtx))
+
+    _within(10 * CYCLE + SLACK, lambda: "dock" in mediamtx.path_configs())
+    assert _cycles("failed") >= failed + 3
+    _within(CYCLE + SLACK, lambda: health(running.heartbeat) == 0)
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert "KeyError" in warnings[0].getMessage()
+    assert warnings[0].exc_info is None
+    logged = "\n".join(f"{r.getMessage()} {vars(r)}" for r in caplog.records)
+    assert "db-pa55word" not in logged
+    assert any("reconciling again" in r.getMessage() for r in caplog.records)

@@ -12,7 +12,7 @@ import pytest
 from fake_cameras import Camera as FakeCamera
 from fake_cameras import parse_cameras, publish_url
 from pydantic import SecretStr
-from real_mediamtx import RTSP, SERVICE_USER, MediaMTX
+from real_mediamtx import API_USER, READER_USER, RTSP, MediaMTX
 from register_fake_cameras import RegistrationError, main, register
 from visionquery.memory.cameras import CameraRegistry, PublishCredentials
 from visionquery.memory.connection import connect
@@ -86,8 +86,10 @@ def test_a_registered_fake_camera_publishes_once_reconciled(
     mediamtx: MediaMTX, registry: CameraRegistry
 ) -> None:
     register(registry, CAMERAS, PASSWORD)
-    client = MediaMTXClient(mediamtx.api_url, SERVICE_USER, SecretStr(mediamtx.password))
-    Reconciler(client).reconcile(registry.list())
+    client = MediaMTXClient(mediamtx.api_url, API_USER, SecretStr(mediamtx.api_password))
+    Reconciler(client, {READER_USER: SecretStr(mediamtx.reader_password)}).reconcile(
+        registry.list()
+    )
     url = publish_url(f"rtsp://{RTSP}", CAMERAS[0], PASSWORD)
     assert url.startswith("rtsp://gym-g299:")
     user, password = url.removeprefix("rtsp://").split("@")[0].split(":")
@@ -129,6 +131,8 @@ def test_the_command_fails_when_a_camera_cannot_be_registered(
     ("variable", "value"),
     [
         ("VISIONQUERY_FAKE_CAMERA_PASSWORD", "too-short"),
+        # What Compose gives it when .env sets none (the dev profile alone needs one).
+        ("VISIONQUERY_FAKE_CAMERA_PASSWORD", ""),
         ("VISIONQUERY_FAKE_CAMERAS", "bad name=synthetic"),
     ],
 )
