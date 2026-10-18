@@ -10,15 +10,14 @@
 --
 -- Roles belong to the server, not to one database, so either may exist already (another
 -- database on the server was migrated first, or someone made it): each is made only when
--- missing, and stripped of any power, membership, login, password, limit, setting and direct
--- grant on this database it has but those given here. Both are made unable to log in and
+-- missing, and stripped of any power, membership, login, password, limit, setting, owned object, grant and
+-- default privilege on this database it has but those given here. Both are made unable to log in and
 -- without a password: visionquery-migrate gives each its login, with the password it is
 -- configured with (visionquery.memory.roles), because a migration is shipped and must hold no
 -- secret.
 DO $$
 DECLARE
     role_name text;
-    schema_name text;
     membership record;
 BEGIN
     FOREACH role_name IN ARRAY ARRAY['visionquery_runtime', 'visionquery_monitoring'] LOOP
@@ -35,21 +34,12 @@ BEGIN
         EXECUTE format('ALTER ROLE %I RESET ALL', role_name);
         EXECUTE format('ALTER ROLE %I IN DATABASE %I RESET ALL', role_name, current_database());
         EXECUTE format('REVOKE ALL ON DATABASE %I FROM %I', current_database(), role_name);
-        -- Every direct grant in every schema of this database, column-level ones included (a
-        -- table's REVOKE takes its columns' with it): the grants below are then the only ones.
-        FOR schema_name IN
-            SELECT nspname FROM pg_namespace
-            WHERE nspname <> 'information_schema' AND nspname NOT LIKE 'pg\_%'
-        LOOP
-            EXECUTE format('REVOKE ALL ON SCHEMA %I FROM %I', schema_name, role_name);
-            EXECUTE format('REVOKE ALL ON ALL TABLES IN SCHEMA %I FROM %I', schema_name, role_name);
-            EXECUTE format(
-                'REVOKE ALL ON ALL SEQUENCES IN SCHEMA %I FROM %I', schema_name, role_name
-            );
-            EXECUTE format(
-                'REVOKE ALL ON ALL FUNCTIONS IN SCHEMA %I FROM %I', schema_name, role_name
-            );
-        END LOOP;
+        -- Everything the role owns or holds in this database, and its shared grants: owned
+        -- objects pass to the migrating role, then every privilege (column-level ones, default
+        -- privileges, procedures and parameters included) and every default privilege naming
+        -- the role goes. The grants below are then the only ones.
+        EXECUTE format('REASSIGN OWNED BY %I TO %I', role_name, current_user);
+        EXECUTE format('DROP OWNED BY %I', role_name);
         FOR membership IN
             SELECT g.rolname AS granted, b.rolname AS grantor
             FROM pg_auth_members m
