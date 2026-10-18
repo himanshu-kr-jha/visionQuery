@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from visionquery.api.probe import DEADLINE_SECONDS
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB = ROOT / "web"
@@ -111,3 +112,16 @@ def test_the_dev_server_forwards_exact_prefixes_not_every_path_that_starts_with_
     forwarded = [re.compile(p) for p in patterns]
     for path in ["/apiary", "/api-docs", "/healthz", "/health/x", "/src/api/health.ts", "/"]:
         assert not any(p.search(path) for p in forwarded), path
+
+
+def _milliseconds(name: str) -> int:
+    source = (WEB / "src" / "api" / "health.ts").read_text()
+    found = re.search(rf"^export const {name} = (\d+);$", source, re.MULTILINE)
+    assert found, f"{name} is not a number in health.ts"
+    return int(found.group(1))
+
+
+def test_the_page_waits_for_health_longer_than_the_api_waits_for_the_database() -> None:
+    # /health can take the probe's whole deadline; a page that gave up sooner would call a slow
+    # database an api that cannot be reached. A second is left for the request itself.
+    assert _milliseconds("FETCH_TIMEOUT_MS") >= (DEADLINE_SECONDS + 1) * 1000

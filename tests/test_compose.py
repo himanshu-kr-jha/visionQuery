@@ -22,6 +22,7 @@ import pytest
 import yaml
 from fake_cameras import SYNTHETIC, parse_cameras
 from fetch_samples import MANIFEST, load_manifest
+from visionquery.api.probe import DEADLINE_SECONDS
 from visionquery.memory.roles import MONITORING, RUNTIME
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -444,6 +445,17 @@ def test_the_api_serves_on_its_own_port_and_is_healthy_only_when_health_says_so(
     # which fails on the 503 the api answers while the database cannot be reached.
     test = " ".join(api["healthcheck"]["test"])
     assert "http://127.0.0.1:8080/health" in test
+
+
+def test_the_api_healthcheck_waits_longer_than_the_api_waits_for_the_database() -> None:
+    # /health can take the probe's whole deadline; a healthcheck that gave up sooner would
+    # mark an api unhealthy for a database that is merely slow to answer.
+    healthcheck = _services(_config())["api"]["healthcheck"]
+    found = re.search(r"urlopen\([^)]*timeout=(\d+)\)", " ".join(healthcheck["test"]))
+    assert found, healthcheck["test"]
+    asks = int(found.group(1))
+    assert asks >= DEADLINE_SECONDS + 1
+    assert healthcheck["timeout"] == f"{asks + 1}s"  # Docker's own limit outlasts the request
 
 
 def test_the_api_listens_on_every_interface_of_its_container() -> None:
