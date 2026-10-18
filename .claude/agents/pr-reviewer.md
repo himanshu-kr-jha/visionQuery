@@ -48,6 +48,12 @@ Then check, and report each failure as a finding:
 - **Branch and commits:** branch name and every commit message follow the conventions in `CLAUDE.md`; no commit, PR text or issue text contains `Co-Authored-By`, `Claude-Session`, "Generated with Claude Code", or names an AI model or tool as author (process role names such as tech lead or `tester` are allowed).
 - **Setup:** a new dependency, service, env var or command is reflected in the README setup steps and in `CLAUDE.md` Commands.
 - **Quality:** correctness bugs, race conditions, resource leaks, unbounded growth, missing timeouts, error handling that hides failures, flaky tests (time, ordering, network).
+- **Design concerns:** state the change did not make (pre-made roles, stale paths, leftover rows), secrets in every form and every place they could leak, least privilege for every role and user, inputs the real dependency refuses, one bad item stopping a loop, status signals that cannot turn false, and concurrency and restarts.
+
+When you find a defect, find the whole class it belongs to before reporting: try its variants, and list every member you can reproduce in this one review, together with the approach that would close the class rather than only the instances.
+Prefer an approach that makes the class impossible (refusing untrusted state, one validation shared with the dependency) over a list of patches.
+If that approach is a different design from the one in the PR, mark the finding "needs a design change", so the tech lead escalates it to the user in the same round.
+A review that surfaces one more member of a class each round costs the team a round each time, as PR #101 did.
 
 ## Report
 
