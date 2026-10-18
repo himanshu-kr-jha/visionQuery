@@ -175,7 +175,10 @@ services:
       VISIONQUERY_DATABASE__URL: postgresql://visionquery_runtime@postgres:5432/visionquery
       PGPASSWORD: ${VISIONQUERY_POSTGRES_RUNTIME_PASSWORD:?set VISIONQUERY_POSTGRES_RUNTIME_PASSWORD in .env (see .env.example)}
       VISIONQUERY_MEDIAMTX__URL: http://mediamtx:9997
+      # The API user's password, which only the reconciler (and MediaMTX, to check it) holds, and
+      # the readers' user's, which it keeps when it rewrites MediaMTX's users (ADR 0015).
       VISIONQUERY_MEDIAMTX__PASSWORD: ${VISIONQUERY_MEDIAMTX_API_PASSWORD:?set VISIONQUERY_MEDIAMTX_API_PASSWORD in .env (see .env.example)}
+      VISIONQUERY_MEDIAMTX__READER_PASSWORD: ${VISIONQUERY_MEDIAMTX_READ_PASSWORD:?set VISIONQUERY_MEDIAMTX_READ_PASSWORD in .env (see .env.example)}
       VISIONQUERY_RECONCILE_INTERVAL: ${VISIONQUERY_RECONCILE_INTERVAL:-5}
     depends_on:
       migrate:
@@ -202,7 +205,9 @@ services:
       MTX_WEBRTCADDITIONALHOSTS: ${VISIONQUERY_MEDIAMTX_WEBRTC_HOSTS:-127.0.0.1}
       # The port is announced to the browser as it is inside, so the host publishes the same number.
       MTX_WEBRTCLOCALUDPADDRESS: ":${VISIONQUERY_MEDIAMTX_WEBRTC_UDP_PORT:-8189}"
-      MTX_AUTHINTERNALUSERS_2_PASS: ${VISIONQUERY_MEDIAMTX_API_PASSWORD:?set VISIONQUERY_MEDIAMTX_API_PASSWORD in .env (see .env.example)}
+      # The passwords of the users in docker/mediamtx/mediamtx.yml, by their place in its list.
+      MTX_AUTHINTERNALUSERS_2_PASS: ${VISIONQUERY_MEDIAMTX_READ_PASSWORD:?set VISIONQUERY_MEDIAMTX_READ_PASSWORD in .env (see .env.example)}
+      MTX_AUTHINTERNALUSERS_3_PASS: ${VISIONQUERY_MEDIAMTX_API_PASSWORD:?set VISIONQUERY_MEDIAMTX_API_PASSWORD in .env (see .env.example)}
     volumes:
       # The directory, not the file: MediaMTX reloads its configuration when the file changes,
       # and a bind-mounted file would keep showing the copy an editor replaced.
@@ -353,7 +358,9 @@ services:
       VISIONQUERY_DATABASE__URL: postgresql://visionquery_runtime@postgres:5432/visionquery
       PGPASSWORD: ${VISIONQUERY_POSTGRES_RUNTIME_PASSWORD:?set VISIONQUERY_POSTGRES_RUNTIME_PASSWORD in .env (see .env.example)}
       VISIONQUERY_FAKE_CAMERAS: ${VISIONQUERY_FAKE_CAMERAS:-gym-g299=meva-school-g299.avi,gym-g330=meva-school-g330.avi,stairs-g420=meva-school-g420.avi}
-      VISIONQUERY_FAKE_CAMERA_PASSWORD: ${VISIONQUERY_FAKE_CAMERA_PASSWORD:?set VISIONQUERY_FAKE_CAMERA_PASSWORD in .env (see .env.example)}
+      # Empty is refused by this service itself, so that a stack without the dev profile needs
+      # no such password (`${...:?}` would fail `docker compose config` for every profile).
+      VISIONQUERY_FAKE_CAMERA_PASSWORD: ${VISIONQUERY_FAKE_CAMERA_PASSWORD:-}
     volumes:
       # The script and the fake cameras' own reading of VISIONQUERY_FAKE_CAMERAS, which it imports.
       - ./scripts/register_fake_cameras.py:/scripts/register_fake_cameras.py:ro
@@ -376,7 +383,7 @@ services:
       FAKE_CAMERAS_RTSP: rtsp://mediamtx:8554
       FAKE_CAMERAS_DURATION: ${VISIONQUERY_FAKE_CAMERA_DURATION:-300}
       # Each camera publishes as the user named for it with this, as registered above.
-      FAKE_CAMERAS_PASSWORD: ${VISIONQUERY_FAKE_CAMERA_PASSWORD:?set VISIONQUERY_FAKE_CAMERA_PASSWORD in .env (see .env.example)}
+      FAKE_CAMERAS_PASSWORD: ${VISIONQUERY_FAKE_CAMERA_PASSWORD:-}
     volumes:
       - ${VISIONQUERY_FAKE_CAMERA_SAMPLES:-./samples}:/samples:ro
       - fake-cameras:/cache
