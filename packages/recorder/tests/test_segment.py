@@ -203,6 +203,41 @@ def test_segments_come_back_oldest_first_across_days(tmp_path: Path) -> None:
     assert found == [earlier.segment_id, later.segment_id]
 
 
+def test_segments_from_a_day_on_are_read_without_reading_the_days_before(tmp_path: Path) -> None:
+    by_day: list[UUID] = []
+    for days in range(3):
+        segment = SegmentFile.open(
+            tmp_path,
+            parsed_init(),
+            window_start=AT + timedelta(days=days),
+            not_before=None,
+            verified=True,
+        )
+        segment.append(fragments(1)[0], arrived_at=AT + timedelta(days=days, seconds=2))
+        by_day.append(finished(segment).segment_id)
+    # A day before `since` is not even listed: a broken Segment there would be read otherwise.
+    (tmp_path / AT.strftime("%Y-%m-%d") / "broken.mp4").write_bytes(b"")
+    (tmp_path / AT.strftime("%Y-%m-%d") / "broken.closed").write_text("{")
+
+    found = segments(tmp_path, since=(AT + timedelta(days=1)).date())
+
+    assert [segment.segment_id for segment in found] == by_day[1:]
+
+
+def test_a_finished_segment_whose_record_cannot_be_read_is_told_and_passed_over(
+    tmp_path: Path,
+) -> None:
+    good = finished(written(tmp_path, 1))
+    broken = finished(written(tmp_path, 1))
+    broken.path.with_suffix(".closed").write_text('{"reason": "rolled"')
+    told: list[Path] = []
+
+    found = segments(tmp_path, unreadable=lambda path, error: told.append(path))
+
+    assert [segment.segment_id for segment in found] == [good.segment_id]
+    assert told == [broken.path]
+
+
 def test_a_segment_still_being_written_is_not_finished(tmp_path: Path) -> None:
     written(tmp_path, 2)
 

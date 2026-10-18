@@ -24,6 +24,7 @@ from pydantic import SecretStr
 from real_mediamtx import READER_USER, MediaMTX
 from visionquery.memory.cameras import CameraRegistry
 from visionquery.memory.connection import connect
+from visionquery.memory.footage import SegmentIndex
 from visionquery.memory.migrate import migrate
 from visionquery.memory.settings import DatabaseSettings
 from visionquery.recorder.segment import segments
@@ -223,6 +224,16 @@ def test_a_published_clip_is_read_back_whole_from_the_segments_covering_it(
     assert abs(found[-1].time_to - ended) < timedelta(seconds=2)
     assert found[-1].time_to - found[0].time_from >= timedelta(seconds=8)
     assert all(segment.verified for segment in found) or not _ntp_synchronised()
+    # Every Segment is indexed, so any instant it holds resolves to its file and an offset.
+    with connect(migrated, 5) as connection:
+        index = SegmentIndex(connection)
+        for segment in found:
+            middle = segment.time_from + (segment.time_to - segment.time_from) / 2
+            located = index.find(dock.id, middle)
+            assert located is not None, segment
+            assert footage / located.segment.path == segment.path
+            assert located.offset == middle - segment.time_from
+        assert index.find(dock.id, found[-1].time_to) is None
 
 
 def _ntp_synchronised() -> bool:
@@ -323,6 +334,16 @@ def test_a_recorder_killed_mid_segment_recovers_it_playable_when_started_again(
     assert stopped.reason == "stopped"
     assert frame_hashes(ffmpeg, stopped.path)
     assert recovered.time_to <= stopped.time_from
+    # The Segment the crash left unfinished is indexed once recovered, and the next one too.
+    with connect(migrated, 5) as connection:
+        index = SegmentIndex(connection)
+        for segment in (recovered, stopped):
+            located = index.find(dock.id, segment.time_from)
+            assert located is not None, segment
+            assert (footage / located.segment.path, located.segment.reason) == (
+                segment.path,
+                segment.reason,
+            )
     assert "recovered" in out
     assert mediamtx.reader_password not in out
 
@@ -370,9 +391,12 @@ def test_a_recorder_that_cannot_read_the_registry_says_so_once_and_is_unhealthy(
     time.sleep(3)
 
     assert health(running.heartbeat) != 0
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1, [r.getMessage() for r in warnings]
-    assert "camera registry" in warnings[0].getMessage()
+    # Once for the registry, which cameras to record, and once for the segment index, where
+    # finished Segments are kept track of; each however many attempts fail.
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2, warnings
+    assert len([w for w in warnings if "camera registry" in w]) == 1, warnings
+    assert len([w for w in warnings if "segment index" in w]) == 1, warnings
     assert all("db-pa55word" not in r.getMessage() for r in caplog.records)
 
 

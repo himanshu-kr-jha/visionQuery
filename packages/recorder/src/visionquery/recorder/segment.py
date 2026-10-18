@@ -36,20 +36,18 @@ Adapted from phyOS's Photon recorder (`adapters.photon.segment`), without signin
 
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, cast, get_args
+from typing import Any, cast, get_args
 from uuid import UUID, uuid4
 
+# Why a Segment was finished, which the memory's segment index keeps too.
+from visionquery.memory.footage import Reason
 from visionquery.recorder.mp4 import Fragment, Init, rebase
 
 __all__ = ["Reason", "Segment", "SegmentFile", "recover", "segments", "window"]
-
-#: Why a Segment was finished: at its window's end; when the camera's stream went away; when
-#: the recorder stopped recording the camera (told to stop, or the camera was removed); or, by
-#: the recorder after a crash, from what it found on disk.
-type Reason = Literal["rolled", "stream_ended", "stopped", "recovered"]
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
@@ -290,10 +288,20 @@ def _recover(path: Path) -> Segment | None:
     return segment
 
 
-def _segment_files(directory: Path) -> list[Path]:
+def _segment_files(directory: Path, since: date | None = None) -> list[Path]:
+    """The Segment files under `directory`, a camera's or the Footage directory; with `since`,
+    only those in a camera's day directories from that day on."""
     if not directory.exists():
         return []
-    return list(directory.rglob("*.mp4"))
+    if since is None:
+        return list(directory.rglob("*.mp4"))
+    first = since.isoformat()
+    return [
+        path
+        for day in directory.iterdir()
+        if day.is_dir() and day.name >= first
+        for path in day.glob("*.mp4")
+    ]
 
 
 def recover(directory: Path) -> list[Segment]:
@@ -308,11 +316,26 @@ def recover(directory: Path) -> list[Segment]:
     return sorted(found, key=lambda segment: segment.time_from)
 
 
-def segments(directory: Path) -> list[Segment]:
-    """Every finished Segment under `directory`, oldest first."""
-    found = [
-        _read_closed(path)
-        for path in _segment_files(directory)
-        if path.with_suffix(".closed").exists()
-    ]
+def segments(
+    directory: Path,
+    *,
+    since: date | None = None,
+    unreadable: Callable[[Path, Exception], None] | None = None,
+) -> list[Segment]:
+    """Every finished Segment under `directory`, oldest first; with `since`, only those filed
+    under a day (UTC) from `since` on, when `directory` is a camera's.
+
+    A Segment whose `.closed` record cannot be read raises, unless `unreadable` is given: it is
+    then told of the Segment's file and what reading it raised, and the Segment is passed over.
+    """
+    found: list[Segment] = []
+    for path in _segment_files(directory, since):
+        if not path.with_suffix(".closed").exists():
+            continue
+        try:
+            found.append(_read_closed(path))
+        except Exception as error:
+            if unreadable is None:
+                raise
+            unreadable(path, error)
     return sorted(found, key=lambda segment: segment.time_from)

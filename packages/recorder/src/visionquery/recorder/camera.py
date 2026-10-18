@@ -21,6 +21,8 @@ is logged once, as a WARNING, however many attempts fail, and that it is back on
 **Three ways a Segment ends here**: `rolled` at its window's end, `stream_ended` when the stream
 went away, `stopped` when the recorder was told to stop recording the camera. A crash is not a
 stop: a cancelled recording finishes nothing, and the next start recovers what is on disk.
+Each finished Segment is told to `finished`, which the recorder points at its indexer
+(`visionquery.recorder.index`), so that it is indexed in the memory.
 
 Adapted from phyOS's Photon recorder (`adapters.photon.camera`), without signing or shipping.
 """
@@ -28,6 +30,7 @@ Adapted from phyOS's Photon recorder (`adapters.photon.camera`), without signing
 import asyncio
 import contextlib
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -40,9 +43,16 @@ from visionquery.recorder.mp4 import Fragment, Init, MalformedError
 from visionquery.recorder.segment import Reason, Segment, SegmentFile, window
 from visionquery.recorder.timebase import TimeBase
 
-__all__ = ["Backoff", "Segmenter", "Timing", "record_camera"]
+__all__ = ["Backoff", "Finished", "Segmenter", "Timing", "ignore", "record_camera"]
 
 _log = logging.getLogger(__name__)
+
+#: What is told of each Segment a camera finishes: the camera's id, and the Segment.
+type Finished = Callable[[int, Segment], None]
+
+
+def ignore(camera_id: int, segment: Segment) -> None:
+    """Told of a finished Segment, and doing nothing with it."""
 
 
 @dataclass(frozen=True)
@@ -196,8 +206,10 @@ async def record_camera(
     stop: asyncio.Event,
     *,
     timebase: TimeBase | None = None,
+    finished: Finished = ignore,
 ) -> None:
-    """Record `camera`'s stream from `source` into Segments in `directory`, until `stop` is set.
+    """Record `camera`'s stream from `source` into Segments in `directory`, until `stop` is set,
+    telling `finished` of each Segment it finishes.
 
     A clean stop finishes the Segment being written `stopped`; a cancellation leaves it on disk
     unfinished, as a crash would, for `segment.recover` to finish on the next start.
@@ -208,7 +220,7 @@ async def record_camera(
     try:
         while not stop.is_set():
             received, why = await _connect_once(
-                camera, source, directory, timing, timebase, stop, outage
+                camera, source, directory, timing, timebase, stop, outage, finished
             )
             if stop.is_set():
                 break
@@ -229,6 +241,7 @@ async def _connect_once(
     timebase: TimeBase,
     stop: asyncio.Event,
     outage: _Outage,
+    finished: Finished,
 ) -> tuple[bool, str | None]:
     """One connection to the camera's stream, until it ends: whether video arrived, and why
     it ended."""
@@ -258,7 +271,7 @@ async def _connect_once(
                 metrics.FRAGMENTS.labels(label).inc()
                 metrics.BYTES.labels(label).inc(len(item.data))
                 if rolled is not None:
-                    _finished(camera, rolled, timebase)
+                    _finished(camera, rolled, timebase, finished)
         except MalformedError as error:
             why = f"the stream could not be read: {error}"
         finally:
@@ -271,7 +284,7 @@ async def _connect_once(
         reason: Reason = "stopped" if stop.is_set() else "stream_ended"
         done = await asyncio.to_thread(segmenter.finish, reason)
         if done is not None:
-            _finished(camera, done, timebase)
+            _finished(camera, done, timebase, finished)
     return received, why or recording.ended_because
 
 
@@ -280,7 +293,7 @@ async def _stop_when(stop: asyncio.Event, recording: Recording) -> None:
     await recording.stop()
 
 
-def _finished(camera: Camera, segment: Segment, timebase: TimeBase) -> None:
+def _finished(camera: Camera, segment: Segment, timebase: TimeBase, finished: Finished) -> None:
     metrics.SEGMENTS.labels(str(camera.id), segment.reason).inc()
     metrics.WALL_OFFSET.set(timebase.state().wall_offset_seconds)
     _log.info(
@@ -301,3 +314,4 @@ def _finished(camera: Camera, segment: Segment, timebase: TimeBase) -> None:
             "verified": segment.verified,
         },
     )
+    finished(camera.id, segment)

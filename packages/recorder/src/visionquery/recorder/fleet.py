@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from visionquery.memory.cameras import Camera
-from visionquery.recorder.camera import Backoff, Timing, record_camera
+from visionquery.recorder.camera import Backoff, Finished, Timing, ignore, record_camera
 from visionquery.recorder.ffmpeg import Source
 
 __all__ = ["Fleet"]
@@ -48,12 +48,21 @@ class _Recorded:
 
 
 class Fleet:
-    """The cameras being recorded into `footage`, each read from `source(camera)`."""
+    """The cameras being recorded into `footage`, each read from `source(camera)`, telling
+    `finished` of every Segment each camera finishes."""
 
-    def __init__(self, footage: Path, source: Callable[[Camera], Source], timing: Timing) -> None:
+    def __init__(
+        self,
+        footage: Path,
+        source: Callable[[Camera], Source],
+        timing: Timing,
+        *,
+        finished: Finished = ignore,
+    ) -> None:
         self._footage = footage
         self._source = source
         self._timing = timing
+        self._finished = finished
         self._cameras: dict[int, _Recorded] = {}
 
     @property
@@ -107,6 +116,7 @@ class Fleet:
                     self._footage / str(camera.id),
                     self._timing,
                     recorded.stop,
+                    finished=self._finished,
                 )
             except Exception:
                 if time.monotonic() - started >= _STEADY:
