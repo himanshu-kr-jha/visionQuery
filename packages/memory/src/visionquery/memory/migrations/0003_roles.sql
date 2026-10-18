@@ -8,54 +8,33 @@
 -- visionquery_monitoring, for the Postgres exporter: pg_monitor's statistics and settings, and
 -- none of the memory's rows.
 --
--- Roles belong to the server, not to one database, so either may exist already (another
--- database on the server was migrated first, or someone made it): each is made only when
--- missing, and stripped of any power, membership, login, password, limit, setting, owned object, grant and
--- default privilege on this database it has but those given here. Both are made unable to log in and
+-- Roles belong to the server, not to one database, so one Postgres server holds one memory:
+-- this migration refuses when either role exists already (another database on the server was
+-- migrated first, or someone made it), because a role it did not make may hold powers that
+-- cannot all be found and taken back, and a migration does not guess. It fails and is rolled
+-- back, applying nothing, naming the roles; the operator drops them by hand (DROP OWNED BY and
+-- DROP ROLE) once nothing needs them, and migrates again. Both are made unable to log in and
 -- without a password: visionquery-migrate gives each its login, with the password it is
 -- configured with (visionquery.memory.roles), because a migration is shipped and must hold no
 -- secret.
 DO $$
 DECLARE
-    role_name text;
-    membership record;
+    existing text;
 BEGIN
-    FOREACH role_name IN ARRAY ARRAY['visionquery_runtime', 'visionquery_monitoring'] LOOP
-        BEGIN
-            EXECUTE format('CREATE ROLE %I NOLOGIN', role_name);
-        EXCEPTION WHEN duplicate_object OR unique_violation THEN
-            NULL;  -- made already, perhaps just now by a run against another database
-        END;
-        EXECUTE format(
-            'ALTER ROLE %I NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT'
-            ' NOLOGIN PASSWORD NULL CONNECTION LIMIT -1 VALID UNTIL ''infinity''',
-            role_name
-        );
-        EXECUTE format('ALTER ROLE %I RESET ALL', role_name);
-        EXECUTE format('ALTER ROLE %I IN DATABASE %I RESET ALL', role_name, current_database());
-        EXECUTE format('REVOKE ALL ON DATABASE %I FROM %I', current_database(), role_name);
-        -- Everything the role owns or holds in this database, and its shared grants: owned
-        -- objects pass to the migrating role, then every privilege (column-level ones, default
-        -- privileges, procedures and parameters included) and every default privilege naming
-        -- the role goes. The grants below are then the only ones.
-        EXECUTE format('REASSIGN OWNED BY %I TO %I', role_name, current_user);
-        EXECUTE format('DROP OWNED BY %I', role_name);
-        FOR membership IN
-            SELECT g.rolname AS granted, b.rolname AS grantor
-            FROM pg_auth_members m
-            JOIN pg_roles r ON r.oid = m.member
-            JOIN pg_roles g ON g.oid = m.roleid
-            JOIN pg_roles b ON b.oid = m.grantor
-            WHERE r.rolname = role_name
-        LOOP
-            EXECUTE format(
-                'REVOKE %I FROM %I GRANTED BY %I CASCADE',
-                membership.granted, role_name, membership.grantor
-            );
-        END LOOP;
-    END LOOP;
+    SELECT string_agg(rolname, ', ' ORDER BY rolname) INTO existing
+    FROM pg_roles
+    WHERE rolname IN ('visionquery_runtime', 'visionquery_monitoring');
+    IF existing IS NOT NULL THEN
+        RAISE EXCEPTION
+            'role(s) % already exist on this server: one Postgres server holds one memory, '
+            'and a role not made by this migration is not trusted; drop it by hand, then migrate again',
+            existing;
+    END IF;
 END
 $$;
+
+CREATE ROLE visionquery_runtime NOLOGIN;
+CREATE ROLE visionquery_monitoring NOLOGIN;
 
 GRANT pg_monitor TO visionquery_monitoring;
 
