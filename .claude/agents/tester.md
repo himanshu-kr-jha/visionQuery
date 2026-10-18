@@ -28,7 +28,8 @@ Always verify in a detached scratch worktree of the pushed head, never in the ch
    A check that does not exist yet (no Commands entry, no stack, no `web/`) is reported as "not applicable" with the reason, never as a pass.
    A `uv sync --locked` failure (lockfile out of date) is a blocking finding.
    Use a separate test database or compose project; never touch the developer's dev database.
-   Run the test suite twice when it exists; anything that passes once and fails once is a flaky test and a blocking finding.
+   Run the test suite twice when it exists, and every new or changed test file 10 times, 3 of them with every CPU core busy; anything that passes once and fails once is a flaky test and a blocking finding.
+   Keep every run's full output in a file outside the repository (`... 2>&1 | tee <dir>/run-<i>.log`), so a single failure can be reported with its assertion and stderr; a flaky-test finding without them leaves the developer guessing.
    Stack tests: run the full set (`make test-stack`) once per PR, on the head you pass as ready for PR, once everything else has passed there.
    A verification that finds the branch not ready, and a re-verification after an intermediate fix round, runs `make check` plus only the stack tests the change touches (`uv run pytest -m stack tests/test_stack.py::<test>`).
    Once CI runs on the PR, its `stack` job is the stack-test run for every later head: a local stack run is then optional, and the tech lead tells you when it applies.
@@ -44,7 +45,14 @@ Always verify in a detached scratch worktree of the pushed head, never in the ch
 5. Be picky about the UI if it changed: layout, alignment, states (loading, empty, error), and anything that looks off even if unrelated.
 6. Check the README setup still works if setup changed.
 
+7. Read the builder's list of design concerns in its hand-back (state it did not make, secrets, privilege, the dependency's contract, partial failure, signals, concurrency).
+   Attack each one that applies end to end, and the ones the builder did not list.
+   When you find a defect, try the other variants of it too, and report every one that fails.
+
 ## Report
+
+Hand back only a complete report.
+If you started work in the background, wait for it to finish; an interim "not finished" hand-back costs the team a round trip.
 
 Lead with a verdict: **ready for PR** or **not ready**.
 Then:
