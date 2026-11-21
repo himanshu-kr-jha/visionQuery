@@ -300,7 +300,7 @@ def test_a_segment_whose_writing_fails_is_finished_recovered_and_its_files_close
     appended: list[SegmentFile] = []
 
     def full(self: SegmentFile, fragment: Fragment, **kwargs: Any) -> None:
-        if len(appended) >= 3:
+        if self.fragments >= 2:
             raise OSError(28, "No space left on device")
         appended.append(self)
         real(self, fragment, **kwargs)
@@ -310,8 +310,10 @@ def test_a_segment_whose_writing_fails_is_finished_recovered_and_its_files_close
     async def run() -> None:
         stop = asyncio.Event()
         with dock.publishing(DOCK.path, DOCK.path, PASSWORD):
+            # One window for the whole test: it ends in the first Segment, whenever it starts.
+            one_window = Timing(segment=timedelta(days=1), first_wait=0.2, last_wait=1.0)
             task = asyncio.create_task(
-                record_camera(DOCK, source_of(dock, ffmpeg), tmp_path, TIMING, stop)
+                record_camera(DOCK, source_of(dock, ffmpeg), tmp_path, one_window, stop)
             )
             try:
                 with pytest.raises(OSError, match="No space left"):
@@ -322,7 +324,7 @@ def test_a_segment_whose_writing_fails_is_finished_recovered_and_its_files_close
     asyncio.run(run())
 
     (found,) = segments(tmp_path)
-    assert (found.reason, found.fragments) == ("recovered", 3)
+    assert (found.reason, found.fragments) == ("recovered", 2)
     assert all(segment.closed for segment in set(appended))
     assert not list((tmp_path / ".open").iterdir())
     assert recover(tmp_path) == []
