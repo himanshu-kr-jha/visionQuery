@@ -8,6 +8,8 @@
                                                  is nothing to check)
 
 Matching is case-insensitive, and the footer is found across spaces, hyphens and line breaks.
+A trailer counts only as git and GitHub read one, at the start of a line with its colon, so a
+sentence that uses its words passes.
 Exits 0 when nothing matched, 1 naming each match, and 2 on a usage error or a range git cannot
 list.
 """
@@ -20,17 +22,22 @@ import sys
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
-# The markers: the co-author trailer and the session marker (across spaces or hyphens), a
-# session URL, the agent's no-reply address, and the generated-by footer, matched across
-# whitespace, hyphens, line breaks and markdown emphasis or link brackets (`Generated with
-# [**Claude Code**](...)`). The words "Claude Code" on their own, and role names, are ordinary
-# prose and pass.
+# The markers: the co-author and session trailers (a line that starts with the key and a colon,
+# after any indent, quote, list or emphasis mark, the key written with spaces or hyphens), the
+# hyphenated session marker anywhere, a session URL, the agent's no-reply address, and the
+# generated-by footer, matched across whitespace, hyphens, line breaks and markdown emphasis or
+# link brackets (`Generated with [**Claude Code**](...)`). The trailers' words in a sentence
+# ("co-authored by two people", "the Claude session"), the words "Claude Code" on their own,
+# and role names are ordinary prose and pass.
+_LINE_START = r"^[ \t>*_`#-]*"
+_KEY_END = r"[ \t*_`]*:"
 FORBIDDEN = re.compile(
-    r"co[\s-]*authored[\s-]*by"
-    r"|claude[\s-]+session|claude[\s-]*\.ai/code/session"
+    rf"{_LINE_START}co[ \t-]*authored[ \t-]*by{_KEY_END}"
+    rf"|{_LINE_START}claude[ \t-]*session{_KEY_END}"
+    r"|claude[ \t]*-[ \t-]*session|claude[\s-]*\.ai/code/session"
     r"|noreply@anthropic\.com"
     r"|generated[\s*_`-]+with[\s*_`\[-]+claude[\s*_`-]*code",
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
 SCISSORS = "# ------------------------ >8 ------------------------"
 

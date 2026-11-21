@@ -29,18 +29,25 @@ VARIANTS = [
     "GENERATED WITH [" + "CLAUDE CODE]",
 ]
 
-#: Other ways the markers appear: a bare session URL, the agent's no-reply address, the trailer
-#: and the session marker written with spaces, and emphasis around the tool name in the footer.
+#: Other ways the markers appear: a bare session URL, the agent's no-reply address, the
+#: trailers written with spaces, emphasis, a quote or list mark before them, the hyphenated
+#: session marker anywhere in a line, and emphasis around the tool name in the footer.
 OTHER_MARKERS = [
     "See https://claude" + ".ai/code/session_01ABC for details",
     "claude" + ".ai/code/session_01ABC",
     "Someone <noreply" + "@anthropic.com>",
     "by noreply" + "@ANTHROPIC.COM",
     "Co " + "authored by: Someone",
-    "co" + "authored" + " by Someone",
-    "Co-" + "Authored" + " By Someone",
+    "co" + "authored" + " by: Someone",
+    "Co-" + "Authored" + " By : Someone",
+    "  Co-" + "authored-by: Someone",
+    "> Co-" + "authored-by: Someone",
+    "- Co-" + "authored-by: Someone",
+    "**Co-" + "authored-by:** Someone",
     "Claude " + "Session: abc",
-    "claude  " + "session",
+    "claude  " + "session : abc",
+    "See the Claude-" + "Session marker",
+    "claude--" + "session",
     "Generated with **" + "Claude Code**",
     "Generated with _" + "Claude Code_",
     "Generated with `" + "Claude Code`",
@@ -253,9 +260,27 @@ def test_other_spellings_of_the_markers_fail_in_a_commit_message(
     assert _check(str(message)).returncode == 1, marker
 
 
+#: The trailers' words in a sentence: no colon after them, or not at the line's start.
+TRAILER_WORDS_IN_PROSE = [
+    "This paper was co-" + "authored by two people.",
+    "I resumed the Claude " + "session yesterday.",
+    "I resumed the Claude " + "Code session yesterday.",
+    "Co-" + "authored by two people: Alice and Bob.",
+    "The note says co-" + "authored-by: nobody, as a quote.",
+]
+
+
+@pytest.mark.parametrize("prose", TRAILER_WORDS_IN_PROSE)
+def test_the_trailers_words_in_pr_text_prose_pass(prose: str) -> None:
+    environment = {"PATH": "/usr/bin:/bin", "PR_BODY": f"Closes #8\n\n{prose}\n"}
+    result = _check("--env", "PR_BODY", env=environment)
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize(
     "prose",
     [
+        *TRAILER_WORDS_IN_PROSE,
         "Use a claude " + "model for the Reasoner",
         "The session cookie is signed; Claude Code agents are described in CLAUDE.md",
         "Written by the senior-developer, authored in the worktree",
