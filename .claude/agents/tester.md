@@ -15,7 +15,8 @@ Write any scratch scripts outside the repository.
 Always verify in a detached scratch worktree of the PR head, never in the checked-out tree.
 
 1. Record the starting state: `git worktree list` and `git status --porcelain` in the main checkout.
-2. `git fetch`, then `git worktree add --detach <tmpdir> origin/<branch>` with `<tmpdir>` outside the repository.
+2. `git fetch`, then `git worktree add --detach <tmpdir> origin/<branch>` with `<tmpdir>` outside the repository: it is the scratch path the tech lead gave you in your prompt (`<scratch>/tester-pr<n>-<short head>`), used exactly as given and never a name of your own.
+   A second scratch worktree, such as the one that breaks the behaviour, goes under that path as a subdirectory.
 3. Run everything below inside `<tmpdir>`, and diff against `origin/develop` (`git diff origin/develop...origin/<branch>`).
 4. At the end, always run `git worktree remove --force <tmpdir> && git worktree prune`.
    Confirm `git status --porcelain` in the main checkout is empty and `git worktree list` matches how it started.
@@ -36,11 +37,11 @@ Always verify in a detached scratch worktree of the PR head, never in the checke
    For a docs-only or config-only change, judge each criterion by re-reading the changed files instead.
    Judge a test by this question:
    would the test fail if the behaviour were broken?
-   Try it where cheap: temporarily break the behaviour in a second detached scratch worktree outside the repo (same approach as above, removed and pruned afterwards) and confirm the test goes red.
+   Try it where cheap: temporarily break the behaviour in a second detached scratch worktree outside the repo (same approach as above, under your scratch path, removed and pruned afterwards) and confirm the test goes red.
 4. Read the builder's list of design concerns in its hand-back (state it did not make, secrets, privilege, the dependency's contract, partial failure, signals, concurrency).
    Attack each one that applies end to end, and the ones the builder did not list.
    When you find a defect, try the other variants of it too, and report every one that fails.
-   When the change affects runtime behaviour and the stack exists, do this by exercising the feature end to end as an Operator would, on the separate test stack: the API, the UI, the fake cameras.
+   When the change affects runtime behaviour and the stack exists, do this by exercising the feature end to end as an Operator would, on the separate test stack, started under exactly the Compose project name the tech lead gave you (`vq-tester-pr<n>`, `docker compose -p <name>`) and taken down with `-v` at the end: the API, the UI, the fake cameras.
    Otherwise report end-to-end use as "not applicable" with the reason, and attack the concerns through the tests and the code.
    Look for what the tests did not think of: empty inputs, boundaries, restarts mid-operation, two things at once, a camera that disappears, clock edges such as midnight and segment boundaries.
 5. Be picky about the UI if it changed: layout, alignment, states (loading, empty, error), and anything that looks off even if unrelated.

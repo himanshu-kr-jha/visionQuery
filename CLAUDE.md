@@ -87,12 +87,13 @@ Lifecycle of one issue:
    Docs-only and config-only changes skip the tester: `pr-reviewer` alone checks them.
 4. **Fixes.**
    Two terms are used here and in `.claude/skills/work/SKILL.md`:
-   - *Known red on the head* is a CI check red on the head, or a failing check named in a `developer` hand-back for that head; a red `commits` caused only by the PR's title or body is not known red (it is cleared as below).
+   - *Known red on the head* is a CI check red on the head, or a failing check named in a `developer` hand-back for that head, the latter only until CI has finished on that head, after which CI's result decides; a red `commits` caused only by the PR's title or body is not known red (it is cleared as below).
    - *A newer `developer` hand-back* is one for a commit after the head, not the hand-back that produced the head.
 
    Blocking findings from `tester` or `pr-reviewer` wait until every verdict the head needs is in and CI has finished on that head; then the tech lead sends them, with any red CI check, together to `developer` as one round, and `developer` pushes the fixes and posts its hand-back on the PR.
-   The only early send is for a known red CI check: it goes to `developer` at once, without waiting for the verdicts or the rest of CI, and it is a CI fix, never a round.
+   The only early send is for a known red: it goes to `developer` at once, without waiting for the verdicts or the rest of CI, and it is a CI fix, never a round.
    Judges still running are not stopped for it; their verdicts stand for the head they judged.
+   Blocking findings on a head that a CI fix superseded stay open: they are sent with the next head's verdicts, and the re-judge prompt lists them for each judge to confirm or close.
    After a fix push, `tester` (if code changed) and `pr-reviewer` re-judge at the same time, each starting from the diff since the last head that judge itself judged, or reviewing the whole diff if it has judged none.
    The same holds for a CI-fix push and for a develop merge that had to resolve a conflict.
    A red `commits` check whose cause is the PR's title or body is cleared by fixing the text and re-running that run (see CI under Commands), not by a push, and needs no `developer`; it neither stops judges nor holds back starting or waiting for them.

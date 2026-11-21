@@ -13,7 +13,7 @@ You do not edit code; you report.
 Always review in a detached scratch worktree of the PR head, never in the checked-out tree.
 
 1. Record the starting state: `git worktree list` and `git status --porcelain` in the main checkout.
-2. `git fetch`, then `git worktree add --detach <tmpdir> origin/<headRefName>` with `<tmpdir>` outside the repository.
+2. `git fetch`, then `git worktree add --detach <tmpdir> origin/<headRefName>` with `<tmpdir>` outside the repository: it is the scratch path the tech lead gave you in your prompt (`<scratch>/pr-reviewer-pr<n>-<short head>`), used exactly as given and never a name of your own.
 3. Do all reading, checks and `file:line` citations inside `<tmpdir>`, and diff against `origin/<baseRefName>` (`git diff origin/<baseRefName>...origin/<headRefName>`).
 4. At the end, always run `git worktree remove --force <tmpdir> && git worktree prune`.
    Confirm `git status --porcelain` in the main checkout is empty and `git worktree list` matches how it started.
