@@ -7,10 +7,12 @@ id fixed when it opened:
 - `<YYYY-MM-DD>/<HHMMSS>-<id>.mp4`    the init, then every Fragment, as ffmpeg wrote them
 - `<YYYY-MM-DD>/<HHMMSS>-<id>.frags`  the Fragment index: one JSON line per Fragment, saying
                                       where it ends in the file, when it arrived, how long it
-                                      lasts, and (on the first) when the Segment begins
+                                      lasts, and (on the first) when the Segment begins, the
+                                      window it was cut to, and by how much the clock stepped
+                                      just before it, if it did (`stepped_by`)
 - `<YYYY-MM-DD>/<HHMMSS>-<id>.closed` written once, when the Segment is finished: why, over
-                                      what span, how many Fragments, and whether its times
-                                      stand on a synchronised NTP reading
+                                      what span, how many Fragments, whether its times
+                                      stand on a synchronised NTP reading, and `stepped_by`
 
 **The order of writes is the guarantee.** A Fragment's bytes are fsynced before its index line
 is, so every line names bytes that exist, and a crash costs at most the Fragment being written.
