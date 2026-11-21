@@ -362,7 +362,6 @@ COUNTED_CATALOGS = (
     "pg_collation",
     "pg_constraint",
     "pg_conversion",
-    "pg_default_acl",
     "pg_event_trigger",
     "pg_foreign_data_wrapper",
     "pg_foreign_server",
@@ -394,6 +393,9 @@ COUNTED_CATALOGS = (
 UNCOUNTED_CATALOGS = {
     "pg_extension": "a database with nothing but extensions is empty",
     "pg_enum": "an enum's labels belong to its type, which is counted",
+    # Like a grant on `public`, it makes nothing: it is how an Operator may prepare an empty
+    # database for the roles that will use it before the first run.
+    "pg_default_acl": "a default privilege is a setting for objects not yet made",
 }
 
 #: Postgres gives every object made after `initdb` an oid of at least this

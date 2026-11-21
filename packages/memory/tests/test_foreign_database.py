@@ -258,10 +258,6 @@ def test_a_lone_type_function_or_schema_makes_a_database_foreign_too(
             ],
             "transform for public.hstore language plpgsql",
         ),
-        (
-            ["ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO PUBLIC"],
-            "default acl for role postgres on tables",
-        ),
         # Whoever makes a large object chooses its number, so it may be a small one.
         (["SELECT lo_create(42)"], "large object 42"),
         # The catalogs' own schema is no hiding place for an object someone made.
@@ -288,7 +284,6 @@ def test_a_lone_type_function_or_schema_makes_a_database_foreign_too(
         "text-search-template",
         "text-search-parser",
         "transform",
-        "default-privileges",
         "large-object",
         "function-in-pg-catalog",
     ],
@@ -299,6 +294,19 @@ def test_every_other_kind_of_object_makes_a_database_foreign_too(
     _execute(database, *statements)
     message = _refused(database, migrations)
     assert _named(message) == named
+
+
+def test_privileges_granted_ahead_of_the_first_run_do_not_make_a_database_foreign(
+    database: str, migrations: Path
+) -> None:
+    # Preparing an empty database for the roles that will use it makes nothing in it.
+    _execute(
+        database,
+        "ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO PUBLIC",
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE ON SEQUENCES TO PUBLIC",
+        "GRANT CREATE ON SCHEMA public TO PUBLIC",
+    )
+    assert migrate(database, migrations) == ("0001_people.sql",)
 
 
 def test_a_subscription_makes_its_own_database_foreign_and_its_password_is_not_named(
