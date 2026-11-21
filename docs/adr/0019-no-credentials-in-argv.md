@@ -10,11 +10,15 @@ It can read every Camera's live video, so exposing it is the exposure of Visual 
 ## Decision
 
 A credential reaches a child process by a channel only that process's user can read: a file in a directory of mode 0700, itself mode 0600, created exclusively, on the process's own tmpfs, removed when the child ends.
-`visionquery.runtime.private_input.private_ffmpeg_input` is the one way to do it for ffmpeg, for every process that reads a URL with credentials (the recorder today, the Perception Workers next): it writes an ffconcat list holding the URL and the input's options (`rtsp_transport`, `timeout`) and returns the arguments `-f concat -safe 0 -protocol_whitelist file,rtsp,rtsps,tcp,tls,crypto -i <file>`.
+`visionquery.runtime.private_input.private_ffmpeg_input` is the one way to do it for ffmpeg, for every process that reads a URL with credentials (the recorder today, the Perception Workers next): it writes an ffconcat list holding the URL and the input's options (`rtsp_transport`, `timeout`) and returns the arguments `-f concat -safe 0 -protocol_whitelist file,rtsp,rtsps,tcp,tls -i <file>`.
 ffmpeg opens the URL itself, so the command line names the file and never the URL, user or host.
 The protocol whitelist lets the list lead nowhere but the one RTSP source.
 
 The recorder tests prove it three ways: no command line the recorder builds holds the password or the user; a `ps` and `/proc/<pid>/cmdline` read while ffmpeg reads a real MediaMTX camera hold neither; and the file's options take effect on a live camera (TCP, with ffmpeg allowed nothing else, and the silence timeout that makes it give up on a camera that stopped sending).
+
+This amends the scope of [ADR 0012](0012-one-runtime-package-every-process-starts-with.md), which says the runtime gives every process three things (settings, logs, metrics) and nothing else: `visionquery.runtime` also holds this one helper, a fourth thing.
+It belongs there because the recorder and the Perception Workers may import only `memory` and `runtime` (the import contracts), the helper imports only the standard library, and a rule that every process reading a camera must follow is better kept once than copied into each.
+ADR 0012's decisions on settings, logs and metrics stand as they were.
 
 A new process that must pass a secret to a child uses the same kind of channel, or the child's environment, which only its own user can read; it never adds the secret to argv.
 

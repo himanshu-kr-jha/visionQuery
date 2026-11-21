@@ -18,10 +18,11 @@ there, so a reading that old means NTP has been gone for a Segment or more). A h
 NTP a month ago still has a monotonic clock, but a month of its drift is not something to vouch
 for.
 
-**Anchoring again can move the time**, by a slew (NTP's correction, at most 500 ppm: 150 ms in
-five minutes) or by a step (whoever set the clock, or NTP finding it far off, as at boot).
-`anchor()` says by how much, and a shift beyond `STEP_TOLERANCE` is a discontinuity that the
-Segmenter must not bridge (`visionquery.recorder.camera`).
+**Anchoring again can move the time, but only a step does** (whoever set the clock, or NTP
+finding it far off, as at boot). NTP slews the monotonic clock exactly as it slews the wall
+clock, so the difference between them, which is what anchoring measures, stays the same through
+any slew. `anchor()` says by how much the time moved, and a shift beyond `STEP_TOLERANCE` is a
+discontinuity that the Segmenter must not bridge (`visionquery.recorder.camera`).
 
 Why arrival on this clock, and not the cameras' own timestamps: ADR 0017. Adapted from phyOS's
 Photon recorder (`adapters.photon.timebase`).
@@ -38,9 +39,10 @@ from typing import Literal
 
 __all__ = ["STEP_TOLERANCE", "ClockState", "Reading", "TimeBase", "read_kernel_clock"]
 
-#: A shift of the time by more than this when the timebase is anchored again is a step, not a
-#: slew: NTP's slew is at most 500 ppm, 150 ms in a five-minute Segment, so a Segment of the
-#: longest allowed length (an hour) could be slewed 1.8 s and is, rarely, reported as a step.
+#: A shift of the time by more than this when the timebase is anchored again is a step. Only
+#: steps move the shift, since a slew moves the monotonic and the wall clock alike; 250 ms sits
+#: below the 0.4 s at which systemd-timesyncd steps instead of slewing, and above the noise of
+#: reading two clocks one after the other.
 STEP_TOLERANCE = timedelta(milliseconds=250)
 #: How long after its last synchronised reading the timebase still counts as verified.
 VERIFIED_FOR = timedelta(hours=2)

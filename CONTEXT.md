@@ -55,7 +55,7 @@ _Avoid_: chunk, file, recording, clip
 **Fragment**:
 The unit a Segment is written in: one keyframe's worth of the Camera's video, as long as the Camera's keyframe interval, never split.
 A Segment is cut only between two Fragments, and is timed by when each Fragment arrived.
-_Avoid_: chunk, packet, frame
+_Avoid_: chunk, packet, frame (a Fragment holds many frames)
 
 **Fragment index**:
 The record kept beside a Segment saying where each of its Fragments ends in the file, when it arrived and how long it lasts, so that any instant in the Segment resolves to an offset in its file without reading the file.

@@ -291,7 +291,7 @@ A package's tests live in `packages/<package>/tests/`; tests about the workspace
 | `reconciler` | Keeps MediaMTX's paths and publishers matching the camera registry (ADR 0015). |
 | `reasoner` | Pluggable LLM interface (local by default) and the Answer builder. |
 | `api` | FastAPI over `tools`. |
-| `runtime` | What every process starts with: env settings, JSON logs scrubbed of credentials, and a Prometheus `/metrics` endpoint (ADR 0012). |
+| `runtime` | What every process starts with: env settings, JSON logs scrubbed of credentials, and a Prometheus `/metrics` endpoint (ADR 0012); and the private ffmpeg input helper that keeps a camera's credential out of argv (`visionquery.runtime.private_input`, ADR 0019, which amends ADR 0012's scope). |
 
 Every process starts with `visionquery.runtime.start("<service>", <Settings subclass>)` (ADR 0012): it reads the settings from `VISIONQUERY_*` environment variables (a missing or invalid one, or a metrics address it cannot listen on, is logged by name and the process exits with status 2), sends every log record to stdout as one JSON line with `service` and `level`, scrubbed of URL credentials, and serves Prometheus metrics on `/metrics`; it returns a `Process` holding the settings and the metrics port, with a `close()`.
 A service adds its own settings as fields of a `Settings` subclass (`footage_dir: Path` is read from `VISIONQUERY_FOOTAGE_DIR`), declares credentials as `SecretStr`, and declares metrics with `prometheus_client` where they are measured.
