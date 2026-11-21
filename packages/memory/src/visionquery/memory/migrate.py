@@ -20,9 +20,11 @@ with a statement that begins, commits or rolls back a transaction (it would esca
 
 **A run writes only to an empty database or to a VisionQuery memory.**
 A database is a memory when its `public.schema_migrations` has the record's columns and at
-least one row. Any other database that holds a table, view or sequence of its own (not one an
-extension brought) belongs to something else, and so does one whose `schema_migrations` is not
-shaped like the record: the run refuses and writes nothing to it, not even the record.
+least one row. Any other database that holds an object someone made, of any kind (a table, a
+function, an operator, a cast, an event trigger, a publication...; not one an extension brought,
+and not part of another, such as a table's index) belongs to something else, and so does one
+whose `schema_migrations` is not shaped like the record: the run refuses and writes nothing to
+it, not even the record.
 
 **Runners take turns.**
 The whole run holds a Postgres advisory lock, so two runners started at once against one
@@ -346,57 +348,115 @@ WHERE c.oid = to_regclass('public.schema_migrations') AND c.relkind = 'r'
 ORDER BY a.attnum
 """
 
-#: What someone made in the database, leaving out the record (when it is ours), what the
-#: catalogs and extensions bring (members of an extension depend on it with type `e`), and every
-#: session's temporary tables: relations, schemas other than `public`, types that are not
-#: implicit (a relation's row type, an array type, a multirange type), and functions,
-#: procedures and aggregates.
-_OBJECTS = b"""
-SELECT name FROM (
-    SELECT format('%%I.%%I', n.nspname, c.relname) AS name
-    FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-    WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') AND c.relpersistence <> 't'
-      AND n.nspname NOT IN ('pg_catalog', 'information_schema') AND n.nspname !~ '^pg_toast'
-      AND NOT (%(ours)s AND c.oid = to_regclass('public.schema_migrations'))
-      AND NOT EXISTS (
+#: Every catalog of a database whose rows are objects someone can make (each row has an `oid`),
+#: all of which the guard looks in. `pg_subscription` is shared by every database and counted for
+#: the one it names. With `UNCOUNTED_CATALOGS`, this is every such catalog the server has, which
+#: a test checks, so a Postgres that adds a kind of object fails it until the guard counts it.
+COUNTED_CATALOGS = (
+    "pg_am",
+    "pg_amop",
+    "pg_amproc",
+    "pg_attrdef",
+    "pg_cast",
+    "pg_class",
+    "pg_collation",
+    "pg_constraint",
+    "pg_conversion",
+    "pg_default_acl",
+    "pg_event_trigger",
+    "pg_foreign_data_wrapper",
+    "pg_foreign_server",
+    "pg_language",
+    "pg_largeobject_metadata",
+    "pg_namespace",
+    "pg_opclass",
+    "pg_operator",
+    "pg_opfamily",
+    "pg_policy",
+    "pg_proc",
+    "pg_publication",
+    "pg_publication_namespace",
+    "pg_publication_rel",
+    "pg_rewrite",
+    "pg_statistic_ext",
+    "pg_subscription",
+    "pg_transform",
+    "pg_trigger",
+    "pg_ts_config",
+    "pg_ts_dict",
+    "pg_ts_parser",
+    "pg_ts_template",
+    "pg_type",
+    "pg_user_mapping",
+)
+
+#: The catalogs of a database with an `oid` whose rows the guard does not count, and why.
+UNCOUNTED_CATALOGS = {
+    "pg_extension": "a database with nothing but extensions is empty",
+    "pg_enum": "an enum's labels belong to its type, which is counted",
+}
+
+#: Postgres gives every object made after `initdb` an oid of at least this
+#: (`FirstNormalObjectId`), wrapping back to it, never below; the catalogs' own objects are below.
+_FIRST_NORMAL_OID = 16384
+
+
+def _made(catalog: str) -> sql.Composable:
+    """The objects in `catalog` made after `initdb`, as (classid, objid) pairs."""
+    if catalog == "pg_largeobject_metadata":
+        # Whoever makes a large object may choose its number; Postgres names it by pg_largeobject.
+        return sql.SQL(
+            "SELECT 'pg_catalog.pg_largeobject'::regclass, oid"
+            " FROM pg_catalog.pg_largeobject_metadata"
+        )
+    if catalog == "pg_subscription":
+        return sql.SQL(
+            "SELECT 'pg_catalog.pg_subscription'::regclass, oid FROM pg_catalog.pg_subscription"
+            " WHERE subdbid = (SELECT oid FROM pg_catalog.pg_database"
+            " WHERE datname = current_database())"
+        )
+    return sql.SQL("SELECT {}::regclass, oid FROM {} WHERE oid >= {}").format(
+        sql.Literal(f"pg_catalog.{catalog}"),
+        sql.Identifier("pg_catalog", catalog),
+        sql.Literal(_FIRST_NORMAL_OID),
+    )
+
+
+#: What someone made in the database, by kind and name (`table public.invoices`), leaving out
+#: what `initdb` made, the members of an extension (they depend on it with type `e`), what is part
+#: of another object and goes with it (a table's row type, index, constraints, sequence, trigger,
+#: rule, policy or statistics; an array or multirange type; a hypertable's chunks and other
+#: tables' children, which inherit from it), the record when it is ours, and every session's
+#: temporary schemas and what is in them.
+#: What is part of an extension's own object is left out with it, so a trigger someone hangs on
+#: an extension's table is not counted; dropping the extension drops it.
+#: Objects are named by `pg_identify_object`, which never shows an option, such as a foreign
+#: server's or a user mapping's, or a subscription's connection string.
+_OBJECTS = sql.SQL(
+    """
+WITH made AS MATERIALIZED (
+    SELECT o.classid, o.objid FROM ({}) AS o (classid, objid)
+    WHERE NOT EXISTS (
           SELECT FROM pg_catalog.pg_depend d
-          WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid
-            AND d.deptype = 'e'
+          WHERE d.classid = o.classid AND d.objid = o.objid
+            AND d.deptype IN ('e', 'a', 'i', 'P', 'S')
       )
-  UNION ALL
-    SELECT n.nspname
-    FROM pg_catalog.pg_namespace n
-    WHERE n.nspname <> 'public' AND n.nspname !~ '^pg_' AND n.nspname <> 'information_schema'
-      AND NOT EXISTS (
-          SELECT FROM pg_catalog.pg_depend d
-          WHERE d.classid = 'pg_catalog.pg_namespace'::regclass AND d.objid = n.oid
-            AND d.deptype = 'e'
-      )
-  UNION ALL
-    SELECT format('%%I.%%I', n.nspname, t.typname)
-    FROM pg_catalog.pg_type t JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
-    WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
-      AND t.typcategory <> 'A' AND t.typtype <> 'm'
-      AND (t.typrelid = 0
-           OR (SELECT relkind FROM pg_catalog.pg_class WHERE oid = t.typrelid) = 'c')
-      AND NOT EXISTS (
-          SELECT FROM pg_catalog.pg_depend d
-          WHERE d.classid = 'pg_catalog.pg_type'::regclass AND d.objid = t.oid
-            AND d.deptype = 'e'
-      )
-  UNION ALL
-    SELECT format('%%I.%%I', n.nspname, p.proname)
-    FROM pg_catalog.pg_proc p JOIN pg_catalog.pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname <> 'information_schema' AND n.nspname !~ '^pg_'
-      AND NOT EXISTS (
-          SELECT FROM pg_catalog.pg_depend d
-          WHERE d.classid = 'pg_catalog.pg_proc'::regclass AND d.objid = p.oid
-            AND d.deptype = 'e'
-      )
-) AS found
+      AND NOT (o.classid = 'pg_catalog.pg_class'::regclass AND (
+          EXISTS (SELECT FROM pg_catalog.pg_inherits h WHERE h.inhrelid = o.objid)
+          OR (%(ours)s AND o.objid = to_regclass('public.schema_migrations'))
+      ))
+      AND NOT (o.classid = 'pg_catalog.pg_namespace'::regclass AND EXISTS (
+          SELECT FROM pg_catalog.pg_namespace n
+          WHERE n.oid = o.objid AND n.nspname ~ '^pg_(toast_)?temp_'
+      ))
+)
+SELECT i.type || ' ' || i.identity AS name
+FROM made CROSS JOIN LATERAL pg_catalog.pg_identify_object(made.classid, made.objid, 0) AS i
+WHERE i.identity IS NOT NULL AND coalesce(i.schema, '') !~ '^pg_(toast_)?temp_'
 ORDER BY 1
 LIMIT 4
 """
+).format(sql.SQL(" UNION ALL ").join(_made(catalog) for catalog in COUNTED_CATALOGS))
 
 
 def _foreign(connection: psycopg.Connection) -> str | None:
