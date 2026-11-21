@@ -34,8 +34,7 @@ For each open PR, oldest first, read the PR's comments, count its fix rounds (`d
 5. CI red on the head, or a verdict with blocking findings, and no newer `developer` hand-back:
    - a red CI check always goes to `developer`, under the CI-fix limit in `CLAUDE.md`, whatever the round count;
    - blocking verdict findings go with it, as one list, while fewer than two fix rounds are done; past that, stop and report to the user if a security or correctness defect remains, and otherwise treat the rest as non-blocking (item 6).
-6. No blocking finding and CI green: if fewer than two rounds are done and there are non-blocking findings within the issue's scope, send them to `developer`; otherwise file any open findings as the PR's one follow-up issue, then merge (step 3, item 5).
-7. Behind `develop`: send it to `developer` to merge `origin/develop` in.
+6. No blocking finding and CI green: if fewer than two rounds are done and there are non-blocking findings within the issue's scope, send them to `developer`; otherwise, if the PR is behind `develop`, send it to `developer` to merge `origin/develop` in (a clean merge keeps the verdicts and CI then decides); otherwise file any open findings as the PR's one follow-up issue, then merge (step 3, item 5).
 
 For an issue branch with no PR: if its builder is still running, wait; if its builder stopped with a report, post it on the issue and bring it to the user; otherwise send it back to its builder (`senior-developer` for `task` and `spike`, `developer` for `bug`) to finish and open the PR.
 
