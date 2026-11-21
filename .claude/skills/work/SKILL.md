@@ -28,14 +28,19 @@ Give the user a short status: what is merged, what is in flight and at which ste
 ## 2. Resume before starting anything new
 
 For each open PR, oldest first, read the PR's comments, count its fix rounds (`developer` hand-backs answering `tester` or `pr-reviewer` findings), and take the one step whose condition holds.
-The conditions are disjoint: items 3 to 11 concern only a PR that is not a draft and that carries no "do not merge" verdict or design-change finding on any of its heads (one stays until a later verdict closes it), and items 3, 4 and 6 to 11 also concern only a head with a usable CI result (`mergeable_state` not `dirty`, no cancelled check: item 5); each of them names every state it needs.
+The conditions are disjoint: items 3 to 11 concern only a PR that is not a draft and that carries no "do not merge" verdict or design-change finding on any of its heads (one stays until a later verdict names and closes it), and items 3, 4 and 6 to 11 also concern only a head with a usable CI result: `mergeable_state` is neither `dirty` nor `unknown`, and every `ci.yml` job (the ids `scripts/branch_rules.py` lists) has a run on the head that was not cancelled (item 5 handles every other head); each of them names every state it needs.
 *Known red* and *a newer `developer` hand-back* are as `CLAUDE.md` lifecycle step 4 defines them.
 
-1. Any head of the PR carries a "do not merge" verdict, or a finding that needs a design change, that no later verdict has closed: stop and report to the user.
+1. Any head of the PR carries a "do not merge" verdict, or a finding that needs a design change, that no later verdict has named and closed: stop and report to the user.
 2. The PR is a draft (its parent is the `Depends on #<n>` line in its description): if the parent merged, send it to `developer` to merge `origin/develop` in and mark it ready (`gh pr ready <n>`); if the parent is still open, leave it and go to the next PR; if the parent was closed without merging, or is itself a draft, stop and report to the user.
 3. `commits` is red and its cause is only the PR's title or body: fix the text and re-run that run yourself (`CLAUDE.md`, CI), then take the step for the PR's state again, which no longer has this red (the re-run is pending, so item 8 or 7 applies).
 4. `commits` is red and its cause is a pushed commit's message: stop and report to the user, with the options of a force-push the user approves or a replacement PR with the same content and corrected messages (the old one closed).
-5. The head has no usable CI result: if `mergeable_state` is `dirty` (read it again until it is not `unknown`), send the PR to `developer` to merge `origin/develop` in, which is not a round, because GitHub runs no `pull_request` workflow on a PR with a merge conflict; otherwise, if a check on the head was cancelled, re-run it (`gh run rerun <run>`), then take the step for the PR's state again (the re-run is pending, so item 8 or 7 applies).
+5. The head has no usable CI result. Take the first branch that holds, each at most once for this head, then take the step for the PR's state again:
+   - `mergeable_state` is `unknown`: read it again, up to five times a few seconds apart;
+   - `mergeable_state` is `dirty`, and no develop-merge hand-back has yet left this head `dirty` or pushed nothing: send the PR to `developer` to merge `origin/develop` in, which is not a round (GitHub runs no `pull_request` workflow on a PR with a merge conflict);
+   - a `ci.yml` job's run on the head was cancelled and has not been re-run on this head: re-run it (`gh run rerun <run>`);
+   - a `ci.yml` job has no run on the head, and the PR has not been closed and reopened for this head: close and reopen it (`gh pr close <n>`, then `gh pr reopen <n>`), which `ci.yml` runs on;
+   - otherwise (each branch already taken for this head, and the head still has no usable CI result): stop and report to the user.
 6. Any other known red on the head, and no newer `developer` hand-back: send it to `developer` as a CI fix under the CI-fix limit in `CLAUDE.md`, never a round; judges still running are not stopped, and any blocking findings already posted stay open for the next head (`CLAUDE.md` lifecycle step 4).
 7. No known red, and a verdict the head needs is missing (a `tester` verdict, unless the change is docs-only or config-only, and a `pr-reviewer` verdict, counting verdicts carried over a clean develop merge as `CLAUDE.md` says): run the missing one(s), in parallel, each from the diff since the last head that judge itself judged, or the whole diff if it has judged none, and list every blocking finding still open from a superseded head for each to confirm or close.
    A `tester` verdict on a change that touches Triton or the samples counts only if it lists those stack test runs; otherwise it is missing.
@@ -77,7 +82,7 @@ Stop and report to the user when any of these happens:
 
 - without `$ARGUMENTS`, the current milestone's last sub-issue is merged, or the earliest open milestone issue has no open sub-issues: show how to run the milestone's demo and wait for the user's go-ahead before the next milestone; once the user approves the demo, close the milestone issue with a comment summarising what shipped;
 - a security or correctness defect remains after two fix rounds;
-- the reviewer's verdict is "do not merge", or a finding needs a design change;
+- any head of the PR carries a "do not merge" verdict, or a finding that needs a design change, that no later verdict has named and closed;
 - something would change an ADR, the meaning of a glossary term, or an issue's acceptance criteria;
 - a decision needs information only the user has (hardware, footage, credentials, a product choice);
 - anything needs a human action outside the repository.
