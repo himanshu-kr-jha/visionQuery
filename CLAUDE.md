@@ -38,6 +38,7 @@ Throwaway exploration code lives under `docs/spikes/<issue>-<slug>/` in the PR s
 
 **Commits** follow Conventional Commits: `type(scope): imperative subject` with types `feat`, `fix`, `test`, `refactor`, `docs`, `chore`, `ci`, `build`, `perf`; scope is the package (`memory`, `perception`, `web`...) or `agents`, `ci`, `repo`, `docs`.
 The scope may be omitted only for a change that is genuinely repo-wide with no better scope.
+Formatting-only commits use `chore`: there is no `style` type, and the `commits` check and the commit-msg hook refuse one.
 Reference the issue in the body (`Refs #12`); the PR, not the commit, closes it (`Closes #12` in the PR description).
 
 **No agent attribution anywhere.**
@@ -47,6 +48,7 @@ The process role names (tech lead, `senior-developer`, `developer`, `tester`, `p
 
 **Pull requests** use `.github/pull_request_template.md`.
 The PR title must be a Conventional Commit `type(scope): subject`, because it becomes the squash commit subject.
+A PR made with GitHub's Revert button is retitled `fix(scope): revert ...` (`fix(api): revert "feat(api): add a route"`), because the `Revert "..."` title GitHub gives it fails the `commits` check.
 The squash commit body is a short summary plus one `Closes #<n>` line per issue the PR closes, without the template checklist.
 Nobody pushes directly to `main` or `develop`.
 A PR merges only when every CI check on its head is green; the rulesets (see "After CI first lands" under Commands) make GitHub enforce it.
@@ -175,6 +177,12 @@ After changing a dependency, run `uv lock` and commit `uv.lock` with the change.
 
 **CI** is `.github/workflows/ci.yml`, run on every PR into `develop` or `main`, and every push to them (there is no manual trigger, so a run cannot replace a required check's result on the same commit; repeat one with `gh run rerun`).
 Each job runs the `make` target a developer runs, so CI and a local run never drift (`tests/test_ci.py` fails when `make check` gains a target no job runs): `lint`, `typecheck`, `contracts`, `test` (`make test` against a Postgres service of the tests' own image), `web` (`make web api-types-check`), `stack` (`make test-stack` without Triton, about 7 minutes), `setup-guide` (README's "From a fresh clone" commands as written, on a runner with only the prerequisites: `make bootstrap`, `make up COMPOSE_PROFILES=dev`, the health and camera checks, `make down VOLUMES=1`; `tests/test_setup_guide.py` keeps its steps and the README's commands the same), and `commits`, which fails when a commit of the PR, or its title or body, carries agent attribution (`scripts/check_attribution.py`), or when the title is not a `type(scope): subject` Conventional Commit (`scripts/check_commit_message.py`; a commit message may leave the scope out, a PR title may not).
+Editing a PR's title, body or base re-runs the `commits` job alone, from `.github/workflows/pr-edited.yml`, a copy of ci.yml's job that `tests/test_ci.py` keeps identical; the other checks keep their results for the head, since no job but `commits` reads the PR's text, and are never skipped by a condition instead, because a skipped job counts as passed for a required check.
+An edit that changes the base fails that job (a step of it, a no-op in a full run), and the fix is to push a commit (merge `origin/<new base>`, or an empty commit), so that everything runs again against the new base; a re-run would reuse the old payload and base.
+GitHub requires every run's `commits` for the head to be green, so a red or cancelled `commits` stays blocking after the title or body is fixed, until that run is re-run (`gh run rerun <run> --failed` for a failed run of the full suite, `gh run rerun <run>` for a cancelled one or an edit's, or `--job <commits job id>`): a later run's green does not replace it (shown on the throwaway PR #118 of PR #116).
+Edits' runs are never cancelled by a later edit (`cancel-in-progress: false` in `pr-edited.yml`), for that reason.
+The job checks the body both as written and as GitHub renders it (`body_text`).
+The job reads the PR's title, body, base and head through `gh api` when it runs, never from the event payload, so a `gh run rerun` of an old run or a late finisher checks the current text (`tests/test_ci.py` pins it, and that no other workflow reports a required check's name).
 The `develop` and `main` rulesets require every job, with the PR up to date with its base, and `make branch-rules` (`scripts/branch_rules.py`) is how they are set: it derives the checks from the workflow's job ids, so after adding or renaming a job, run it once the change has passed on `develop`.
 It resets what it manages (the `deletion`, `non_fast_forward`, `pull_request` and `required_status_checks` rules, with the parameters it sets) and keeps what it does not: the live `pull_request` parameters it does not set, the bypass actors, and any other rule type.
 Actions are pinned by full commit SHA with the version in a comment, and uv is the version the Dockerfile builds with (`tests/test_ci.py` checks both).

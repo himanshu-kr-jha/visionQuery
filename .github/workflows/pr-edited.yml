@@ -1,0 +1,77 @@
+# The commits check again, alone, when a PR's title, body or base is edited.
+#
+# An edit changes nothing the rest of CI reads, so it keeps its results for the head and only
+# the commits job, which checks the PR's text and the range of its commits, runs again. The job
+# is ci.yml's own, copied unchanged (tests/test_ci.py fails when the two differ): its id is the
+# required check's name, so it adds no check of its own. It reads the PR through the API when it
+# runs, not from the event, so whichever of the two same-named results is the latest agrees.
+# GitHub requires every run's `commits` for the head to be green, so a red or cancelled one is
+# re-run (`gh run rerun`); a changed base is cleared by a pushed commit, because a re-run reuses
+# the old payload and base: push a commit (merge origin/<new base>, or an empty commit).
+# The suite is not skipped by a condition in ci.yml instead, because a skipped job reports
+# success to a required check, and an edit would then turn every red check green.
+
+name: PR edited
+
+on:
+  pull_request:
+    branches: [develop, main]
+    types: [edited]
+
+permissions:
+  contents: read
+
+# This group is apart from ci.yml's, so an edit never cancels a full run for the head, nor a push
+# the run of an edit. Edits' runs queue and none is cancelled: a cancelled `commits` for the head
+# blocks the merge until it is re-run.
+concurrency:
+  group: pr-edited-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  commits:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    # The one job that reads the PR itself, as it is when the job runs, never as an event's
+    # payload (which a re-run of an old run would reuse) said it was.
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup
+      # Only an edit's event says its base changed, so this does nothing in a full run.
+      - name: A PR moved to another base is refused
+        if: github.event.changes.base
+        run: |
+          echo "The base changed: push a commit (merge origin/<new base>, or an empty commit) so that every check runs against it; a re-run of this job would not clear it." >&2
+          exit 1
+      - name: The PR's commits, title and body carry no attribution, and the title is a Conventional Commit
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          pr=$(gh api -H "Accept: application/vnd.github.full+json" "repos/$REPO/pulls/$PR_NUMBER")
+          PR_TITLE=$(jq -r '.title' <<<"$pr")
+          PR_BODY=$(jq -r '.body // ""' <<<"$pr")
+          PR_BODY_TEXT=$(jq -r '.body_text // ""' <<<"$pr")
+          base=$(jq -r '.base.sha' <<<"$pr")
+          head=$(jq -r '.head.sha' <<<"$pr")
+          export PR_TITLE PR_BODY PR_BODY_TEXT
+          git fetch --quiet origin "refs/pull/$PR_NUMBER/head"
+          uv run --frozen scripts/check_attribution.py --commits "$base..$head"
+          uv run --frozen scripts/check_attribution.py --env PR_TITLE --env PR_BODY --env PR_BODY_TEXT
+          uv run --frozen scripts/check_commit_message.py --env PR_TITLE
+      - name: Pushed commits carry no attribution
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        # A push that created the branch has no previous commit: check the pushed one alone.
+        run: |
+          if [ "$BEFORE" = 0000000000000000000000000000000000000000 ]; then range="$AFTER^!"; else range="$BEFORE..$AFTER"; fi
+          uv run --frozen scripts/check_attribution.py --commits "$range"
