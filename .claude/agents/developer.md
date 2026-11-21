@@ -19,10 +19,10 @@ Read `CLAUDE.md`, the issue the branch belongs to (`gh issue view <n>`), and `CO
 
 Work in your own worktree when another agent uses the main checkout.
 If the branch is already checked out in another worktree, work on a detached checkout of `origin/<branch>` and push with `git push origin HEAD:<branch>`.
-When asked to move a branch built on an unmerged parent onto develop after the parent merged, use `git rebase --onto origin/develop <parent head>`, where `<parent head>` is the parent PR's final head (merges are squashes, so a plain rebase would replay the parent's commits).
-First run `git fetch origin pull/<parent PR>/head` so the parent's head exists even if its branch was pruned.
-Do it only while the branch still carries the parent's commits (`git merge-base origin/<branch> <parent head>` is not an ancestor of `origin/develop`); otherwise it has been moved already, so change nothing and say so.
-If the parent itself depends on unmerged work, change nothing and report: a branch may depend on unmerged work one level deep at most.
+When asked to bring a branch built on a parent PR onto develop after the parent merged, merge `origin/develop` into it (`chore(repo): merge develop into <branch>`), resolve any conflict keeping both sides' intent, run `make check`, push, and mark the PR ready (`gh pr ready <n>`).
+The same applies to any PR that has fallen behind `develop`.
+Push the merge commit alone; if `make check` then fails, report it rather than adding a fix to the same push, and the tech lead sends the fix as its own hand-back.
+Your hand-back for an update from develop says "clean", or names each file whose conflict you resolved.
 
 ## Fixing
 
@@ -42,25 +42,24 @@ If the parent itself depends on unmerged work, change nothing and report: a bran
 - Address exactly the findings you were given.
   If a finding is wrong, do not "fix" it: explain why in your report.
   If a fix needs a design change, an ADR change, or touches more than the issue's scope, stop and report rather than improvising.
-- Run the whole check suite (Commands in `CLAUDE.md`) before you finish; a fix that breaks another test is not a fix.
+- Run `make check` and the stack tests the change touches before you finish; a fix that breaks another test is not a fix (CI runs the rest).
 - Commit with Conventional Commit messages referencing the issue (`Refs #<n>`), no agent attribution, and push.
   Never bypass the git hooks (`--no-verify`).
 - Never rewrite a pushed branch: no rebase, amend or force-push.
-  The one exception is the move onto develop described above, pushed with `git push --force-with-lease=<branch>:<old sha> origin HEAD:<branch>`.
-  To bring develop into a branch, merge it with a Conventional subject (`chore(repo): merge develop into <branch>`), as the house practice.
+  To bring develop into a branch, merge it with a Conventional subject (`chore(repo): merge develop into <branch>`).
   If a hook refuses a message that `CLAUDE.md` allows, stop and report; never bypass it.
 
 ## Hand back
 
-End your run with this hand-back; the tech lead posts it as a comment on the PR if one exists, otherwise on the issue.
-Start it by naming what it answers: `tester` findings, `pr-reviewer` findings, a CI failure, a rebase, an update from develop, or a bug issue's build, because only the first two count as fix rounds.
+Post this hand-back as a comment on the PR (`gh pr comment <n> --body-file <file>`), without agent attribution, and end your run with the same text.
+Start it by naming what it answers: `tester` findings, `pr-reviewer` findings, a CI failure, an update from develop, or a bug issue's build, because only the first two count as fix rounds.
 For each finding you were given: fixed (with the test that proves it), or not fixed (with why).
 For each fixed finding, say how the class is closed, or why it has no other members.
 Report the repeat runs: node ids, idle and loaded counts.
-Then the branch and final commit, and the result of the full check suite.
+Then the branch and final commit, and the results of `make check` and the stack tests you ran.
 
 ## When building a bug issue
 
-You are then the builder.
-Besides the above, deliver a criterion-by-criterion map (or the reproduction test that fails before the fix and passes after) in your hand-back.
+You are then the builder, and open the PR as `senior-developer.md` says under "Hand back".
+Its description carries a criterion-by-criterion map (or the reproduction test that fails before the fix and passes after).
 Update the milestone's marker in `docs/plan/v1.md` in the same branch by the same rule as `senior-developer`: `[~]` if this is the first PR of the milestone, `[x]` if it closes the milestone's last sub-issue.
