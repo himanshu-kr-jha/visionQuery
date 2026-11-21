@@ -334,11 +334,13 @@ def test_a_segment_of_a_camera_the_registry_never_had_is_refused(
             id="ends-without-a-zone",
         ),
         pytest.param({"fragments": 0}, "Fragment", id="no-fragment"),
+        pytest.param({"fragments": 2**31}, "Fragment", id="more-fragments-than-a-column-holds"),
         pytest.param({"reason": "exploded"}, "reason", id="unknown-reason"),
         pytest.param({"path": PurePosixPath("/srv/footage/1/a.mp4")}, "path", id="absolute-path"),
         pytest.param({"path": PurePosixPath("1/../../etc/a.mp4")}, "path", id="path-climbs-out"),
         pytest.param({"path": PurePosixPath("1/2026-10-06/a.frags")}, "path", id="not-mp4"),
         pytest.param({"path": PurePosixPath(".")}, "path", id="empty-path"),
+        pytest.param({"path": PurePosixPath("1/a\x00.mp4")}, "path", id="nul-in-path"),
     ],
 )
 def test_a_segment_that_cannot_be_footage_is_refused_before_the_database_sees_it(
@@ -393,6 +395,19 @@ def test_a_database_that_fails_is_named_by_the_class_of_its_error_only(
         with pytest.raises(SegmentIndexError, match="UndefinedTable"):
             SegmentIndex(connection).latest(1)
     assert not isinstance(SegmentIndexError("x"), SegmentRefusedError)
+
+
+@pytest.mark.parametrize("camera_id", [0, -1, 2**31, -(2**31) - 1])
+def test_a_camera_id_no_camera_can_have_is_refused_and_has_no_footage(
+    index: SegmentIndex, connection: psycopg.Connection, camera_id: int
+) -> None:
+    """An id the registry could never give is refused for good, never a database failure that
+    an indexer would retry forever."""
+    with pytest.raises(UnknownCameraError, match=f"no camera {camera_id}"):
+        index.index(segment(camera_id))
+    assert index.find(camera_id, AT) is None
+    assert index.latest(camera_id) is None
+    assert rows(connection) == 0
 
 
 # --- two at once ------------------------------------------------------------------------------

@@ -66,6 +66,9 @@ type Reason = Literal["rolled", "stream_ended", "stopped", "recovered"]
 #: Segment whose times are wrong is longer; the bound keeps every lookup to two days' partitions.
 MAX_SPAN = timedelta(days=1)
 
+#: The ids a camera can have, and the most Fragments a Segment can hold: Postgres `integer`s.
+_INTEGER = range(-(2**31), 2**31)
+
 #: The first key of the advisory locks `index` takes, one per camera (the second key).
 _LOCK_SPACE = int.from_bytes(b"vqsg", signed=True)
 
@@ -175,6 +178,8 @@ def _aware(at: datetime, what: str) -> None:
 
 def _check(segment: IndexedSegment) -> None:
     """Refuse a Segment that cannot be Footage, saying why, before the database sees it."""
+    if segment.camera_id not in _INTEGER:
+        raise UnknownCameraError(segment.camera_id)
     _aware(segment.time_from, "the Segment's start")
     _aware(segment.time_to, "the Segment's end")
     if segment.time_to <= segment.time_from:
@@ -188,6 +193,10 @@ def _check(segment: IndexedSegment) -> None:
         )
     if segment.fragments < 1:
         raise InvalidSegmentError(f"Segment {segment.segment_id} holds no Fragment")
+    if segment.fragments not in _INTEGER:
+        raise InvalidSegmentError(
+            f"Segment {segment.segment_id} holds more Fragments than any Segment can"
+        )
     if segment.reason not in get_args(Reason.__value__):
         raise InvalidSegmentError(
             f"{segment.reason!r} is not in the closed set of reasons a Segment ends"
@@ -199,6 +208,7 @@ def _check(segment: IndexedSegment) -> None:
         or any(part in {".", ".."} for part in path.parts)
         or path.suffix != ".mp4"
         or path.name == ".mp4"
+        or "\x00" in str(path)
     ):
         raise InvalidSegmentError(
             f"Segment {segment.segment_id}'s path must be its .mp4 file relative to the "
@@ -277,6 +287,8 @@ class SegmentIndex:
         began `at` is; None when no Segment holds it."""
         if at.tzinfo is None or at.utcoffset() is None:
             raise ValueError("the instant has no time zone; Footage is timed in UTC")
+        if camera_id not in _INTEGER:
+            return None
         rows = self._run(
             f"SELECT {_COLUMNS} FROM segments"
             " WHERE camera_id = %(camera)s AND time_from <= %(at)s AND time_to > %(at)s"
@@ -291,6 +303,8 @@ class SegmentIndex:
 
     def latest(self, camera_id: int) -> IndexedSegment | None:
         """The last Segment of camera `camera_id` indexed, by when it begins; None if none is."""
+        if camera_id not in _INTEGER:
+            return None
         rows = self._run(
             f"SELECT {_COLUMNS} FROM segments WHERE camera_id = %(camera)s"
             " ORDER BY time_from DESC LIMIT 1",
