@@ -5,6 +5,7 @@ configuration, the ffmpeg commands it runs, and how it supervises them, with a s
 ffmpeg that reports progress the way the real one does.
 """
 
+import ast
 import asyncio
 import contextlib
 import json
@@ -16,7 +17,7 @@ import subprocess
 import sys
 import textwrap
 import time
-from collections.abc import Awaitable, Callable, Coroutine, Iterator
+from collections.abc import Awaitable, Callable, Coroutine, Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import NoReturn
@@ -115,6 +116,138 @@ def test_every_sample_is_five_minutes_long_unless_configured() -> None:
 def test_a_duration_or_attempts_that_make_no_sense_are_refused(changes: dict[str, str]) -> None:
     with pytest.raises(ValueError, match="FAKE_CAMERAS_"):
         Settings.from_environment(_environment(**changes))
+
+
+#: A name of the publisher's settings, and any name that starts like one, so that a name built
+#: from a prefix (`"FAKE_CAMERAS_" + key`, an f-string) or a misspelt one is not missed. Used on
+#: the code and on the docstring alike.
+_SETTING = re.compile(r"\bFAKE_CAMERAS\w*")
+#: The settings only tests set, which a Deployment's operator should leave alone.
+_TEST_ONLY = {"FAKE_CAMERAS_PREPARE_RETRY", "FAKE_CAMERAS_STALE_AFTER"}
+
+
+class _RecordingEnvironment(Mapping[str, str]):
+    """An environment that remembers every name it was asked for, however it was asked."""
+
+    def __init__(self, values: dict[str, str]) -> None:
+        self._values = values
+        self.asked: set[str] = set()
+
+    def __getitem__(self, key: str) -> str:
+        self.asked.add(key)
+        return self._values[key]
+
+    def __iter__(self) -> Iterator[str]:
+        raise AssertionError("the settings must name each variable they read, not iterate")
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+
+def _settings_read() -> set[str]:
+    """Every FAKE_CAMERAS* name the module reads: the names Settings.from_environment asks the
+    environment for, and every such name written anywhere in its code, so that a read behind a
+    branch or in a helper counts too."""
+    env = _RecordingEnvironment(_environment())
+    Settings.from_environment(env)
+    tree = ast.parse(SCRIPT.read_text())
+    docstring = ast.get_docstring(tree, clean=False)
+    literals = {
+        name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+        if node.value != docstring
+        for name in _SETTING.findall(node.value)
+    }
+    return env.asked | literals
+
+
+def _documented_settings() -> dict[str, str]:
+    """The module docstring's list of settings: each name, with what its entry says."""
+    entries: dict[str, str] = {}
+    name = None
+    for line in (fake_cameras.__doc__ or "").splitlines():
+        if entry := re.fullmatch(rf" {{4}}({_SETTING.pattern}) +(\S.*)", line):
+            name = entry[1]
+            entries[name] = entry[2]
+        elif name and re.match(r" {5,}\S", line):
+            entries[name] += " " + line.strip()
+        else:
+            name = None
+    return entries
+
+
+def test_the_module_reads_the_process_environment_only_through_its_settings() -> None:
+    # The recording above sees only what from_environment reads; any other read would escape it.
+    tree = ast.parse(SCRIPT.read_text())
+    reads = [
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if (isinstance(node, ast.Attribute) and node.attr in {"environ", "environb", "getenv"})
+        or (isinstance(node, ast.Name) and node.id in {"environ", "environb", "getenv"})
+        or (isinstance(node, ast.alias) and node.name in {"environ", "environb", "getenv"})
+    ]
+    passed_to_settings = [
+        ast.unparse(node)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and ast.unparse(node.func) == "Settings.from_environment"
+        and [ast.unparse(arg) for arg in node.args] == ["os.environ"]
+    ]
+    assert reads == ["os.environ"]
+    assert len(passed_to_settings) == 1
+
+
+def test_the_docstring_lists_every_setting_the_module_reads() -> None:
+    read = _settings_read()
+    assert read >= _TEST_ONLY
+    assert set(_documented_settings()) == read
+
+
+#: The entries whose default is said in words, not as the value: what the entry must say.
+_PROSE_DEFAULTS = {
+    "FAKE_CAMERAS": "required",
+    "FAKE_CAMERAS_PASSWORD": "none: publish without credentials",
+    "FAKE_CAMERAS_FFMPEG": "ffmpeg, from the PATH",
+}
+
+
+def _default_as_written(value: object) -> str:
+    return f"{value:g}" if isinstance(value, float) else str(value)
+
+
+def test_the_docstring_gives_the_default_of_every_setting() -> None:
+    settings = Settings.from_environment({"FAKE_CAMERAS": "a=synthetic"})
+    defaults = {
+        "FAKE_CAMERAS_RTSP": settings.rtsp,
+        "FAKE_CAMERAS_DURATION": settings.duration,
+        "FAKE_CAMERAS_PREPARE_ATTEMPTS": settings.prepare_attempts,
+        "FAKE_CAMERAS_SAMPLES": settings.samples,
+        "FAKE_CAMERAS_CACHE": settings.cache,
+        "FAKE_CAMERAS_STATUS": settings.status,
+        "FAKE_CAMERAS_PREPARE_RETRY": settings.prepare_retry,
+        "FAKE_CAMERAS_STALE_AFTER": settings.stale_after,
+    }
+    # The prose ones, checked against the value they describe.
+    assert settings.password is None
+    assert settings.ffmpeg == "ffmpeg"
+    expected = {name: _default_as_written(value) for name, value in defaults.items()}
+    expected |= _PROSE_DEFAULTS
+    documented = _documented_settings()
+    assert set(documented) == set(expected)
+    for name, entry in documented.items():
+        # The first parenthesis of an entry is its default.
+        written = re.search(r"\(([^)]*)\)", entry)
+        assert written, name
+        assert written[1] == expected[name], name
+
+
+def test_the_docstring_says_which_settings_are_for_tests_only() -> None:
+    documented = _documented_settings()
+    for name in _TEST_ONLY:
+        assert "for tests only" in documented.get(name, ""), name
+    for name in documented.keys() - _TEST_ONLY:
+        assert "for tests only" not in documented[name], name
 
 
 # --- The shared timeline ----------------------------------------------------------------------
