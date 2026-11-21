@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
         super().__pydantic_init_subclass__(**kwargs)
-        _refuse_aliases(cls, cls.__name__, f"{PREFIX}{{}}")
+        _refuse_aliases(cls, cls.__name__, f"{PREFIX}{{}}", set())
 
     @classmethod
     def settings_customise_sources(
@@ -106,13 +106,19 @@ class Settings(BaseSettings):
             raise SettingsError(cls, [(variable, "could not be read")]) from None
 
 
-def _refuse_aliases(model: type[BaseModel], where: str, variable: str) -> None:
+def _refuse_aliases(
+    model: type[BaseModel], where: str, variable: str, seen: set[type[BaseModel]]
+) -> None:
     """Refuse an alias on a field of `model` or of any model nested in it.
 
     An alias is read from a variable without the prefix, so errors and docs would name a
     variable other than the one a field is documented under; and pydantic-settings reads a
     nested alias differently again (an `AliasPath` head makes it decode the value as JSON).
+    A model that refers to itself, or to one that refers back, is checked once.
     """
+    if model in seen:
+        return
+    seen.add(model)
     for name, field in model.model_fields.items():
         here = variable.format(name.upper())
         if field.alias is not None or field.validation_alias is not None:
@@ -121,7 +127,7 @@ def _refuse_aliases(model: type[BaseModel], where: str, variable: str) -> None:
                 f"{here} and take no alias"
             )
         for nested in _models_in(field.annotation):
-            _refuse_aliases(nested, f"{where}.{name}", f"{here}{NESTED}{{}}")
+            _refuse_aliases(nested, f"{where}.{name}", f"{here}{NESTED}{{}}", seen)
 
 
 def _models_in(annotation: object) -> Iterator[type[BaseModel]]:
@@ -263,8 +269,10 @@ class _Environment(EnvSettingsSource):
     ) -> Any:
         # No field takes an alias, so this is the variable it is read from.
         self._field_variable = self.variable = f"{PREFIX}{field_name}".upper()
+        recorded = len(self._undecodable)
         prepared = super().prepare_field_value(field_name, field, value, value_is_complex)
-        if value is not None and prepared is None:
+        if value is not None and prepared is None and len(self._undecodable) == recorded:
+            # (A value that was not JSON is already recorded, once, and also prepares to None.)
             # pydantic-settings skips a field that prepares to None, as if it were unset.
             self._undecodable.append(
                 (self._field_variable, "is invalid: null is not accepted; unset it for the default")

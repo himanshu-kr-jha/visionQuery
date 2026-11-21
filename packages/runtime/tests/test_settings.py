@@ -267,6 +267,8 @@ def test_a_list_or_dict_that_is_not_json_is_named_without_its_value(
     assert error.variables == (name,)
     assert f"{name} is invalid: " in str(error)
     assert "JSON" in str(error)
+    assert str(error).count(name) == 1, str(error)
+    assert "null" not in str(error)
     assert "hunter2" not in str(error)
     assert error.__cause__ is None
     assert error.__suppress_context__
@@ -312,9 +314,24 @@ def test_every_list_or_dict_that_is_not_json_is_named_at_once(
         "VISIONQUERY_POOL__ZONES",
     )
     assert str(error).count("is invalid: not valid JSON") == 4
+    for name in error.variables:
+        assert str(error).count(name) == 1, str(error)
+    assert "null" not in str(error)
     assert "hunter" not in str(error)
     assert error.__cause__ is None
     assert error.__suppress_context__
+
+
+@pytest.mark.parametrize("group", ["null", "hunter2", '{"hosts": ["a"]'])
+def test_a_group_that_is_bad_and_has_variables_of_its_own_is_named_once(
+    monkeypatch: pytest.MonkeyPatch, group: str
+) -> None:
+    monkeypatch.setenv("VISIONQUERY_POOL", group)
+    monkeypatch.setenv("VISIONQUERY_POOL__HOSTS", "hunter3")
+    with pytest.raises(SettingsError) as raised:
+        FleetSettings.load()
+    assert str(raised.value).count("VISIONQUERY_POOL ") == 1, str(raised.value)
+    assert "hunter" not in str(raised.value)
 
 
 def test_two_groups_of_one_shape_holding_the_same_bad_value_are_both_named(
@@ -340,6 +357,8 @@ def test_a_list_dict_or_group_set_to_null_is_refused(
     error = _bad_variables(monkeypatch, name, "null")
     assert error.variables == (name,)
     assert f"{name} is invalid: null is not accepted" in str(error)
+    assert str(error).count(name) == 1, str(error)
+    assert "JSON" not in str(error)
 
 
 class OptionalPortsSettings(Settings):
@@ -432,9 +451,40 @@ class AliasedPool(BaseModel):
     name: str = Field("x", validation_alias=AliasPath("name", 0))
 
 
+class SelfReferring(BaseModel):
+    children: list[SelfReferring] = Field(default_factory=list["SelfReferring"])
+    name: str = Field("x", validation_alias="NAME")
+
+
+class MutualA(BaseModel):
+    b: MutualB | None = None
+
+
+class MutualB(BaseModel):
+    a: MutualA | None = None
+    name: str = Field("x", validation_alias="NAME")
+
+
+MutualA.model_rebuild()
+
+
+def test_a_recursive_nested_model_without_an_alias_can_be_defined() -> None:
+    class Tree(BaseModel):
+        children: list[Tree] = Field(default_factory=list["Tree"])
+
+    create_model("Fine", __base__=Settings, tree=(Tree, Tree()))
+
+
 @pytest.mark.parametrize(
     "annotation",
-    [AliasedPool, list[AliasedPool], AliasedPool | None, dict[str, AliasedPool]],
+    [
+        AliasedPool,
+        list[AliasedPool],
+        AliasedPool | None,
+        dict[str, AliasedPool],
+        SelfReferring,
+        MutualA,
+    ],
 )
 def test_an_alias_on_a_nested_model_is_refused_like_one_on_the_settings(
     annotation: Any,
