@@ -7,7 +7,8 @@ The subject is `type(scope): subject`, with `!` before the colon for a breaking 
 scope is a package under packages/, `web`, or one of REPO_SCOPES. In a commit message it may be
 left out (`type: subject`); a PR title must have one, as CLAUDE.md asks, because it becomes the
 squash commit's subject. Subjects git writes itself (merges, reverts, fixup! and squash!
-commits) pass in a commit message file, but not as a PR title, which is never written by git. A
+commits) pass in a commit message file, but not as a PR title, which is never written by git
+(a revert PR is titled `fix(scope): revert ...`); a formatting-only commit is a `chore`. A
 body must be separated from the subject by a blank line. Exits 0 when the message conforms, 1
 otherwise.
 """
@@ -23,6 +24,12 @@ TYPES = ("feat", "fix", "test", "refactor", "docs", "chore", "ci", "build", "per
 REPO_SCOPES = ("agents", "ci", "repo", "docs")
 SCISSORS = "# ------------------------ >8 ------------------------"
 WRITTEN_BY_GIT = re.compile(r"^(Merge |Revert \"|fixup! |squash! |amend! )")
+#: What to write instead of two subjects that are easy to reach for: the title GitHub's Revert
+#: button gives a PR, and the `style` type, which is not one of TYPES.
+HINTS = (
+    (re.compile(r"^Revert \""), "title a revert PR `fix(scope): revert ...`"),
+    (re.compile(r"^style(\(|!?:)"), "a formatting-only commit is a `chore`"),
+)
 
 
 def _scopes() -> list[str]:
@@ -63,6 +70,7 @@ def problems(text: str, *, pr_title: bool = False) -> list[str]:
             f"{subject!r} is not {shape}, with type one of "
             f"{', '.join(TYPES)} and scope one of {', '.join(scopes)}"
         )
+        found.extend(hint for pattern, hint in HINTS if pattern.match(subject))
     if len(lines) > 1 and lines[1].strip():
         found.append("the subject must be followed by a blank line before the body")
     return found

@@ -38,6 +38,7 @@ Throwaway exploration code lives under `docs/spikes/<issue>-<slug>/` in the PR s
 
 **Commits** follow Conventional Commits: `type(scope): imperative subject` with types `feat`, `fix`, `test`, `refactor`, `docs`, `chore`, `ci`, `build`, `perf`; scope is the package (`memory`, `perception`, `web`...) or `agents`, `ci`, `repo`, `docs`.
 The scope may be omitted only for a change that is genuinely repo-wide with no better scope.
+Formatting-only commits use `chore`: there is no `style` type, and the `commits` check and the commit-msg hook refuse one.
 Reference the issue in the body (`Refs #12`); the PR, not the commit, closes it (`Closes #12` in the PR description).
 
 **No agent attribution anywhere.**
@@ -47,6 +48,7 @@ The process role names (tech lead, `senior-developer`, `developer`, `tester`, `p
 
 **Pull requests** use `.github/pull_request_template.md`.
 The PR title must be a Conventional Commit `type(scope): subject`, because it becomes the squash commit subject.
+A PR made with GitHub's Revert button is retitled `fix(scope): revert ...` (`fix(api): revert "feat(api): add a route"`), because the `Revert "..."` title GitHub gives it fails the `commits` check.
 The squash commit body is a short summary plus one `Closes #<n>` line per issue the PR closes, without the template checklist.
 Nobody pushes directly to `main` or `develop`.
 A PR merges only when every CI check on its head is green; the rulesets (see "After CI first lands" under Commands) make GitHub enforce it.
