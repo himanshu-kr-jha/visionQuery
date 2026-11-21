@@ -5,8 +5,11 @@ for something else) must not get the memory's schema written into it. Every test
 a real Postgres (see packages/conftest.py), in a database of its own.
 """
 
+import hashlib
 import re
 import uuid
+from collections.abc import Generator
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -16,6 +19,7 @@ import visionquery.memory.migrate as migrate_module
 from psycopg import sql
 from visionquery.memory.migrate import (
     COUNTED_CATALOGS,
+    MIGRATIONS,
     UNCOUNTED_CATALOGS,
     ForeignDatabaseError,
     migrate,
@@ -973,3 +977,170 @@ def test_an_object_dropped_since_the_scan_is_left_out(
     # Every object looks unnamed, and none is there any more when asked again.
     monkeypatch.setattr(migrate_module, "_still_exists", _gone)
     assert migrate(database, migrations) == ("0001_people.sql",)
+
+
+@contextmanager
+def _mallory(database: str) -> Generator[str]:
+    """An ordinary role that may create in `public`, and the URL to log in as it."""
+    name = f"mallory_{uuid.uuid4().hex[:8]}"
+    _execute(
+        database,
+        f"CREATE ROLE \"{name}\" LOGIN PASSWORD '{name}'",
+        f'GRANT ALL ON SCHEMA public TO "{name}"',
+    )
+    try:
+        parts = urlsplit(database)
+        yield parts._replace(netloc=f"{name}:{name}@{parts.hostname}:{parts.port}").geturl()
+    finally:
+        _execute(database, f'DROP OWNED BY "{name}"', f'DROP ROLE "{name}"')
+
+
+def _owner(database: str, relation: str) -> str:
+    with psycopg.connect(database) as connection:
+        row = connection.execute(
+            "SELECT pg_get_userbyid(relowner) FROM pg_class WHERE oid = %s::regclass", (relation,)
+        ).fetchone()
+    assert row
+    return str(row[0])
+
+
+_NOT_OURS = "schema_migrations table that VisionQuery did not create"
+
+
+def test_a_populated_record_another_role_made_is_refused(database: str, migrations: Path) -> None:
+    # One INSERT of a public digest must not turn a look-alike into the memory's record.
+    digest = hashlib.sha256((migrations / "0001_people.sql").read_bytes()).hexdigest()
+    with _mallory(database) as as_mallory:
+        _execute(
+            as_mallory,
+            _RECORD_LIKE,
+            "INSERT INTO schema_migrations (number, name, sha256)"
+            f" VALUES (1, '0001_people.sql', decode('{digest}', 'hex'))",
+            "CREATE TABLE people (id int)",
+        )
+        with pytest.raises(ForeignDatabaseError) as refused:
+            migrate(database, migrations)
+        assert _NOT_OURS in str(refused.value)
+        with pytest.raises(ForeignDatabaseError):
+            status(database, migrations)
+        # Nothing was written, and the planted table is still hers alone.
+        with psycopg.connect(database) as connection:
+            row = connection.execute(
+                "SELECT count(*) FROM pg_roles WHERE rolname LIKE 'visionquery_%'"
+            ).fetchone()
+        assert row == (0,)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "DROP CONSTRAINT schema_migrations_pkey",
+        "ALTER COLUMN applied_at DROP DEFAULT",
+        "ENABLE ROW LEVEL SECURITY",
+        "SET (fillfactor = 50)",
+    ],
+    ids=["no-primary-key", "no-default", "row-level-security", "option"],
+)
+def test_a_populated_record_that_is_not_what_creating_it_makes_is_refused(
+    database: str, migrations: Path, change: str
+) -> None:
+    assert migrate(database, migrations) == ("0001_people.sql",)
+    _execute(database, f"ALTER TABLE schema_migrations {change}")
+    (migrations / "0002_places.sql").write_text("CREATE TABLE places (id int);")
+    with pytest.raises(ForeignDatabaseError) as refused:
+        migrate(database, migrations)
+    assert _NOT_OURS in str(refused.value)
+    with pytest.raises(ForeignDatabaseError):
+        status(database, migrations)
+    assert not _exists(database, "public.places")
+
+
+def test_a_populated_record_whose_owner_is_not_the_migrating_role_is_refused(
+    database: str, migrations: Path
+) -> None:
+    assert migrate(database, migrations) == ("0001_people.sql",)
+    with _mallory(database):
+        # The record is genuine, but its owner could rewrite what was applied.
+        mallory = _owner_candidate(database)
+        _execute(database, f'ALTER TABLE schema_migrations OWNER TO "{mallory}"')
+        with pytest.raises(ForeignDatabaseError) as refused:
+            migrate(database, migrations)
+        assert _NOT_OURS in str(refused.value)
+
+
+def _owner_candidate(database: str) -> str:
+    with psycopg.connect(database) as connection:
+        row = connection.execute(
+            "SELECT rolname FROM pg_roles WHERE rolname LIKE 'mallory_%'"
+        ).fetchone()
+    assert row
+    return str(row[0])
+
+
+@pytest.mark.parametrize(
+    "plant",
+    [
+        "CREATE TABLE {n}.cameras (id int)",
+        "CREATE VIEW {n}.cameras AS SELECT 1 AS id",
+        "CREATE MATERIALIZED VIEW {n}.cameras AS SELECT 1 AS id",
+        "CREATE SEQUENCE {n}.cameras",
+        "CREATE FOREIGN TABLE {n}.cameras (id int) SERVER nowhere",
+    ],
+    ids=["table", "view", "materialized-view", "sequence", "foreign-table"],
+)
+def test_a_relation_another_role_owns_makes_a_genuine_memory_foreign(
+    database: str, migrations: Path, plant: str
+) -> None:
+    # Planted under a genuine record, to be written to and read by the memory's services.
+    assert migrate(database, migrations) == ("0001_people.sql",)
+    (migrations / "0002_places.sql").write_text("CREATE TABLE places (id int);")
+    with _mallory(database) as as_mallory:
+        mallory = _owner_candidate(database)
+        _execute(database, f'GRANT CREATE ON SCHEMA public TO "{mallory}"')
+        if "FOREIGN" in plant:
+            _execute(
+                database,
+                "CREATE FOREIGN DATA WRAPPER wrapper",
+                "CREATE SERVER nowhere FOREIGN DATA WRAPPER wrapper",
+                f'GRANT USAGE ON FOREIGN SERVER nowhere TO "{mallory}"',
+            )
+        _execute(as_mallory, plant.format(n="public"))
+        with pytest.raises(ForeignDatabaseError) as refused:
+            migrate(database, migrations)
+        assert "public.cameras" in str(refused.value)
+        with pytest.raises(ForeignDatabaseError):
+            status(database, migrations)
+        assert not _exists(database, "public.places")
+
+
+def test_a_relation_another_role_owns_in_any_schema_makes_a_genuine_memory_foreign(
+    database: str, migrations: Path
+) -> None:
+    assert migrate(database, migrations) == ("0001_people.sql",)
+    with _mallory(database) as as_mallory:
+        mallory = _owner_candidate(database)
+        _execute(database, "CREATE SCHEMA extra", f'GRANT ALL ON SCHEMA extra TO "{mallory}"')
+        _execute(as_mallory, "CREATE TABLE extra.cameras (id int)")
+        with pytest.raises(ForeignDatabaseError) as refused:
+            migrate(database, migrations)
+        assert "extra.cameras" in str(refused.value)
+
+
+def test_a_memorys_own_table_handed_to_another_role_is_refused(
+    database: str, migrations: Path
+) -> None:
+    assert migrate(database, migrations) == ("0001_people.sql",)
+    with _mallory(database):
+        _execute(database, f'ALTER TABLE people OWNER TO "{_owner_candidate(database)}"')
+        with pytest.raises(ForeignDatabaseError) as refused:
+            migrate(database, migrations)
+        assert "public.people" in str(refused.value)
+
+
+def test_a_real_memory_keeps_migrating_and_reporting_its_status(database: str) -> None:
+    # Everything the shipped migrations make is owned by the migrating role, through 0004.
+    done = migrate(database, MIGRATIONS)
+    assert done[-1] == "0004_camera_publish_credentials.sql"
+    assert migrate(database, MIGRATIONS) == ()
+    assert status(database, MIGRATIONS).pending == ()
+    assert _owner(database, "public.cameras") == _owner(database, "public.schema_migrations")

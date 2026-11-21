@@ -585,9 +585,10 @@ def _is_the_record_we_make(connection: psycopg.Connection, url: str, connect_tim
     """Whether `public.schema_migrations` is exactly what `_RECORD` makes, and the migrating
     role's own.
 
-    An empty record that anyone could have made with our columns proves nothing: its owner would
-    keep every right on it for good, and a missing key, default, `NOT NULL` or a row-level
-    security flag would change what the runner's reads and writes do. So its definition is
+    A record that anyone could have made with our columns, and filled with the public digests of
+    our files, proves nothing: its owner would keep every right on it for good, and a missing
+    key, default, `NOT NULL` or a row-level security flag would change what the runner's reads
+    and writes do. So whatever it holds, its definition is
     compared with a record made now from `_RECORD`, so that the two cannot drift apart. That one
     is a temporary table on a connection of its own, rolled back, because `status` reads in a
     transaction that may not make a table.
@@ -623,6 +624,26 @@ ORDER BY 1
 """
 
 
+#: The relations that a role other than the migrating one owns, in every schema but the
+#: server's own and sessions' temporary ones, leaving out an extension's members. Every relation a
+#: migration made is owned by the role that ran it, so one that is not was made, or handed over,
+#: by someone else: its owner keeps every right on it (and could grant them to anyone), however
+#: genuine the record beside it looks. Only relations: indexes, TOAST tables and what is part of
+#: a table follow its owner.
+_STRANGERS = b"""
+SELECT format('%I.%I', n.nspname, c.relname)
+FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+WHERE c.relkind IN ('r', 'p', 'v', 'm', 'S', 'f')
+  AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+  AND n.nspname !~ '^pg_temp_' AND n.nspname !~ '^pg_toast_temp_'
+  AND pg_catalog.pg_get_userbyid(c.relowner) <> current_user
+  AND NOT EXISTS (
+      SELECT FROM pg_catalog.pg_depend d
+      WHERE d.classid = 'pg_catalog.pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+ORDER BY 1
+"""
+
+
 def _foreign(connection: psycopg.Connection, url: str, connect_timeout: int) -> str | None:
     """Why the database is neither empty nor a VisionQuery memory, or None when it is one."""
     columns = connection.execute(_COLUMNS).fetchall()
@@ -630,14 +651,21 @@ def _foreign(connection: psycopg.Connection, url: str, connect_timeout: int) -> 
         return _ALIEN
     ours = bool(columns)
     if ours:
+        # Of every record, populated or not: its rows say what was applied, and anyone can insert
+        # them, so a record is trusted only when it is the migrating role's own and exactly what
+        # creating it makes.
+        if not _is_the_record_we_make(connection, url, connect_timeout):
+            return _ALIEN
         if connection.execute(_RECORD_INCOMPLETE).fetchone() == (True,):
             # A record of ours has no NULL, so this one was made by someone else.
             return _ALIEN
         row = connection.execute("SELECT EXISTS (SELECT FROM public.schema_migrations)").fetchone()
         if row and row[0]:
-            return None
-        if not _is_the_record_we_make(connection, url, connect_timeout):
-            return _ALIEN
+            strangers = [name for (name,) in connection.execute(_STRANGERS)]
+            if not strangers:
+                return None
+            named = ", ".join(strangers[:3]) + (" and more" if len(strangers) > 3 else "")
+            return f"it has relations that another role owns: {named}"
     # First, and alone when there is one: a `role` setting makes this very session another
     # role, which may not read every catalog the scan needs.
     settings = [str(name) for (name,) in connection.execute(_SETTINGS)]
