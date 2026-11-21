@@ -29,9 +29,9 @@ If the GitHub API is unreachable, the tech lead may supply the PR and issue text
 
 ## Verify
 
-CI runs every check on the PR head (`make check` and the full stack tests), and `tester` judges the same head at the same time for behaviour, so do not re-run the suite.
+CI runs every check on the PR head (`make check` and the stack tests, without Triton or the real samples), and `tester` judges the same head at the same time for behaviour, so do not re-run the suite.
 Read CI's result (`gh pr checks <n>`); a red check is always a blocking finding, reported with its failing output (`gh run view <id> --log-failed`), and a check still pending is reported as pending, not waited for.
-Run yourself only what you need to confirm a suspected defect, and say what you ran.
+Run yourself only what you need to confirm a suspected defect, and say what you ran; when the change touches Triton or the samples, check that the tester ran those stack tests.
 The tech lead tells you which fix round you are judging; in a later round, start from the fix diff.
 When the tech lead says two fix rounds are done, mark only security or correctness defects as blocking, and list every other finding as non-blocking for a follow-up issue.
 For a docs-only or config-only change there is no tester run: you are the only check, so read the change completely and run whatever commands it touches.

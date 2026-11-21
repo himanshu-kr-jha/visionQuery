@@ -47,7 +47,7 @@ Follow the lifecycle and loop rules in `CLAUDE.md`.
 Never run more than three agents at once, `developer` included; work waiting for a slot starts oldest PR first.
 
 1. Start the builder with `isolation: "worktree"`, giving it the issue number and, if the issue depends on an open PR, that PR's branch to cut from.
-2. When the builder hands back (its PR is open), remove its worktree with the checks in `CLAUDE.md` (lifecycle step 2), start it on the next issue, and start `tester` and `pr-reviewer` on the PR at the same time, telling each the round (0).
+2. When the builder hands back (its PR is open), remove its worktree with the checks in `CLAUDE.md` (lifecycle step 2), start `tester` and `pr-reviewer` on the PR at the same time, telling each the round (0), unless it is a draft (a draft is judged only once step 2 marks it ready), and start the builder on the next issue when a slot is free (`CLAUDE.md` gives the order).
    Docs-only and config-only PRs get `pr-reviewer` alone.
 3. When both verdicts are in and CI has finished on that head, decide by step 2: blocking findings and any red CI check go to `developer` together, with the PR number, the branch and the full text of every finding; start `developer` with `isolation: "worktree"` whenever another agent uses the main checkout.
    After its hand-back, start `tester` (if code changed) and `pr-reviewer` again in parallel, telling them the round and that they start from the fix diff.
@@ -62,7 +62,7 @@ After a merge, return to step 2 and keep the pipeline full.
 
 Stop and report to the user when any of these happens:
 
-- the current milestone's last sub-issue is merged, or the earliest open milestone issue has no open sub-issues: show how to run the milestone's demo and wait for the user's go-ahead before the next milestone; once the user approves the demo, close the milestone issue with a comment summarising what shipped;
+- without `$ARGUMENTS`, the current milestone's last sub-issue is merged, or the earliest open milestone issue has no open sub-issues: show how to run the milestone's demo and wait for the user's go-ahead before the next milestone; once the user approves the demo, close the milestone issue with a comment summarising what shipped;
 - a security or correctness defect remains after two fix rounds;
 - the reviewer's verdict is "do not merge", or a finding needs a design change;
 - something would change an ADR, the meaning of a glossary term, or an issue's acceptance criteria;

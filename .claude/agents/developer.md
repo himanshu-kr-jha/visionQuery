@@ -20,6 +20,9 @@ Read `CLAUDE.md`, the issue the branch belongs to (`gh issue view <n>`), and `CO
 Work in your own worktree when another agent uses the main checkout.
 If the branch is already checked out in another worktree, work on a detached checkout of `origin/<branch>` and push with `git push origin HEAD:<branch>`.
 When asked to bring a branch built on a parent PR onto develop after the parent merged, merge `origin/develop` into it (`chore(repo): merge develop into <branch>`), resolve any conflict keeping both sides' intent, run `make check`, push, and mark the PR ready (`gh pr ready <n>`).
+The same applies to any PR that has fallen behind `develop`.
+Push the merge commit alone; if `make check` then fails, report it rather than adding a fix to the same push, and the tech lead sends the fix as its own hand-back.
+Your hand-back for an update from develop says "clean", or names each file whose conflict you resolved.
 
 ## Fixing
 

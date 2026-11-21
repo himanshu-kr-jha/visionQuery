@@ -47,7 +47,7 @@ The process role names (tech lead, `senior-developer`, `developer`, `tester`, `p
 
 **Pull requests** use `.github/pull_request_template.md`.
 The PR title must be a Conventional Commit `type(scope): subject`, because it becomes the squash commit subject.
-The squash commit body is a short summary plus `Closes #<n>`, without the template checklist.
+The squash commit body is a short summary plus one `Closes #<n>` line per issue the PR closes, without the template checklist.
 Nobody pushes directly to `main` or `develop`.
 A PR merges only when every CI check on its head is green; the rulesets (see "After CI first lands" under Commands) make GitHub enforce it.
 
@@ -83,7 +83,7 @@ Lifecycle of one issue:
 4. **Fixes:** once both verdicts are in and CI has finished on that head, the tech lead sends every blocking finding and any red CI check together to `developer`, which pushes the fixes and posts its hand-back on the PR.
    Then `tester` (if code changed) and `pr-reviewer` re-judge that head at the same time, each starting from the fix diff.
    The same holds for a CI-fix push and for a develop merge that had to resolve a conflict.
-   A develop merge without conflicts carries the verdicts over, and CI decides it.
+   A develop merge without conflicts, pushed with nothing else, carries the verdicts over, and CI decides it; the `developer` hand-back for it says "clean" or names each file whose conflict it resolved.
    When a PR falls behind `develop` (the rulesets require it up to date), `developer` merges `origin/develop` into it.
 5. **Tech lead** squash-merges (`gh pr merge --squash --delete-branch`) once CI is green on the head and the head has verdicts, its own or carried over from a clean develop merge, with no blocking finding; it confirms each issue the PR closes is closed (if GitHub did not close one, close it with a comment linking the merged PR).
    The tech lead updates the GitHub wiki (a separate repo) directly when a milestone completes or setup changes.
@@ -100,10 +100,12 @@ Rules for the loop:
 - A "do not merge" verdict, or a finding that needs a design change, goes to the user in any round.
 - A real CI failure goes to `developer`; after a second CI-fix hand-back on the same failing check, the tech lead stops and brings it to the user.
 - Escalate to the user, rather than deciding alone, anything that would change an ADR, the glossary's meaning of an existing term, or an issue's acceptance criteria.
-- At most three agents run at once, `developer` included, so that the machine keeps up with the stack tests they run; work waiting for a free slot is started oldest PR first, and light docs or CI work may run beside them.
+- At most three agents run at once, `developer` included, so that the machine keeps up with the stack tests they run.
+  Work waiting for a free slot starts in this order: fixes and verdicts for open PRs, oldest PR first, then the next build.
+  Only light work may run beside the three: a review of a docs-only or config-only PR, or a CI fix to workflow files; a `developer` fixing a red test or stack check counts.
 - Work is pipelined: once `senior-developer` opens its PR it never returns to that issue and starts the next one straight away, while `tester`, `pr-reviewer` and `developer` finish the previous one.
   The next issue is the lowest-numbered open sub-issue of the earliest open milestone, preferring one that does not depend on unmerged work.
-- If every candidate depends on unmerged work, the builder cuts its branch from that open PR's branch (one level at most, never from a branch that itself depends on unmerged work) and opens its PR as a draft into `develop`, so CI runs while the parent is reviewed.
+- If every candidate depends on unmerged work, the builder cuts its branch from that open PR's branch (one level at most, never from a branch that itself depends on unmerged work) and opens its PR as a draft into `develop`, so CI runs while the parent is reviewed; nobody judges a draft.
   The draft's description names its parent with a `Depends on #<parent PR>` line.
   Once the parent merges, `developer` merges `origin/develop` into the branch (`chore(repo): merge develop into <branch>`), resolving any conflict, and the PR is marked ready; it is judged like any other from then on.
   If the parent is closed without merging, or is itself a draft that depends on another PR, the tech lead brings it to the user.
