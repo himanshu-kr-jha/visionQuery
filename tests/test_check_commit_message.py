@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from check_commit_message import TYPES
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "check_commit_message.py"
@@ -154,3 +155,25 @@ def test_what_git_writes_itself_is_not_a_valid_pr_title(title: str) -> None:
 
 def test_claude_md_says_the_pr_title_has_a_scope() -> None:
     assert "The PR title must be a Conventional Commit `type(scope): subject`" in CLAUDE
+
+
+def test_a_revert_pr_is_titled_as_a_fix_and_claude_md_says_so() -> None:
+    # GitHub's Revert button titles the PR `Revert "..."`, which the commits check refuses.
+    assert "`fix(scope): revert ...`" in CLAUDE
+    assert _check_title('fix(api): revert "feat(api): add a route"').returncode == 0
+
+
+def test_a_revert_title_is_refused_saying_how_to_title_it() -> None:
+    result = _check_title('Revert "feat(api): add a route"')
+    assert result.returncode == 1
+    assert "`fix(scope): revert ...`" in result.stderr
+
+
+def test_formatting_only_commits_use_chore_as_claude_md_says() -> None:
+    # One list of types everywhere: `style` is not one of them, so a reformat is a chore.
+    assert "Formatting-only commits use `chore`" in CLAUDE
+    assert "style" not in TYPES
+    assert _check_title("chore(memory): reformat with ruff").returncode == 0
+    result = _check_title("style(memory): reformat with ruff")
+    assert result.returncode == 1
+    assert "a formatting-only commit is a `chore`" in result.stderr
