@@ -11,6 +11,7 @@ import json
 import logging
 import subprocess
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,6 @@ from visionquery.recorder.mp4 import Fragment, Init, Stream
 from visionquery.recorder.segment import (
     Segment,
     SegmentFile,
-    SpanError,
     recover,
     segments,
     window,
@@ -362,23 +362,27 @@ def test_a_segment_recovered_after_a_crash_plays_to_its_last_whole_fragment(
 # --- spans that cannot be true, and what a Segment's verification rests on ---------------------
 
 
-def test_a_segment_that_would_end_before_it_begins_is_refused_when_finished(
-    tmp_path: Path,
+def test_a_segment_that_would_end_before_it_begins_is_finished_not_verified_and_logged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """The last way a step of the clock could be written down as Footage."""
+    """A step of the clock inside a Segment: its times are not vouched for, but refusing it would
+    stop the camera recording (it is raised into the camera's write path), so it is finished."""
     segment = opened(tmp_path)
     segment.append(fragments(2)[0], arrived_at=AT + timedelta(seconds=10))
     segment.append(fragments(2)[1], arrived_at=AT + timedelta(seconds=5))  # the clock went back
+    caplog.set_level(logging.ERROR, logger="visionquery.recorder")
 
-    with pytest.raises(SpanError, match="before it begins"):
-        segment.close("stream_ended")
+    done = finished(segment, "stream_ended")
 
-    assert list(tmp_path.rglob("*.closed")) == [], "nothing says it is whole"
+    assert not done.verified
+    assert [segment.reason for segment in segments(tmp_path)] == ["stream_ended"]
+    (record,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert "before it begins" in record.getMessage()
 
 
 @pytest.mark.parametrize("hours", [1, -1])
-def test_a_segment_far_outside_its_window_is_refused_when_finished(
-    tmp_path: Path, hours: int
+def test_a_segment_far_outside_its_window_is_finished_not_verified_and_logged(
+    tmp_path: Path, hours: int, caplog: pytest.LogCaptureFixture
 ) -> None:
     segment = SegmentFile.open(
         tmp_path,
@@ -389,9 +393,67 @@ def test_a_segment_far_outside_its_window_is_refused_when_finished(
         verified=True,
     )
     segment.append(fragments(1)[0], arrived_at=AT + timedelta(hours=hours, seconds=2))
+    caplog.set_level(logging.ERROR, logger="visionquery.recorder")
 
-    with pytest.raises(SpanError, match="outside its window"):
-        segment.close("stream_ended")
+    done = finished(segment, "stream_ended")
+
+    assert not done.verified
+    assert [segment.verified for segment in segments(tmp_path)] == [False]
+    (record,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert "outside its window" in record.getMessage()
+
+
+def long_fragment(seconds: float) -> Fragment:
+    (frag,) = fragments(1)
+    return replace(frag, duration=round(frag.timescale * seconds))
+
+
+def test_a_segment_may_overrun_its_window_by_its_last_fragment_however_long_it_is(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A camera with a long keyframe interval (40 s here) begins a Fragment inside the window and
+    ends it far outside: that is what copy-only Footage is, not a fault."""
+    segment = SegmentFile.open(
+        tmp_path,
+        parsed_init(),
+        window_start=AT,
+        window_end=AT + timedelta(seconds=60),
+        not_before=None,
+        verified=True,
+    )
+    segment.append(long_fragment(40), arrived_at=AT + timedelta(seconds=40))
+    segment.append(long_fragment(40), arrived_at=AT + timedelta(seconds=80))
+    caplog.set_level(logging.ERROR, logger="visionquery.recorder")
+
+    done = finished(segment, "rolled")
+
+    assert done.verified
+    assert caplog.records == []
+
+
+def test_a_recovered_segment_is_judged_by_the_same_span_as_a_finished_one(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`recover` knows the window from the first index line, so what `close` would keep it keeps
+    (a long Fragment past the window) and what `close` would not verify it does not either."""
+    window_end = AT + timedelta(seconds=60)
+    kept = tmp_path / "kept"
+    SegmentFile.open(
+        kept, parsed_init(), window_start=AT, window_end=window_end, not_before=None, verified=True
+    ).append(long_fragment(40), arrived_at=AT + timedelta(seconds=90))
+    far = tmp_path / "far"
+    SegmentFile.open(
+        far, parsed_init(), window_start=AT, window_end=window_end, not_before=None, verified=True
+    ).append(fragments(1)[0], arrived_at=AT + timedelta(hours=3))
+    caplog.set_level(logging.ERROR, logger="visionquery.recorder")
+
+    (kept_found,) = recover(kept)
+    (far_found,) = recover(far)
+
+    assert (kept_found.reason, kept_found.verified) == ("recovered", True)
+    assert (far_found.reason, far_found.verified) == ("recovered", False)
+    (record,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert "outside its window" in record.getMessage()
 
 
 def test_a_segment_overrunning_its_window_by_a_fragment_or_a_stall_is_kept(tmp_path: Path) -> None:
@@ -500,7 +562,7 @@ def index_not_utf8(path: Path) -> None:
     path.with_suffix(".frags").write_bytes(b"\xff\xfe{}\n")
 
 
-DAMAGES = [damaged_line, no_from, end_before_begin, index_not_text, index_not_utf8]
+DAMAGES = [damaged_line, no_from, index_not_text, index_not_utf8]
 
 
 @pytest.mark.parametrize("damage", DAMAGES)
@@ -536,6 +598,21 @@ def test_a_segment_that_cannot_be_recovered_is_quarantined_beside_one_that_can(
     assert [segment.path for segment in segments(footage / "2")] == [good]
 
 
+def test_a_recovered_segment_whose_index_ends_before_it_begins_is_finished_not_verified(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A span no clock could have recorded is the same fact in `recover` as in `close`: it is
+    said (ERROR) and the Segment is kept unverified, so that no camera stops over it."""
+    path = unfinished(tmp_path / "1")
+    end_before_begin(path)
+    caplog.set_level(logging.ERROR, logger="visionquery.recorder")
+
+    (found,) = recover(tmp_path)
+
+    assert (found.reason, found.verified) == ("recovered", False)
+    assert "before it begins" in caplog.records[0].getMessage()
+
+
 def test_a_segment_whose_media_is_gone_has_nothing_to_recover_and_stops_nothing(
     tmp_path: Path,
 ) -> None:
@@ -560,13 +637,24 @@ def test_a_note_that_is_not_a_segments_is_quarantined_without_deleting_anything(
     other = camera / "2026-10-06"
     other.mkdir()
     (other / "stranger.mp4").write_bytes(b"not ours")  # a file nobody here wrote
+    # A note shaped like a Segment's, but whose "day" is `..`: it names a Segment of the
+    # Footage directory itself, outside this camera's, which nothing here may recover.
+    outside = unfinished(tmp_path / "elsewhere")
+    stem = outside.stem
+    escaped = tmp_path / "footage" / f"{stem}.mp4"
+    escaped.write_bytes(outside.read_bytes())
+    escaped.with_suffix(".frags").write_bytes(outside.with_suffix(".frags").read_bytes())
+    (camera / ".open" / f".._{stem}").touch()
     good = unfinished(tmp_path / "footage" / "2")
 
     found = recover(tmp_path / "footage")
 
     assert [segment.path for segment in found] == [good]
     assert (tmp_path / "footage" / ".quarantine" / "1" / ".open" / "stranger").exists()
+    assert (tmp_path / "footage" / ".quarantine" / "1" / ".open" / f".._{stem}").exists()
     assert (other / "stranger.mp4").read_bytes() == b"not ours"
+    assert not escaped.with_suffix(".closed").exists(), "never finished from outside the camera"
+    assert escaped.read_bytes() == outside.read_bytes(), "never truncated either"
 
 
 def test_a_media_file_that_no_note_names_is_never_touched(tmp_path: Path) -> None:
@@ -595,11 +683,14 @@ def test_a_segment_that_could_not_be_moved_is_logged_and_does_not_stop_the_start
     monkeypatch.setattr("visionquery.recorder.segment.shutil.move", refuse)
     caplog.set_level(logging.ERROR, logger="visionquery.recorder")
 
-    found = recover(footage)
+    told: list[Path] = []
+
+    found = recover(footage, on_quarantine=lambda path, error: told.append(path))
 
     assert [segment.path for segment in found] == [good]
     assert any("could not be moved" in record.getMessage() for record in caplog.records)
     assert bad.exists(), "left as it was, to be tried again"
+    assert told == [], "a Segment still where it was is not counted as quarantined"
 
 
 def test_the_start_looks_only_at_the_segments_being_written_not_at_every_one_there_was(

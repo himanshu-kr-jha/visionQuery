@@ -83,12 +83,13 @@ class Segmenter:
     Its calls write to disk and fsync, so an event loop runs them in a thread.
 
     **A step of the clock is a discontinuity, never bridged.** The timebase is anchored again
-    when a Segment opens, and that can move the time (`TimeBase.anchor`). A slew within
+    when a Segment opens, and that can move the time (`TimeBase.anchor`). A shift within
     `STEP_TOLERANCE` keeps a Segment beginning exactly where the one before it ended. A larger
     shift is a step: the old timeline's `not_before`, and the end of the Segment before, mean
     nothing on the new one, so the Segment begins where its own first Fragment says on the new
-    timeline, is filed under that window, and `on_step` is told. That leaves a gap, or an
-    overlap, between two Segments of one camera, which is what happened to its clock.
+    timeline, is filed under that window, records the shift (`stepped_by`), and `on_step` is
+    told. That leaves a gap, or an overlap, between two Segments of one camera, which is what
+    happened to its clock, and `stepped_by` is how the index tells it from a fault.
     """
 
     def __init__(
@@ -151,6 +152,7 @@ class Segmenter:
                 not_before=self._not_before,
                 verified=self._pin_verified if pinned else True,
                 begins_at=rolled.time_to if rolled is not None and pinned else None,
+                stepped_by=shift.total_seconds() if stepped else None,
             )
         self._last_verified = self._timebase.verified
         self._segment.append(fragment, arrived_at=arrived_at, verified=self._last_verified)
@@ -167,7 +169,22 @@ class Segmenter:
         segment, self._segment, self._ends_at = self._segment, None, None
         if segment is None:
             return None
-        done = segment.close(reason)
+        try:
+            done = segment.close(reason)
+        except Exception as error:
+            # Its `.closed` could not be written (a full disk, a file gone): never raised into
+            # the camera, which has nothing to do with it. The Segment is finished `recovered`
+            # from what its index vouches for, at once, so that no note is left behind on a live
+            # connection; if even that fails it is left for the next start.
+            _log.error(
+                "Segment %s could not be finished %s: %s: %s",
+                segment.path,
+                reason,
+                type(error).__name__,
+                error,
+                extra={"segment": str(segment.path)},
+            )
+            done = segment.abandon()
         if done is not None:
             self._not_before = done.time_to
             self._pin_verified = self._last_verified

@@ -7,15 +7,19 @@ after its window's end: copy-only Footage can be cut only at a keyframe, so each
 at the first keyframe in its window, and ends with the Fragment that holds the boundary.
 """
 
+import json
+import logging
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
+from typing import Any
 
 import pytest
 from boxes import fragments, parsed_init
 from clocks import Clocks
 from visionquery.recorder.camera import Segmenter
-from visionquery.recorder.segment import Segment, segments
+from visionquery.recorder.segment import Segment, recover, segments
 from visionquery.recorder.timebase import Reading
 
 FIVE_MINUTES = timedelta(minutes=5)
@@ -313,3 +317,153 @@ def test_a_connection_pinned_to_an_unverified_connect_time_is_not_verified(tmp_p
     assert done is not None
     assert done.time_from == not_before
     assert not done.verified
+
+
+@pytest.mark.parametrize("step", [3600.0, -3600.0, 45.0, -45.0])
+def test_the_segment_after_a_step_says_by_how_much_the_clock_stepped(
+    tmp_path: Path, step: float
+) -> None:
+    """The index must tell a step's overlap or gap from a fault or an outage: the Segment that
+    begins on the new time carries the shift, in its index and in what says it is finished."""
+    found, _ = stepped(tmp_path, step, at_fragment=5)
+
+    first, second = found
+    assert first.stepped_by is None
+    assert second.stepped_by == step
+    index = [
+        json.loads(line) for line in second.path.with_suffix(".frags").read_text().splitlines()
+    ]
+    assert index[0]["stepped_by"] == step
+    assert all("stepped_by" not in line for line in index[1:])
+    assert json.loads(second.path.with_suffix(".closed").read_text())["stepped_by"] == step
+    assert "stepped_by" not in json.loads(first.path.with_suffix(".closed").read_text())
+    assert {segment.path: segment.stepped_by for segment in segments(tmp_path)} == {
+        first.path: None,
+        second.path: step,
+    }
+
+
+def test_a_slew_is_not_recorded_as_a_step(tmp_path: Path) -> None:
+    found, _ = stepped(tmp_path, 0.1, at_fragment=5)
+
+    assert [segment.stepped_by for segment in found] == [None, None]
+
+
+def test_a_stepped_segment_recovered_after_a_crash_still_says_so(tmp_path: Path) -> None:
+    clocks = Clocks(synchronised=False)
+    timebase = clocks.timebase()
+    segmenter = Segmenter(
+        tmp_path, parsed_init(), timebase, timedelta(seconds=10), not_before=timebase.now()
+    )
+    for n, frag in enumerate(fragments(7)):
+        clocks.tick(2)
+        if n == 5:
+            clocks.reading = Reading(source="ntp", synchronised=True, est_error_us=250)
+            clocks.wall += 3600
+        segmenter.add(frag, arrived_at=timebase.now())
+    # The process dies here, the second Segment unfinished.
+
+    (found,) = recover(tmp_path)
+
+    assert found.stepped_by == 3600.0
+    assert [segment.stepped_by for segment in segments(tmp_path)] == [None, 3600.0]
+
+
+# --- a Fragment may be as long as a camera's keyframe interval ----------------------------------
+
+
+def test_a_camera_with_fragments_longer_than_the_slack_records_across_several_rolls(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A keyframe every 40 s (1 fps with a GOP of 40) against 60 s windows: each Segment's last
+    Fragment ends well past its window, which is what copy-only Footage is, and must neither stop
+    the recording nor leave a Segment unfinished."""
+    clocks = Clocks()
+    clocks.wall = at("10:00:15").timestamp()
+    timebase = clocks.timebase()
+    segmenter = Segmenter(
+        tmp_path, parsed_init(), timebase, timedelta(seconds=60), not_before=timebase.now()
+    )
+    caplog.set_level(logging.ERROR, logger="visionquery.recorder")
+    rolled: list[Segment] = []
+    for frag in fragments(8):
+        clocks.tick(40)
+        done = segmenter.add(
+            replace(frag, duration=round(frag.timescale * 40)), arrived_at=timebase.now()
+        )
+        if done is not None:
+            rolled.append(done)
+    last = segmenter.finish("stream_ended")
+
+    assert len(rolled) >= 3
+    assert last is not None
+    found = [*rolled, last]
+    assert [segment.reason for segment in found] == ["rolled"] * len(rolled) + ["stream_ended"]
+    assert all(segment.verified for segment in found)
+    assert caplog.records == []
+    assert segments(tmp_path) == found
+    assert not list((tmp_path / ".open").iterdir()), "every Segment is finished"
+    for before, after in pairwise(found):
+        assert after.time_from == before.time_to
+
+
+# --- a Segment that cannot be finished is recovered at once, and never raised into the camera ---
+
+
+def fail_closed_writes(monkeypatch: pytest.MonkeyPatch, times: int) -> None:
+    """The next `times` writes of a `.closed` fail, as they do on a full disk: the file is
+    written aside and moved into place, so it is the move that fails."""
+    real = Path.replace
+    remaining = [times]
+
+    def replace(self: Path, target: Any) -> Path:
+        if self.name.endswith(".closed.tmp") and remaining[0] > 0:
+            remaining[0] -= 1
+            raise OSError(28, "No space left on device")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "replace", replace)
+
+
+def two_fragments_in(tmp_path: Path) -> Segmenter:
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    segmenter = Segmenter(
+        tmp_path, parsed_init(), timebase, FIVE_MINUTES, not_before=timebase.now()
+    )
+    for frag in fragments(2):
+        clocks.tick(2)
+        segmenter.add(frag, arrived_at=timebase.now())
+    return segmenter
+
+
+@pytest.mark.parametrize("reason", ["stopped", "stream_ended"])
+def test_a_segment_whose_finish_fails_is_finished_recovered_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    segmenter = two_fragments_in(tmp_path)
+    fail_closed_writes(monkeypatch, 1)
+    caplog.set_level(logging.ERROR, logger="visionquery.recorder")
+
+    done = segmenter.finish(reason)  # type: ignore[arg-type]
+
+    assert done is not None
+    assert (done.reason, done.fragments) == ("recovered", 2)
+    assert [segment.reason for segment in segments(tmp_path)] == ["recovered"]
+    assert not list((tmp_path / ".open").iterdir()), "no note is left on a live connection"
+    assert recover(tmp_path) == []
+
+
+def test_a_segment_that_cannot_be_finished_at_all_is_left_for_the_next_start_not_raised(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    segmenter = two_fragments_in(tmp_path)
+    fail_closed_writes(monkeypatch, 2)
+
+    assert segmenter.finish("stopped") is None  # the disk is full: nothing raised
+
+    assert segments(tmp_path) == []
+    assert len(list((tmp_path / ".open").iterdir())) == 1, "its note stays, for the next start"
+    monkeypatch.undo()
+    (found,) = recover(tmp_path)
+    assert (found.reason, found.fragments) == ("recovered", 2)
