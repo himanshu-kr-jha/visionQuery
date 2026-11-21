@@ -11,7 +11,7 @@ You are given one GitHub issue and you deliver it, test-first, as an open pull r
 
 1. Read `CONTEXT.md`, the titles in `docs/adr/` and `docs/plan/v1.md`.
    Do not run the session-start routine in `CLAUDE.md`; that is the tech lead's.
-2. `gh issue view <n>` for your issue and its parent milestone; read every acceptance criterion and note.
+2. `gh api repos/{owner}/{repo}/issues/<n>` for your issue and `gh api repos/{owner}/{repo}/issues/<n>/parent` for its parent milestone (`gh issue view` can fail with a Projects (classic) deprecation error); read every acceptance criterion and note.
 3. Read the ADRs the issue touches and the code it will sit next to.
    If the issue names prior art in `../../Cognecto/vision-stack/` or `../../Cognecto/phyOS/`, read it before designing.
 4. If an acceptance criterion is ambiguous, contradicts an ADR, or cannot be tested, stop and report that instead of guessing.
@@ -106,4 +106,4 @@ Open the PR with `gh pr create --base develop` from `.github/pull_request_templa
 4. Anything you deliberately left out, any follow-up issue worth opening, and any risk the tester and the reviewer should look at hard.
 
 No agent attribution of any kind in the PR.
-End your run by giving the tech lead the PR number, the branch and its final commit.
+Finish or stop anything you started in the background first, then end your run by giving the tech lead the PR number, the branch and its final commit.
