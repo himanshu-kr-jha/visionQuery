@@ -306,8 +306,10 @@ def test_a_recorder_killed_mid_segment_recovers_it_playable_when_started_again(
         finally:
             first.send_signal(signal.SIGKILL)
             first.communicate(timeout=30)
-        assert segments(camera) == [], "nothing was finished: the process was killed"
-        unfinished = list(camera.rglob("*.mp4"))
+        # Whatever window boundary fell in its few seconds, only one Segment is unfinished, and
+        # whatever was finished was rolled: the process was killed, nothing was stopped.
+        assert {s.reason for s in segments(camera)} <= {"rolled"}
+        unfinished = [p for p in camera.rglob("*.mp4") if not p.with_suffix(".closed").exists()]
         assert len(unfinished) == 1
 
         second = _recorder(environment)
@@ -319,12 +321,21 @@ def test_a_recorder_killed_mid_segment_recovers_it_playable_when_started_again(
             out, _ = second.communicate(timeout=60)
     assert second.returncode == 0, out
 
-    recovered, stopped = segments(camera)
+    # Structure, not count: the windows are the epoch's, so a boundary may fall in either run.
+    # The one unfinished Segment is recovered, the last is stopped, any other was rolled.
+    found = segments(camera)
+    (recovered,) = [s for s in found if s.reason == "recovered"]
+    stopped = found[-1]
     assert (recovered.path, recovered.reason) == (unfinished[0], "recovered")
     assert frame_hashes(ffmpeg, recovered.path)
     assert stopped.reason == "stopped"
     assert frame_hashes(ffmpeg, stopped.path)
-    assert recovered.time_to <= stopped.time_from
+    assert {s.reason for s in found} <= {"rolled", "recovered", "stopped"}
+    for before, after in pairwise(found):
+        # A rolled Segment runs on into the next; after a recovery a gap is allowed.
+        assert after.time_from >= before.time_to
+        if before.reason == "rolled":
+            assert after.time_from == before.time_to
     assert "recovered" in out
     assert mediamtx.reader_password not in out
 

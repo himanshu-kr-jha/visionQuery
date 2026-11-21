@@ -323,7 +323,11 @@ def test_a_segment_whose_writing_fails_is_finished_recovered_and_its_files_close
 
     asyncio.run(run())
 
-    (found,) = segments(tmp_path)
+    # One window of a day holds it all, unless the test ran across 00:00 UTC: whatever the clock,
+    # every Segment but the last was rolled, the last is the one cut off, and they join.
+    *earlier, found = segments(tmp_path)
+    assert all(segment.reason == "rolled" for segment in earlier)
+    assert all(after.time_from == before.time_to for before, after in pairwise([*earlier, found]))
     assert (found.reason, found.fragments) == ("recovered", 2)
     assert all(segment.closed for segment in set(appended))
     assert not list((tmp_path / ".open").iterdir())

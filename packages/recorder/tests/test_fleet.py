@@ -94,6 +94,9 @@ def test_a_camera_that_goes_away_does_not_stop_the_others(
                 await until(lambda: any(s.reason == "stream_ended" for s in of(tmp_path, GATE)), 30)
                 dropped = time.monotonic()
                 await until(lambda: time.monotonic() - dropped > 5, 10)
+                # Stopped while the dock still publishes: leaving the `with` ends its stream,
+                # and a stop after that races "the stream ended" for the dock's last reason.
+                await fleet.stop()
         finally:
             await fleet.stop()
 
