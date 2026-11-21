@@ -27,15 +27,24 @@ rather than being squeezed out of it, and the span never claims more than was re
 **The only byte that changes is each Fragment's decode time** (`mp4.rebase`), so that every
 file's own timeline starts at zero: copy-only, never a transcode.
 
-After a crash, `recover` finds every Segment that was never finished, truncates it to its last
-whole Fragment and finishes it `recovered`, with the end it really reached, and writes that down
-so a second start reaches the same answer.
+While a Segment is written, an empty note named for it lies in `<camera>/.open/`, made before
+anything else of it and removed once it is finished. After a crash, `recover` reads the notes
+(never walking the Segments there ever were, so a start costs what is unfinished, not what is
+kept), truncates each Segment they name to its last whole Fragment and finishes it `recovered`,
+with the end it really reached, and writes that down so a second start reaches the same answer.
+Each is recovered by itself: one that cannot be is logged, counted and moved to
+`<footage>/.quarantine/`, never stopping the rest, and files no note names are never touched.
 
 Adapted from phyOS's Photon recorder (`adapters.photon.segment`), without signing or shipping.
 """
 
+import contextlib
 import json
+import logging
 import os
+import re
+import shutil
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -60,7 +69,19 @@ __all__ = [
 #: the recorder after a crash, from what it found on disk.
 type Reason = Literal["rolled", "stream_ended", "stopped", "recovered"]
 
+_log = logging.getLogger(__name__)
+
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+#: Where a camera's directory notes each Segment being written, one empty file named for it
+#: (`<day>_<HHMMSS>-<id>`), so that a start finds what a crash left unfinished without walking
+#: every Segment there ever was.
+_OPEN = ".open"
+#: Where `recover` moves a Segment it cannot recover, under the directory it recovers, so that
+#: no later start meets it again and nothing is deleted that might still be read.
+_QUARANTINE = ".quarantine"
+_DAY = re.compile(r"\d{4}-\d{2}-\d{2}")
+_STEM = re.compile(r"\d{6}-[0-9a-f]{32}")
 
 #: How far a Segment's times may lie outside its window: a Fragment (a keyframe interval, a few
 #: seconds, ten at most) that began inside it and ended outside, and a stall within what a
@@ -133,8 +154,10 @@ class SegmentFile:
         verified: bool,
         window: tuple[datetime, datetime] | None,
         slack: timedelta,
+        marker: Path,
     ) -> None:
         self.path = path
+        self._marker = marker
         self.segment_id = segment_id
         self._not_before = not_before
         self._begins_at = begins_at
@@ -176,14 +199,22 @@ class SegmentFile:
         day = directory / start.strftime("%Y-%m-%d")
         day.mkdir(parents=True, exist_ok=True)
         segment_id = uuid4()
+        stem = f"{start.strftime('%H%M%S')}-{segment_id.hex}"
+        # Noted before anything else is written, so no Segment can exist that a start would
+        # not find.
+        marker = directory / _OPEN / f"{day.name}_{stem}"
+        marker.parent.mkdir(exist_ok=True)
+        marker.touch(exist_ok=False)
+        _fsync_dir(marker.parent)
         segment = cls(
-            day / f"{start.strftime('%H%M%S')}-{segment_id.hex}.mp4",
+            day / f"{stem}.mp4",
             segment_id,
             not_before,
             begins_at,
             verified,
             None if window_end is None else (start, window_end),
             slack,
+            marker,
         )
         segment._data.write(init.data)
         segment._data.flush()
@@ -195,6 +226,11 @@ class SegmentFile:
     @property
     def fragments(self) -> int:
         return self._fragments
+
+    @property
+    def closed(self) -> bool:
+        """Whether no file of the Segment is held open any more."""
+        return self._data.closed and self._lines.closed
 
     @property
     def verified(self) -> bool:
@@ -247,6 +283,7 @@ class SegmentFile:
         if self._fragments == 0:
             for file in _files(self.path):
                 file.unlink(missing_ok=True)
+            self._forget()
             return None
         assert self._time_from is not None
         assert self._time_to is not None
@@ -261,13 +298,41 @@ class SegmentFile:
             verified=self._verified,
         )
         _mark(segment)
+        self._forget()
         return segment
+
+    def abandon(self) -> Segment | None:
+        """Give up on the Segment because writing it failed (the disk is full, a file vanished):
+        close its handles and finish it `recovered`, from the Fragments its index vouches for,
+        as a start after a crash would. What cannot be finished now is left for that start."""
+        for handle in (self._data, self._lines):
+            with contextlib.suppress(OSError):
+                handle.close()
+        try:
+            done = _recover(self.path)
+        except Exception as error:
+            _log.error(
+                "Segment %s could not be finished after a failure to write it; the next start "
+                "will find it: %s: %s",
+                self.path,
+                type(error).__name__,
+                error,
+                extra={"segment": str(self.path)},
+            )
+            return None
+        self._forget()
+        return done
+
+    def _forget(self) -> None:
+        """The Segment is finished (or nothing of it remains): it is no longer being written."""
+        self._marker.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            _fsync_dir(self._marker.parent)
 
     def _check_span(self, time_from: datetime, time_to: datetime) -> None:
         """Refuse a Segment that no clock could have recorded: the last way a step of the clock
         could be written down as Footage."""
-        if time_to < time_from:
-            raise SpanError(f"Segment {self.path.name} would end ({time_to}) before it begins")
+        _check_span(self.path, time_from, time_to)
         if self._window is not None:
             start, end = self._window
             if time_from < start - self._slack or time_to > end + self._slack:
@@ -275,6 +340,11 @@ class SegmentFile:
                     f"Segment {self.path.name} would span {time_from} to {time_to}, outside its "
                     f"window {start} to {end}"
                 )
+
+
+def _check_span(path: Path, time_from: datetime, time_to: datetime) -> None:
+    if time_to < time_from:
+        raise SpanError(f"Segment {path.name} would end ({time_to}) before it begins")
 
 
 def _mark(segment: Segment) -> None:
@@ -311,14 +381,17 @@ def _read_closed(path: Path) -> Segment:
 
 def _recover(path: Path) -> Segment | None:
     """Truncate an unfinished Segment to its last vouched-for Fragment and finish it."""
-    data, index, _ = _files(path)
+    data, index, closed = _files(path)
+    # What an interrupted atomic write left, by names that are this Segment's own.
+    for partial in (index, closed):
+        partial.with_suffix(partial.suffix + ".tmp").unlink(missing_ok=True)
     lines: list[dict[str, Any]] = []
     if index.exists():
         for line in index.read_text(encoding="utf-8").splitlines(keepends=True):
             if not line.endswith("\n"):
                 break  # a line the crash interrupted vouches for nothing
             lines.append(json.loads(line))
-    size = data.stat().st_size
+    size = data.stat().st_size if data.exists() else 0
     lines = [entry for entry in lines if entry["end"] <= size]
     if not lines:
         for file in _files(path):
@@ -326,13 +399,6 @@ def _recover(path: Path) -> Segment | None:
         _fsync_dir(path.parent)
         return None
 
-    with data.open("r+b") as file:
-        file.truncate(lines[-1]["end"])
-        os.fsync(file.fileno())
-    # The index loses any line that named bytes now cut off, so it matches the file.
-    _write_atomically(
-        index, "".join(json.dumps(entry, separators=(",", ":")) + "\n" for entry in lines)
-    )
     first = lines[0]
     segment = Segment(
         segment_id=_segment_id(path),
@@ -343,25 +409,112 @@ def _recover(path: Path) -> Segment | None:
         fragments=len(lines),
         verified=first["verified"] and all(entry.get("verified", True) for entry in lines),
     )
+    # Before anything on disk changes: a Segment whose span cannot be true is not finished.
+    _check_span(path, segment.time_from, segment.time_to)
+    with data.open("r+b") as file:
+        file.truncate(lines[-1]["end"])
+        os.fsync(file.fileno())
+    # The index loses any line that named bytes now cut off, so it matches the file.
+    _write_atomically(
+        index, "".join(json.dumps(entry, separators=(",", ":")) + "\n" for entry in lines)
+    )
     _mark(segment)
     return segment
 
 
+def _visible(directory: Path) -> bool:
+    return not any(part.startswith(".") for part in directory.parts)
+
+
 def _segment_files(directory: Path) -> list[Path]:
+    """Every Segment's media under `directory`, the quarantine and the notes excepted."""
     if not directory.exists():
         return []
-    return list(directory.rglob("*.mp4"))
+    return [
+        path for path in directory.rglob("*.mp4") if _visible(path.relative_to(directory).parent)
+    ]
 
 
-def recover(directory: Path) -> list[Segment]:
+def _open_markers(directory: Path) -> list[Path]:
+    """The notes of Segments being written: in `directory` itself, as a camera's directory has
+    them, and in each directory beneath it, as the Footage directory's cameras do."""
+    notes: list[Path] = []
+    candidates = [directory]
+    with contextlib.suppress(FileNotFoundError):
+        candidates += sorted(
+            child
+            for child in directory.iterdir()
+            if child.is_dir() and not child.name.startswith(".")
+        )
+    for candidate in candidates:
+        with contextlib.suppress(FileNotFoundError):
+            notes += sorted((candidate / _OPEN).iterdir())
+    return notes
+
+
+def _segment_of(marker: Path) -> Path:
+    """The media a note names, refusing any name that is not a Segment's."""
+    day, _, stem = marker.name.partition("_")
+    if not (_DAY.fullmatch(day) and _STEM.fullmatch(stem)):
+        raise ValueError(f"{marker.name!r} is not the name of a Segment's note")
+    return marker.parent.parent / day / f"{stem}.mp4"
+
+
+def _quarantine(directory: Path, marker: Path, path: Path | None) -> None:
+    """Move what is left of a Segment, and its note, under `directory`'s quarantine."""
+    here = directory / _QUARANTINE
+    moving = [marker] if path is None else [marker, *_files(path)]
+    for source in moving:
+        if not source.exists():
+            continue
+        target = here / source.parent.relative_to(directory) / source.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(source, target)
+    with contextlib.suppress(OSError):
+        _fsync_dir(marker.parent)
+
+
+def recover(
+    directory: Path, *, on_quarantine: Callable[[Path, Exception], None] | None = None
+) -> list[Segment]:
     """Finish every Segment under `directory` that a crash left unfinished, oldest first.
 
     Only while nothing is writing under `directory`: a Segment being written is unfinished too.
+    Each Segment is recovered by itself: one that cannot be (a damaged index, a name that is not
+    a Segment's, a file that cannot be read) is logged as an ERROR naming it, told to
+    `on_quarantine`, and moved to `<directory>/.quarantine/`, where no later start meets it, and
+    never stops the others, or any camera from recording.
     """
     found: list[Segment] = []
-    for path in _segment_files(directory):
-        if not path.with_suffix(".closed").exists() and (segment := _recover(path)) is not None:
-            found.append(segment)
+    for marker in _open_markers(directory):
+        path: Path | None = None
+        try:
+            path = _segment_of(marker)
+            if not path.with_suffix(".closed").exists() and (segment := _recover(path)):
+                found.append(segment)
+            marker.unlink(missing_ok=True)
+        except Exception as error:
+            named = marker if path is None else path
+            _log.error(
+                "Segment %s could not be recovered and is moved to the quarantine, where it is "
+                "left as it is: %s: %s",
+                named,
+                type(error).__name__,
+                error,
+                extra={"segment": str(named)},
+            )
+            try:
+                _quarantine(directory, marker, path)
+            except OSError as failure:
+                _log.error(
+                    "Segment %s could not be moved to the quarantine either, and stays where "
+                    "it is (%s); the next start tries again",
+                    named,
+                    failure.strerror or type(failure).__name__,
+                    extra={"segment": str(named)},
+                )
+            if on_quarantine is not None:
+                on_quarantine(named, error)
     return sorted(found, key=lambda segment: segment.time_from)
 
 

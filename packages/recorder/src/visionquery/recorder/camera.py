@@ -156,6 +156,12 @@ class Segmenter:
         self._segment.append(fragment, arrived_at=arrived_at, verified=self._last_verified)
         return rolled
 
+    def abandon(self) -> Segment | None:
+        """Give up on the Segment being written because writing it failed: its files are closed
+        and it is finished `recovered`, from the Fragments it holds, as a start would."""
+        segment, self._segment, self._ends_at = self._segment, None, None
+        return None if segment is None else segment.abandon()
+
     def finish(self, reason: Reason) -> Segment | None:
         """Finish the Segment being written, if any, saying why."""
         segment, self._segment, self._ends_at = self._segment, None, None
@@ -300,6 +306,15 @@ async def _connect_once(
                     _finished(camera, rolled, timebase)
         except MalformedError as error:
             why = f"the stream could not be read: {error}"
+        except Exception:
+            # Writing failed (a full disk, a file gone): the Segment is finished at the last
+            # whole Fragment it holds before the failure goes on to the supervisor, which
+            # records the camera again after a wait.
+            if segmenter is not None:
+                abandoned = await asyncio.to_thread(segmenter.abandon)
+                if abandoned is not None:
+                    _finished(camera, abandoned, timebase)
+            raise
         finally:
             stopper.cancel()
             with contextlib.suppress(asyncio.CancelledError):

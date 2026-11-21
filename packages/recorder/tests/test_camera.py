@@ -13,6 +13,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
+from typing import Any
 
 import pytest
 from prometheus_client import REGISTRY
@@ -22,7 +23,8 @@ from real_mediamtx import READER_USER, MediaMTX
 from visionquery.memory.cameras import Camera
 from visionquery.recorder.camera import Backoff, Timing, clock_stepped, record_camera
 from visionquery.recorder.ffmpeg import Source
-from visionquery.recorder.segment import Segment, recover, segments
+from visionquery.recorder.mp4 import Fragment
+from visionquery.recorder.segment import Segment, SegmentFile, recover, segments
 from visionquery.recorder.timebase import Reading, TimeBase
 
 DOCK = Camera(1, "Dock", "dock", None, datetime(2026, 10, 6, tzinfo=UTC), None)
@@ -286,3 +288,42 @@ def test_a_step_of_the_clock_is_logged_once_and_counted(caplog: pytest.LogCaptur
     assert record.__dict__["camera_id"] == DOCK.id
     after = REGISTRY.get_sample_value("visionquery_recorder_clock_steps_total", {"camera": "1"})
     assert after == before + 1
+
+
+def test_a_segment_whose_writing_fails_is_finished_recovered_and_its_files_closed(
+    dock: MediaMTX, ffmpeg: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The disk fills while a camera is recorded: the Segment ends `recovered` at its last whole
+    Fragment, with no file of it held open and no note that it is being written, before the
+    failure goes on to be retried by whoever supervises the camera."""
+    real = SegmentFile.append
+    appended: list[SegmentFile] = []
+
+    def full(self: SegmentFile, fragment: Fragment, **kwargs: Any) -> None:
+        if len(appended) >= 3:
+            raise OSError(28, "No space left on device")
+        appended.append(self)
+        real(self, fragment, **kwargs)
+
+    monkeypatch.setattr(SegmentFile, "append", full)
+
+    async def run() -> None:
+        stop = asyncio.Event()
+        with dock.publishing(DOCK.path, DOCK.path, PASSWORD):
+            task = asyncio.create_task(
+                record_camera(DOCK, source_of(dock, ffmpeg), tmp_path, TIMING, stop)
+            )
+            try:
+                with pytest.raises(OSError, match="No space left"):
+                    await asyncio.wait_for(task, timeout=30)
+            finally:
+                stop.set()
+
+    asyncio.run(run())
+
+    (found,) = segments(tmp_path)
+    assert (found.reason, found.fragments) == ("recovered", 3)
+    assert all(segment.closed for segment in set(appended))
+    assert not list((tmp_path / ".open").iterdir())
+    assert recover(tmp_path) == []
+    assert frames(ffmpeg, found) > 0

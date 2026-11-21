@@ -159,7 +159,7 @@ def test_a_connection_that_sent_no_fragment_leaves_nothing(tmp_path: Path) -> No
     segmenter = Segmenter(tmp_path, parsed_init(), clocks.timebase(), FIVE_MINUTES, not_before=None)
 
     assert segmenter.finish("stream_ended") is None
-    assert list(tmp_path.rglob("*.*")) == []
+    assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
 
 
 def test_a_rolled_segment_begins_exactly_where_the_one_before_it_ended(tmp_path: Path) -> None:

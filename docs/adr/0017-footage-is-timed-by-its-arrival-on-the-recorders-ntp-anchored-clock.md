@@ -17,6 +17,8 @@ The recorder itself cuts that stream into Segments, at Fragment (keyframe) bound
   Each file's own timeline starts at zero: the only bytes changed from what the camera sent are each Fragment's decode time.
   Only video is kept.
 - **Crashes.** A Fragment is fsynced before the index line that vouches for it, so a crash costs at most the Fragment being written; the next start, before recording, truncates every unfinished Segment to its last indexed Fragment and finishes it `recovered`.
+  Unfinished Segments are found by a note kept for each Segment being written (`<camera>/.open/`), so a start costs what is unfinished and not every Segment ever written, and each is recovered by itself: one that cannot be (a damaged index, say) is logged as an ERROR naming it, counted (`visionquery_recorder_segments_quarantined`) and moved to `<footage>/.quarantine/`, so that it stops no Camera from recording and no later start meets it again.
+  A Segment whose writing fails (a full disk) is finished `recovered` at once, from the Fragments it holds.
   One recorder holds a lock on the Footage directory for as long as it runs.
 
 ## Considered Options

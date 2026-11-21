@@ -13,6 +13,7 @@ __all__ = [
     "CLOCK_VERIFIED",
     "CONNECTIONS",
     "FRAGMENTS",
+    "QUARANTINED",
     "RECEIVING",
     "SEGMENTS",
     "WALL_OFFSET",
@@ -55,4 +56,9 @@ CLOCK_STEPS = Counter(
 WALL_OFFSET = Gauge(
     "visionquery_recorder_clock_wall_offset_seconds",
     "The wall clock less the recorder's timebase, when a Segment last finished.",
+)
+QUARANTINED = Counter(
+    "visionquery_recorder_segments_quarantined",
+    "Segments a start could not recover and moved to the quarantine, by camera id.",
+    ["camera"],
 )

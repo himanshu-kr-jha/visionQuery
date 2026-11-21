@@ -8,9 +8,12 @@ finishes it `recovered`, playable and with the span it really reached.
 """
 
 import json
+import logging
 import subprocess
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -155,7 +158,7 @@ def test_a_segment_closed_with_nothing_in_it_leaves_nothing_behind(tmp_path: Pat
     segment = opened(tmp_path)
 
     assert segment.close("stream_ended") is None
-    assert list(tmp_path.rglob("*.*")) == []
+    assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
 
 
 def test_a_reason_outside_the_closed_set_is_refused(tmp_path: Path) -> None:
@@ -293,7 +296,7 @@ def test_an_unfinished_segment_with_no_whole_fragment_leaves_nothing_behind(
         file.write(fragments(1)[0].data[:30])
 
     assert recover(tmp_path) == []
-    assert list(tmp_path.rglob("*.*")) == []
+    assert [path for path in tmp_path.rglob("*") if path.is_file()] == []
 
 
 def test_recovery_is_written_down_so_a_second_start_finds_the_same_answer(
@@ -450,3 +453,226 @@ def test_a_pin_in_the_future_gives_way_to_the_arrival(tmp_path: Path) -> None:
     done = finished(segment)
 
     assert done.time_from == done.time_to == AT + timedelta(seconds=2)
+
+
+# --- one Segment that cannot be recovered never stops the others ------------------------------
+#
+# A start recovers every unfinished Segment before any camera records, so a Segment that raised
+# there would stop all recording, and `restart: unless-stopped` would raise it again for ever.
+
+
+def unfinished(camera: Path, count: int = 2) -> Path:
+    """A camera's Segment with `count` Fragments written, the recorder killed before finishing."""
+    segment = SegmentFile.open(
+        camera, parsed_init(), window_start=AT, not_before=None, verified=True
+    )
+    for n, frag in enumerate(fragments(count)):
+        segment.append(frag, arrived_at=AT + timedelta(seconds=2 * (n + 1)))
+    return segment.path
+
+
+def damaged_line(path: Path) -> None:
+    index = path.with_suffix(".frags")
+    index.write_text('{"end":50,"arr\0\0\n' + index.read_text())
+
+
+def no_from(path: Path) -> None:
+    index = path.with_suffix(".frags")
+    first, *rest = [json.loads(line) for line in index.read_text().splitlines()]
+    del first["from"]
+    index.write_text("".join(json.dumps(line) + "\n" for line in [first, *rest]))
+
+
+def end_before_begin(path: Path) -> None:
+    index = path.with_suffix(".frags")
+    first, *rest = [json.loads(line) for line in index.read_text().splitlines()]
+    first["from"] = (AT + timedelta(hours=1)).isoformat()
+    index.write_text("".join(json.dumps(line) + "\n" for line in [first, *rest]))
+
+
+def index_not_text(path: Path) -> None:
+    index = path.with_suffix(".frags")
+    index.unlink()
+    index.mkdir()  # reading it fails as an unreadable file does, whoever runs the test
+
+
+def index_not_utf8(path: Path) -> None:
+    path.with_suffix(".frags").write_bytes(b"\xff\xfe{}\n")
+
+
+DAMAGES = [damaged_line, no_from, end_before_begin, index_not_text, index_not_utf8]
+
+
+@pytest.mark.parametrize("damage", DAMAGES)
+def test_a_segment_that_cannot_be_recovered_is_quarantined_beside_one_that_can(
+    tmp_path: Path, damage: Callable[[Path], None], caplog: pytest.LogCaptureFixture
+) -> None:
+    footage = tmp_path / "footage"
+    bad = unfinished(footage / "1")
+    good = unfinished(footage / "2", count=3)
+    damage(bad)
+    told: list[Path] = []
+    caplog.set_level(logging.ERROR, logger="visionquery.recorder")
+
+    found = recover(footage, on_quarantine=lambda path, error: told.append(path))
+
+    assert [(segment.path, segment.fragments) for segment in found] == [(good, 3)]
+    assert told == [bad]
+    # Named, once, as an ERROR; and every file of it is where nothing will meet it again.
+    errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert [str(bad) in record.getMessage() for record in errors] == [True]
+    moved = footage / ".quarantine" / "1" / bad.parent.name
+    assert not list((footage / "1").rglob("*.mp4")), "nothing of it is left where it was written"
+    assert not list((footage / "1" / ".open").iterdir())
+    assert {path.name for path in moved.iterdir()} <= {
+        bad.name,
+        bad.with_suffix(".frags").name,
+        bad.with_suffix(".closed").name,
+    }
+    # The next start does not meet it again, and the good one is finished for good.
+    caplog.clear()
+    assert recover(footage) == []
+    assert caplog.records == []
+    assert [segment.path for segment in segments(footage / "2")] == [good]
+
+
+def test_a_segment_whose_media_is_gone_has_nothing_to_recover_and_stops_nothing(
+    tmp_path: Path,
+) -> None:
+    gone = unfinished(tmp_path / "1")
+    gone.unlink()
+    good = unfinished(tmp_path / "2")
+
+    found = recover(tmp_path)
+
+    assert [segment.path for segment in found] == [good]
+    assert not list((tmp_path / "1").rglob("*.frags")), "its index vouches for nothing"
+    assert not list((tmp_path / "1" / ".open").iterdir())
+    assert recover(tmp_path) == []
+
+
+def test_a_note_that_is_not_a_segments_is_quarantined_without_deleting_anything(
+    tmp_path: Path,
+) -> None:
+    camera = tmp_path / "footage" / "1"
+    (camera / ".open").mkdir(parents=True)
+    (camera / ".open" / "stranger").touch()
+    other = camera / "2026-10-06"
+    other.mkdir()
+    (other / "stranger.mp4").write_bytes(b"not ours")  # a file nobody here wrote
+    good = unfinished(tmp_path / "footage" / "2")
+
+    found = recover(tmp_path / "footage")
+
+    assert [segment.path for segment in found] == [good]
+    assert (tmp_path / "footage" / ".quarantine" / "1" / ".open" / "stranger").exists()
+    assert (other / "stranger.mp4").read_bytes() == b"not ours"
+
+
+def test_a_media_file_that_no_note_names_is_never_touched(tmp_path: Path) -> None:
+    """Only what the recorder noted as its own is recovered, and nothing else is deleted: not
+    an `.mp4` with no index, whatever it is."""
+    day = tmp_path / "1" / "2026-10-06"
+    day.mkdir(parents=True)
+    stray = day / "100000-0123456789abcdef0123456789abcdef.mp4"
+    stray.write_bytes(b"someone's video")
+
+    assert recover(tmp_path) == []
+    assert stray.read_bytes() == b"someone's video"
+
+
+def test_a_segment_that_could_not_be_moved_is_logged_and_does_not_stop_the_start(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    footage = tmp_path / "footage"
+    bad = unfinished(footage / "1")
+    damaged_line(bad)
+    good = unfinished(footage / "2")
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr("visionquery.recorder.segment.shutil.move", refuse)
+    caplog.set_level(logging.ERROR, logger="visionquery.recorder")
+
+    found = recover(footage)
+
+    assert [segment.path for segment in found] == [good]
+    assert any("could not be moved" in record.getMessage() for record in caplog.records)
+    assert bad.exists(), "left as it was, to be tried again"
+
+
+def test_the_start_looks_only_at_the_segments_being_written_not_at_every_one_there_was(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At 64 cameras and 30 days there are half a million Segments: a start touches none of the
+    finished ones."""
+    camera = tmp_path / "1"
+    for day in range(5):
+        for minute in range(5):
+            segment = SegmentFile.open(
+                camera,
+                parsed_init(),
+                window_start=AT + timedelta(days=day, minutes=5 * minute),
+                not_before=None,
+                verified=True,
+            )
+            segment.append(fragments(1)[0], arrived_at=AT + timedelta(days=day, seconds=2))
+            finished(segment)
+    live = unfinished(camera)
+    seen: list[Path] = []
+    real = Path.stat
+
+    def counting(self: Path, *args: Any, **kwargs: Any) -> Any:
+        seen.append(self)
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", counting)
+
+    found = recover(tmp_path)
+
+    assert [segment.path for segment in found] == [live]
+    touched = {path for path in seen if path.suffix in {".mp4", ".closed", ".frags"}}
+    assert touched <= {live, live.with_suffix(".closed"), live.with_suffix(".frags")}
+
+
+def test_a_writing_failure_finishes_the_segment_recovered_and_closes_its_handles(
+    tmp_path: Path,
+) -> None:
+    """The disk filled halfway through a Fragment: the Segment ends `recovered` at the last
+    whole one, and nothing is left open or noted as being written."""
+    segment = opened(tmp_path)
+    first, second = fragments(2)
+    segment.append(first, arrived_at=AT + timedelta(seconds=2))
+    with segment.path.open("ab") as torn:
+        torn.write(second.data[:10])  # the write the disk refused
+
+    done = segment.abandon()
+
+    assert done is not None
+    assert (done.reason, done.fragments) == ("recovered", 1)
+    assert segment.closed
+    assert not list((tmp_path / ".open").iterdir())
+    assert [found.path for found in segments(tmp_path)] == [segment.path]
+    assert recover(tmp_path) == []
+
+
+def test_a_segment_that_cannot_be_finished_after_a_writing_failure_is_left_for_the_next_start(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    segment = opened(tmp_path)
+    segment.append(fragments(1)[0], arrived_at=AT + timedelta(seconds=2))
+
+    def full(*args: object, **kwargs: object) -> None:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("visionquery.recorder.segment._write_atomically", full)
+    caplog.set_level(logging.ERROR, logger="visionquery.recorder")
+
+    assert segment.abandon() is None
+
+    assert any("the next start will find it" in r.getMessage() for r in caplog.records)
+    assert segment.closed
+    monkeypatch.undo()
+    (found,) = recover(tmp_path)
+    assert found.reason == "recovered"

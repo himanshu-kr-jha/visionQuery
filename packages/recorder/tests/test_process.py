@@ -19,6 +19,8 @@ from itertools import pairwise
 from pathlib import Path
 
 import pytest
+from boxes import fragments, parsed_init
+from prometheus_client import REGISTRY
 from publishers import PASSWORD, open_paths
 from pydantic import SecretStr
 from real_mediamtx import READER_USER, MediaMTX
@@ -26,7 +28,7 @@ from visionquery.memory.cameras import CameraRegistry
 from visionquery.memory.connection import connect
 from visionquery.memory.migrate import migrate
 from visionquery.memory.settings import DatabaseSettings
-from visionquery.recorder.segment import segments
+from visionquery.recorder.segment import SegmentFile, segments
 from visionquery.recorder.serve import MediaMTXReader, RecorderSettings, health, run
 from visionquery.recorder.timebase import read_kernel_clock
 
@@ -352,6 +354,52 @@ def test_a_second_recorder_on_the_same_footage_is_refused(
 
     assert "already recording" in str(second.failure)
     assert health(first.heartbeat) == 0
+
+
+@pytest.mark.usefixtures("on_path")
+def test_a_malformed_segment_on_disk_stops_no_camera_from_recording(
+    mediamtx: MediaMTX,
+    migrated: str,
+    registry: CameraRegistry,
+    tmp_path: Path,
+    start: Callable[[RecorderSettings], Running],
+) -> None:
+    """A Segment the last run left damaged is quarantined, with its camera's id counted and its
+    path named, while a good unfinished one beside it is recovered and every camera records. It
+    used to raise at the start, so the process exited, Compose started it again, and nothing was
+    ever recorded until an Operator deleted the file by hand."""
+    footage = tmp_path / "footage"
+    bad = footage / "900" / "2026-10-06" / "100000-0123456789abcdef0123456789abcdef.mp4"
+    bad.parent.mkdir(parents=True)
+    bad.write_bytes(b"\0" * 64)
+    bad.with_suffix(".frags").write_text('{"end":50,"arr\0\0\n')
+    (bad.parent.parent / ".open").mkdir()
+    (bad.parent.parent / ".open" / f"2026-10-06_{bad.stem}").touch()
+    good = SegmentFile.open(
+        footage / "901",
+        parsed_init(),
+        window_start=datetime(2026, 10, 6, 10, tzinfo=UTC),
+        not_before=None,
+        verified=True,
+    )
+    good.append(fragments(1)[0], arrived_at=datetime(2026, 10, 6, 10, 0, 2, tzinfo=UTC))
+    dock = registry.add_pushed("Dock", "dock")
+    open_paths(mediamtx, dock.path)
+    before = REGISTRY.get_sample_value(
+        "visionquery_recorder_segments_quarantined_total", {"camera": "900"}
+    )
+
+    with mediamtx.publishing(dock.path, dock.path, PASSWORD):
+        running = start(settings(migrated, mediamtx, footage, segment_seconds=2))
+        within(SLACK * 2, lambda: bool(segments(footage / str(dock.id))))
+
+    assert running.failure is None
+    assert [segment.reason for segment in segments(footage / "901")] == ["recovered"]
+    assert (footage / ".quarantine" / "900" / "2026-10-06" / bad.name).exists()
+    after = REGISTRY.get_sample_value(
+        "visionquery_recorder_segments_quarantined_total", {"camera": "900"}
+    )
+    assert after == (before or 0) + 1
 
 
 # --- health -----------------------------------------------------------------------------------
