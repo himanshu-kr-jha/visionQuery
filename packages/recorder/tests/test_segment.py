@@ -18,7 +18,7 @@ from typing import Any
 from uuid import UUID
 
 import pytest
-from boxes import HEAD, fragments, parsed_init
+from boxes import HEAD, fragment, fragments, parsed_init
 from visionquery.recorder.mp4 import Fragment, Init, Stream
 from visionquery.recorder.segment import (
     Segment,
@@ -572,10 +572,6 @@ def negative_seconds(path: Path) -> None:
     edited(path, lambda lines: lines[-1].update({"seconds": -1e9}))
 
 
-def zero_seconds(path: Path) -> None:
-    edited(path, lambda lines: lines[0].update({"seconds": 0}))
-
-
 def missing_end(path: Path) -> None:
     edited(path, lambda lines: lines[-1].pop("end"))
 
@@ -617,14 +613,58 @@ def index_not_utf8(path: Path) -> None:
     path.with_suffix(".frags").write_bytes(b"\xff\xfe{}\n")
 
 
+def last_end_past_the_file(path: Path) -> None:
+    edited(path, lambda lines: lines[-1].update({"end": lines[-1]["end"] + 1000}))
+
+
+def last_end_one_short(path: Path) -> None:
+    edited(path, lambda lines: lines[-1].update({"end": lines[-1]["end"] - 1}))
+
+
+def middle_end_one_short(path: Path) -> None:
+    edited(path, lambda lines: lines[1].update({"end": lines[1]["end"] - 1}))
+
+
+def verified_a_string_on_the_first_line(path: Path) -> None:
+    edited(path, lambda lines: lines[0].update({"verified": "no"}))
+
+
+def verified_a_string_on_the_second_line(path: Path) -> None:
+    edited(path, lambda lines: lines[1].update({"verified": "false"}))
+
+
+def verified_true_on_the_second_line(path: Path) -> None:
+    edited(path, lambda lines: lines[1].update({"verified": True}))
+
+
+def stepped_by_a_string(path: Path) -> None:
+    edited(path, lambda lines: lines[0].update({"stepped_by": "x"}))
+
+
+def stepped_by_on_the_second_line(path: Path) -> None:
+    edited(path, lambda lines: lines[1].update({"stepped_by": 1.0}))
+
+
+def window_null(path: Path) -> None:
+    edited(path, lambda lines: lines[0].update({"window": None}))
+
+
 DAMAGES = [
+    last_end_past_the_file,
+    last_end_one_short,
+    middle_end_one_short,
+    verified_a_string_on_the_first_line,
+    verified_a_string_on_the_second_line,
+    verified_true_on_the_second_line,
+    stepped_by_a_string,
+    stepped_by_on_the_second_line,
+    window_null,
     damaged_line,
     no_from,
     end_before_begin,
     ends_out_of_order,
     ends_inside_the_init,
     negative_seconds,
-    zero_seconds,
     missing_end,
     missing_arrived,
     missing_seconds,
@@ -641,7 +681,7 @@ def test_a_segment_that_cannot_be_recovered_is_quarantined_beside_one_that_can(
     tmp_path: Path, damage: Callable[[Path], None], caplog: pytest.LogCaptureFixture
 ) -> None:
     footage = tmp_path / "footage"
-    bad = unfinished(footage / "1")
+    bad = unfinished(footage / "1", count=3)
     good = unfinished(footage / "2", count=3)
     damage(bad)
     media = bad.read_bytes()
@@ -670,6 +710,54 @@ def test_a_segment_that_cannot_be_recovered_is_quarantined_beside_one_that_can(
     assert recover(footage) == []
     assert caplog.records == []
     assert [segment.path for segment in segments(footage / "2")] == [good]
+
+
+def zero_length_last_fragment(directory: Path) -> SegmentFile:
+    """Two two-second Fragments and a third of one sample that states a zero duration, all
+    read by the real `Stream` and written by the real `SegmentFile.append`, left open."""
+    stream = Stream()
+    stream.feed(HEAD)
+    segment = opened(directory)
+    for n, durations in enumerate([[512] * 50, [512] * 50, [0]]):
+        (item,) = stream.feed(fragment(1, n * 25600, durations))
+        assert isinstance(item, Fragment)
+        segment.append(item, arrived_at=AT + timedelta(seconds=2 * (n + 1)))
+    return segment
+
+
+def test_a_segment_whose_last_fragment_states_a_zero_duration_is_recovered(
+    tmp_path: Path,
+) -> None:
+    segment = zero_length_last_fragment(tmp_path)
+    assert (
+        json.loads(segment.path.with_suffix(".frags").read_text().splitlines()[-1])["seconds"] == 0
+    )
+
+    (found,) = recover(tmp_path)
+
+    assert (found.reason, found.fragments) == ("recovered", 3)
+    assert not (tmp_path / ".quarantine").exists()
+
+
+def test_a_segment_abandoned_with_a_zero_length_fragment_is_finished_recovered(
+    tmp_path: Path,
+) -> None:
+    done = zero_length_last_fragment(tmp_path).abandon()
+
+    assert done is not None
+    assert (done.reason, done.fragments) == ("recovered", 3)
+
+
+def test_a_line_the_writer_cannot_have_written_is_refused_before_it_is_written(
+    tmp_path: Path,
+) -> None:
+    segment = opened(tmp_path)
+    (frag,) = fragments(1)
+
+    with pytest.raises(ValueError, match="seconds"):
+        segment.append(replace(frag, duration=-1), arrived_at=AT + timedelta(seconds=2))
+
+    assert segment.path.with_suffix(".frags").read_text() == ""
 
 
 def test_a_recovered_segment_that_overran_its_window_is_finished_not_verified(

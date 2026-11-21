@@ -43,6 +43,7 @@ Adapted from phyOS's Photon recorder (`adapters.photon.segment`), without signin
 import contextlib
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -328,6 +329,8 @@ class SegmentFile:
                 line["stepped_by"] = self._stepped_by
         elif not verified:
             line["verified"] = False
+        # The one check `recover` also runs: a line it would refuse is never written.
+        _check_line(line, first=self._time_from is None, number=self._fragments + 1)
         self._lines.write(json.dumps(line, separators=(",", ":")) + "\n")
         self._lines.flush()
         os.fsync(self._lines.fileno())
@@ -463,39 +466,41 @@ def _timed(entry: dict[str, Any], key: str) -> datetime:
     return _instant(entry[key])
 
 
-def _validate(lines: list[dict[str, Any]], *, init_size: int) -> None:
-    """Raise ValueError unless the index says only what the writer could have written.
+def _finite(value: object) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
 
-    A writer fsyncs each whole line, in order, so its `end`s grow past the init, its arrivals
-    never go back, every Fragment lasts, and the first line begins no later than it arrives,
-    with a window that is a start before an end. An index that says otherwise is damaged, and
-    nothing it says can be trusted: `recover` quarantines it, with the media untouched, rather
-    than cut the file at an `end` or publish a span it names."""
-    previous_end = init_size
-    previous_arrived: datetime | None = None
-    for number, entry in enumerate(lines, 1):
-        end, seconds = entry["end"], entry["seconds"]
-        if not isinstance(end, int) or isinstance(end, bool) or end <= previous_end:
-            raise ValueError(f"line {number}: end {end!r} does not follow {previous_end}")
-        if (
-            not isinstance(seconds, int | float)
-            or isinstance(seconds, bool)
-            or not seconds > 0
-            or seconds == float("inf")
-        ):
-            raise ValueError(f"line {number}: a Fragment of {seconds!r} seconds")
-        arrived = _timed(entry, "arrived")
-        if previous_arrived is not None and arrived < previous_arrived:
-            raise ValueError(f"line {number}: arrived {arrived} before {previous_arrived}")
-        previous_end, previous_arrived = end, arrived
-    if not lines:
-        return
-    first = lines[0]
-    begins = _timed(first, "from")
-    if begins > _timed(first, "arrived"):
-        raise ValueError(f"the Segment begins ({begins}) after its first Fragment arrived")
-    window: object = first.get("window")
-    if window is not None:
+
+def _check_line(entry: dict[str, Any], *, first: bool, number: int) -> None:
+    """Raise ValueError unless `entry` is an index line the writer could have written.
+
+    The one check of a line, run by `SegmentFile.append` before it writes the line and by
+    `_validate` on every line `recover` reads, so recovery cannot refuse what the writer wrote.
+    `seconds` may be zero (a Fragment can state no duration) but never negative or not finite.
+    Only the first line carries `from`, `window` and `stepped_by`, and `verified` is a bool
+    there and only ever `false` after it."""
+    end, seconds = entry["end"], entry["seconds"]
+    if not isinstance(end, int) or isinstance(end, bool):
+        raise ValueError(f"line {number}: end {end!r} is not a whole number")
+    if not _finite(seconds) or seconds < 0:
+        raise ValueError(f"line {number}: a Fragment of {seconds!r} seconds")
+    arrived = _timed(entry, "arrived")
+    if first:
+        verified = entry.get("verified")
+        if not isinstance(verified, bool):
+            raise ValueError(f"line {number}: verified {verified!r} is not a bool")
+        begins = _timed(entry, "from")
+        if begins > arrived:
+            raise ValueError(f"the Segment begins ({begins}) after its first Fragment arrived")
+        if "stepped_by" in entry and not _finite(entry["stepped_by"]):
+            raise ValueError(f"line {number}: stepped_by {entry['stepped_by']!r} is not a number")
+    else:
+        if "verified" in entry and entry["verified"] is not False:
+            raise ValueError(f"line {number}: verified {entry['verified']!r} after the first line")
+        for key in ("from", "window", "stepped_by"):
+            if key in entry:
+                raise ValueError(f"line {number}: {key} belongs to the first line")
+    if "window" in entry:
+        window: object = entry["window"]
         if not isinstance(window, list) or len(cast("list[object]", window)) != 2:
             raise ValueError(f"window {window!r} is not a start and an end")
         pair = cast("list[object]", window)
@@ -504,6 +509,62 @@ def _validate(lines: list[dict[str, Any]], *, init_size: int) -> None:
         # before its first Fragment puts the Segment outside its window and it is still whole.
         if not start < end_of_window:
             raise ValueError(f"window {start} to {end_of_window} ends before it begins")
+
+
+def _pair_ends(data: Path, init_size: int) -> list[int]:
+    """Where each whole `moof` and `mdat` pair of the media ends, from the init on.
+
+    A Fragment is exactly such a pair, so these are the only places an index may say a
+    Fragment ends. The walk stops at the first box that is not the next of the pair, or that
+    the file does not hold whole: what follows is a tail a crash tore."""
+    ends: list[int] = []
+    size_on_disk = data.stat().st_size
+    at, moof_seen = init_size, False
+    with data.open("rb") as file:
+        while at + 8 <= size_on_disk:
+            file.seek(at)
+            size, kind = struct.unpack(">I4s", file.read(8))
+            header = 8
+            if size == 1:
+                (size,) = struct.unpack(">Q", file.read(8).ljust(8, b"\0"))
+                header = 16
+            if size < header or at + size > size_on_disk:
+                break
+            if kind == b"moof" and not moof_seen:
+                moof_seen = True
+            elif kind == b"mdat" and moof_seen:
+                moof_seen = False
+                ends.append(at + size)
+            else:
+                break
+            at += size
+    return ends
+
+
+def _validate(lines: list[dict[str, Any]], *, data: Path, init_size: int) -> None:
+    """Raise ValueError unless the index says only what the writer could have written.
+
+    A writer fsyncs a Fragment's bytes and then its line, in order, so each line's `end` is the
+    end of the next whole `moof` and `mdat` pair of the media, its arrivals never go back, and
+    each line passes `_check_line`. An index that says otherwise is damaged, and nothing it says
+    can be trusted: `recover` quarantines it, with the media untouched, rather than cut the
+    file at an `end` or publish a span it names. Only bytes after the last `end` named are a
+    torn tail that `recover` may cut."""
+    ends = _pair_ends(data, init_size) if lines else []
+    if len(lines) > len(ends):
+        raise ValueError(f"{len(lines)} lines vouch for {len(ends)} whole Fragments")
+    previous_arrived: datetime | None = None
+    for number, entry in enumerate(lines, 1):
+        _check_line(entry, first=number == 1, number=number)
+        if entry["end"] != ends[number - 1]:
+            raise ValueError(
+                f"line {number}: end {entry['end']} is not where Fragment {number} ends "
+                f"({ends[number - 1]})"
+            )
+        arrived = _timed(entry, "arrived")
+        if previous_arrived is not None and arrived < previous_arrived:
+            raise ValueError(f"line {number}: arrived {arrived} before {previous_arrived}")
+        previous_arrived = arrived
 
 
 def _recover(path: Path) -> Segment | None:
@@ -518,9 +579,9 @@ def _recover(path: Path) -> Segment | None:
             if not line.endswith("\n"):
                 break  # a line the crash interrupted vouches for nothing
             lines.append(json.loads(line))
-    size = data.stat().st_size if data.exists() else 0
-    _validate(lines, init_size=_init_size(data) if size else 0)
-    lines = [entry for entry in lines if entry["end"] <= size]
+    if not data.exists() or data.stat().st_size == 0:
+        lines = []  # no media: there is nothing a line could vouch for
+    _validate(lines, data=data, init_size=_init_size(data) if lines else 0)
     if not lines:
         for file in _files(path):
             file.unlink(missing_ok=True)
