@@ -22,14 +22,14 @@ import sys
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
-# The markers: the co-author and session trailers (a line that starts with the key and a colon,
-# after any indent, quote, list or emphasis mark, the key written with spaces or hyphens), the
-# hyphenated session marker anywhere, a session URL, the agent's no-reply address, and the
-# generated-by footer, matched across whitespace, hyphens, line breaks and markdown emphasis or
-# link brackets (`Generated with [**Claude Code**](...)`). The trailers' words in a sentence
-# ("co-authored by two people", "the Claude session"), the words "Claude Code" on their own,
-# and role names are ordinary prose and pass.
-_LINE_START = r"^[ \t>*_`#-]*"
+# The markers: the co-author and session trailers (the key, written with spaces or hyphens, as
+# the first word of a line and followed by its colon, whatever indent, quote, list or emphasis
+# mark comes before it), the hyphenated session marker anywhere, a session URL, the agent's
+# no-reply address, and the generated-by footer, matched across whitespace, hyphens, line breaks
+# and markdown emphasis or link brackets (`Generated with [**Claude Code**](...)`). The
+# trailers' words in a sentence ("co-authored by two people", "the Claude session"), the words
+# "Claude Code" on their own, and role names are ordinary prose and pass.
+_LINE_START = r"^[^a-z\n]*"
 _KEY_END = r"[ \t*_`]*:"
 FORBIDDEN = re.compile(
     rf"{_LINE_START}co[ \t-]*authored[ \t-]*by{_KEY_END}"
