@@ -5,6 +5,7 @@ apart: a target added to `make check` fails here until a job runs it. These test
 workflow; that it passes is shown by its runs on GitHub.
 """
 
+import json
 import re
 import subprocess
 from collections.abc import Iterator
@@ -82,6 +83,10 @@ def test_it_runs_on_prs_and_pushes_to_develop_and_main() -> None:
 
 def test_the_token_can_only_read() -> None:
     assert _workflow()["permissions"] == {"contents": "read"}
+    # The commits job alone reads the PR (its live title, body and base), and only reads it.
+    assert _jobs()["commits"]["permissions"] == {"contents": "read", "pull-requests": "read"}
+    for name, job in _jobs().items():
+        assert name == "commits" or "permissions" not in job, name
 
 
 def test_every_action_is_pinned_to_a_commit_with_its_version_named() -> None:
@@ -180,9 +185,39 @@ def test_the_commits_job_checks_attribution_and_the_title_of_a_pr() -> None:
     assert "scripts/check_attribution.py --commits" in runs
     assert "--env PR_TITLE --env PR_BODY" in runs
     assert "scripts/check_commit_message.py --env PR_TITLE" in runs
-    environment = {k: v for step in job["steps"] for k, v in step.get("env", {}).items()}
-    assert environment["PR_TITLE"] == "${{ github.event.pull_request.title }}"
-    assert environment["PR_BODY"] == "${{ github.event.pull_request.body }}"
+
+
+#: What an event's payload holds of a PR, frozen when the event was sent.
+STALE_PAYLOAD = re.compile(r"github\.event\.pull_request\.(title|body|base\b|head)")
+
+
+def test_the_commits_job_reads_the_pr_as_it_is_now_not_as_its_event_was() -> None:
+    # `gh run rerun` and a late finisher reuse an old event's payload: a check computed from its
+    # title and body could be green for text that has since been changed to carry attribution,
+    # and be the latest `commits` result for the head. The job reads the PR when it runs.
+    for path in (WORKFLOW, EDITED):
+        job = _yaml(path)["jobs"]["commits"]
+        assert not STALE_PAYLOAD.search(json.dumps(job)), path.name
+        reads = [s for s in job["steps"] if "gh api" in s.get("run", "")]
+        assert len(reads) == 1, path.name
+        (read,) = reads
+        assert "pulls/$PR_NUMBER" in read["run"], path.name
+        assert read["env"]["GH_TOKEN"] == "${{ github.token }}", path.name
+        assert read["env"]["REPO"] == "${{ github.repository }}", path.name
+        assert read["env"]["PR_NUMBER"] == "${{ github.event.pull_request.number }}", path.name
+        for field in ("title", "body", "base.sha", "head.sha"):
+            assert f".{field}" in read["run"], (path.name, field)
+
+
+def test_a_changed_base_fails_the_commits_job() -> None:
+    # Edits re-run only `commits`, so a PR moved to another base would keep its other results,
+    # merged against the old base. The step is in both copies of the job (they must stay equal)
+    # and does something only when the event says the base changed, which only an edit says.
+    for path in (WORKFLOW, EDITED):
+        steps = _yaml(path)["jobs"]["commits"]["steps"]
+        (step,) = (s for s in steps if s.get("if") == "github.event.changes.base")
+        assert "exit 1" in step["run"], path.name
+        assert "close and reopen" in step["run"], path.name
 
 
 def test_the_commits_job_checks_something_on_every_event_that_triggers_it() -> None:
@@ -250,3 +285,15 @@ def test_no_ci_job_is_skipped_by_a_condition() -> None:
     # edit that way would let an edit turn a red check green. Edits get a workflow of their own.
     for name, job in _jobs().items():
         assert "if" not in job, name
+
+
+def test_no_workflow_reports_a_required_check_but_ci_and_the_edited_commits_job() -> None:
+    # A same-named job elsewhere (a `pull_request_target`, `workflow_run` or `push` workflow with
+    # a job `lint` or `stack`) would add another check run of that name for the head, and the
+    # rulesets cannot tell workflows apart. The edited run's `commits` is the one intended.
+    required = set(_jobs())
+    for name, workflow in _all_workflows().items():
+        if name == WORKFLOW.name:
+            continue
+        clashes = required & set(workflow["jobs"])
+        assert clashes <= ({"commits"} if name == EDITED.name else set()), (name, clashes)
