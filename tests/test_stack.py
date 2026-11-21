@@ -1241,6 +1241,14 @@ def test_the_recorder_records_every_registered_camera_into_epoch_aligned_segment
     # Footage is written by the recorder's own user, into a volume only it mounts.
     owner = dev_stack.compose("exec", "-T", "recorder", "stat", "-c", "%U", "/footage").stdout
     assert owner.strip() == "visionquery"
+    # ADR 0019: what any user of the host sees with `ps` of the recorder's processes, which
+    # `top` lists as the host does, holds ffmpeg but not the password of the MediaMTX user that
+    # can read every camera.
+    listing = dev_stack.compose("top", "recorder").stdout
+    assert "ffmpeg" in listing, listing
+    password = dev_stack.secret("VISIONQUERY_MEDIAMTX_READ_PASSWORD")
+    assert password not in listing
+    assert quote(password, safe="") not in listing
 
 
 def _publish(stack: Stack, path: str, credentials: str = "") -> subprocess.CompletedProcess[str]:
