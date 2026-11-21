@@ -22,6 +22,11 @@ def test_the_arguments_name_a_file_and_never_the_url(tmp_path: Path) -> None:
         assert "rtsp_transport" not in joined
 
 
+def test_ffmpeg_may_open_nothing_but_what_an_rtsp_source_needs() -> None:
+    """Least privilege: `crypto` is the AES protocol of HLS, which neither RTSP nor RTSPS uses."""
+    assert FFMPEG_PROTOCOLS == "file,rtsp,rtsps,tcp,tls"
+
+
 def test_the_file_holds_the_url_and_the_options_for_ffmpeg_to_read(tmp_path: Path) -> None:
     with private_ffmpeg_input(
         URL, {"rtsp_transport": "tcp", "timeout": "10000000"}, directory=tmp_path

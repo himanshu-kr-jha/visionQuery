@@ -29,7 +29,7 @@ __all__ = ["FFMPEG_PROTOCOLS", "private_ffmpeg_input"]
 
 #: The protocols ffmpeg may use for the listed input: the list itself is a file, and the URL
 #: is RTSP, over TCP, with TLS for `rtsps`. Nothing else, so a list can never lead elsewhere.
-FFMPEG_PROTOCOLS = "file,rtsp,rtsps,tcp,tls,crypto"
+FFMPEG_PROTOCOLS = "file,rtsp,rtsps,tcp,tls"
 
 
 #: What an `option` line's name and value may hold. ffmpeg reads them unquoted (a quoted one is
