@@ -1,5 +1,7 @@
 # One runtime package every process starts with
 
+_Amended by [ADR 0019](0019-no-credentials-in-argv.md): `visionquery.runtime` also holds the helper that hands a camera's URL to ffmpeg without putting its credential in argv, a fourth thing beside the three below._
+
 Every VisionQuery process (recorder, Perception Workers, linker, api, Reasoner) starts through `visionquery.runtime`, which gives it three things and nothing else.
 Settings come only from environment variables under the `VISIONQUERY_` prefix, declared as a pydantic-settings class the service extends with its own fields; a missing or invalid variable stops the process with an error naming the variable.
 Logs are one JSON object per line on stdout, carrying the service name and level, and pass through a scrubber that removes credentials from the message, the exception text, the stack and every structured field before anything is written.

@@ -1,16 +1,16 @@
 """A real MediaMTX, configured as the Deployment configures it, and ffmpeg to publish and read.
 
-The reconciler's tests import it by name (pytest's `pythonpath` holds this directory), and
-conftest.py makes the fixtures. `running_mediamtx()` runs one container of the MediaMTX release
-`docker/mediamtx/Dockerfile` builds on, with the Deployment's own `docker/mediamtx/mediamtx.yml`
-and a generated password for each of its two users (`visionquery-api`, which drives the control
-API, and `visionquery-reader`, which reads), on a Docker network of its own (as
-`mediamtx`). Its API and its RTSP port are published on loopback ports of their own, so the tests
-reach the API as the reconciler does: with credentials, and not from MediaMTX's own loopback, and
-`wait_until_ready` can ask the RTSP port too. Cameras are played by
-ffmpeg containers (the image the fake cameras use) on the same network. The container and the
-network are removed afterwards; every container carries the label `packages/conftest.py` sweeps,
-should a session be killed.
+The reconciler's and the recorder's tests import it by name (pytest's `pythonpath` holds this
+directory), and each one's conftest.py makes the fixtures. `running_mediamtx()` runs one
+container of the MediaMTX release `docker/mediamtx/Dockerfile` builds on, with the Deployment's
+own `docker/mediamtx/mediamtx.yml` and a generated password for each of its two users
+(`visionquery-api`, which drives the control API, and `visionquery-reader`, which reads), on a
+Docker network of its own (as `mediamtx`). Its API and its RTSP port are published on loopback
+ports of their own, so the tests reach them as the reconciler and the recorder do: with
+credentials, and not from MediaMTX's own loopback. Cameras are played by ffmpeg containers (the
+image the fake cameras use) on the same network. The container and the network are removed
+afterwards; every container carries the label `packages/conftest.py` sweeps, should a session be
+killed. `wait_until_ready` asks both the API and the RTSP port.
 """
 
 import base64
@@ -110,6 +110,10 @@ class MediaMTX:
     reader_password: str
     #: The loopback port MediaMTX's RTSP is published on, for a reader on the host.
     rtsp_port: int
+
+    def rtsp_url(self, path: str, user: str | None = None, password: str | None = None) -> str:
+        """`path`'s RTSP URL as a reader on the host reaches it."""
+        return f"rtsp://{_credentials(user, password)}127.0.0.1:{self.rtsp_port}/{path}"
 
     def restart(self) -> None:
         """Restart MediaMTX, which forgets everything set through its API."""
@@ -216,10 +220,27 @@ class MediaMTX:
         only when MediaMTX accepted it."""
         return _docker(*self._publisher(path, user, password, seconds), timeout=60)
 
+    def publish_file(
+        self, path: str, user: str, password: str, clip: Path
+    ) -> subprocess.CompletedProcess[str]:
+        """Publish `clip` once to `path` in real time, copied, as a camera would send it; ffmpeg
+        exits 0 only when MediaMTX accepted all of it."""
+        url = f"rtsp://{_credentials(user, password)}{RTSP}/{path}"
+        return _docker(
+            "run", "--rm", "--network", self.network, "--label", LABEL,
+            "--volume", f"{clip.resolve()}:/clip{clip.suffix}:ro",
+            FFMPEG_IMAGE, "-v", "error", "-re", "-i", f"/clip{clip.suffix}",
+            "-c", "copy", "-f", "rtsp", "-rtsp_transport", "tcp", url,
+            timeout=600,
+        )  # fmt: skip
+
     @contextmanager
-    def publishing(self, path: str, user: str, password: str) -> Generator[None]:
-        """A camera publishing to `path` until the block ends; it fails the test if refused."""
-        name = f"vq-test-publisher-{uuid.uuid4().hex[:12]}"
+    def publishing(
+        self, path: str, user: str, password: str, *, name: str | None = None
+    ) -> Generator[None]:
+        """A camera publishing to `path` until the block ends; it fails the test if refused.
+        `name` is its container's, for a test that pauses it (a camera gone silent)."""
+        name = name or f"vq-test-publisher-{uuid.uuid4().hex[:12]}"
         command = self._publisher(path, user, password, 120, name=name, detach=True)
         assert _docker(*command).returncode == 0
         try:

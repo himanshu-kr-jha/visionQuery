@@ -15,13 +15,13 @@ One of:
 - a failing CI run on a branch;
 - a bug issue number (then cut `fix/<n>-<slug>` from `develop`; you are then the builder, see below).
 
-Read `CLAUDE.md`, the issue the branch belongs to (`gh issue view <n>`), and `CONTEXT.md` terms relevant to the change.
+Read `CLAUDE.md`, the issue the branch belongs to (`gh api repos/{owner}/{repo}/issues/<n>`, and the PR's comments with `gh api --paginate .../issues/<PR>/comments`, since `gh issue view` and `gh pr view` can fail with a Projects (classic) deprecation error), and `CONTEXT.md` terms relevant to the change.
 
 Work in your own worktree when another agent uses the main checkout.
 If the branch is already checked out in another worktree, work on a detached checkout of `origin/<branch>` and push with `git push origin HEAD:<branch>`.
 When asked to bring a branch built on a parent PR onto develop after the parent merged, merge `origin/develop` into it (`chore(repo): merge develop into <branch>`), resolve any conflict keeping both sides' intent, run `make check`, push, and mark the PR ready (`gh pr ready <n>`).
 The same applies to any PR that has fallen behind `develop`.
-Push the merge commit alone; if `make check` then fails, report it rather than adding a fix to the same push, and the tech lead sends the fix as its own hand-back.
+Push the merge commit alone, and mark the PR ready, even when `make check` then fails: add no fix to that push, name the failing checks in your hand-back, and the tech lead sends the fix as a CI-fix hand-back of its own, before anyone judges the head.
 Your hand-back for an update from develop says "clean", or names each file whose conflict you resolved.
 
 ## Fixing
@@ -52,6 +52,7 @@ Your hand-back for an update from develop says "clean", or names each file whose
 ## Hand back
 
 Post this hand-back as a comment on the PR (`gh pr comment <n> --body-file <file>`), without agent attribution, and end your run with the same text.
+Finish or stop anything you started in the background (a flake loop, a stack) first, so that nothing of yours keeps running after the hand-back.
 Start it by naming what it answers: `tester` findings, `pr-reviewer` findings, a CI failure, an update from develop, or a bug issue's build, because only the first two count as fix rounds.
 For each finding you were given: fixed (with the test that proves it), or not fixed (with why).
 For each fixed finding, say how the class is closed, or why it has no other members.

@@ -1,3 +1,4 @@
+<!-- One `Closes #<n>` line per issue this PR closes. -->
 Closes #
 
 ## What changes for the product
@@ -19,5 +20,5 @@ Closes #
 - [ ] Names follow `CONTEXT.md`; new domain terms added there
 - [ ] No ADR contradicted, or a new ADR supersedes it
 - [ ] README setup and `CLAUDE.md` Commands updated if setup, services, env vars or commands changed
-- [ ] `tester` verdict "ready" on the final head (not needed for a docs-only or config-only change)
-- [ ] `pr-reviewer` verdict "ready to merge", with all blocking findings addressed
+- [ ] `tester` verdict "ready" on the final head, or carried over to it by a clean develop merge (not needed for a docs-only or config-only change)
+- [ ] `pr-reviewer` verdict "ready to merge" on the final head, or carried over to it by a clean develop merge, with all blocking findings addressed

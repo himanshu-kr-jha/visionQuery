@@ -35,7 +35,7 @@ GRAFANA_DATASOURCES = ROOT / "docker" / "grafana" / "provisioning" / "datasource
 
 PROFILES = ("dev", "gpu", "observability")
 #: What `docker compose up` starts with no profile, on a machine without a GPU.
-DEFAULT_SERVICES = {"postgres", "migrate", "mediamtx", "reconciler", "api"}
+DEFAULT_SERVICES = {"postgres", "migrate", "mediamtx", "reconciler", "recorder", "api"}
 #: What each profile adds.
 PROFILE_SERVICES: dict[str, set[str]] = {
     "dev": {"fake-cameras", "register-fake-cameras"},
@@ -806,18 +806,20 @@ def test_only_the_reconciler_and_mediamtx_are_given_the_api_password() -> None:
         }
         for service, definition in _services(config).items()
     }
-    # MediaMTX checks it; the reconciler presents it; nothing else has it, in any profile.
+    # MediaMTX checks it; the reconciler presents it; nothing else has it, in any profile (the
+    # recorder reads, so it has the readers' password and never this one).
     assert {s: names for s, names in holders.items() if names} == {
         "mediamtx": {"MTX_AUTHINTERNALUSERS_3_PASS"},
         "reconciler": {"VISIONQUERY_MEDIAMTX__PASSWORD"},
     }
-    # The readers' password is the reconciler's too (it writes the user back), and MediaMTX's.
+    # The readers' password is the reconciler's too (it writes the user back), MediaMTX's, and the
+    # recorder's, which reads with it.
     readers = {
         service
         for service, definition in _services(config).items()
         if any("the-read" in value for value in definition.get("environment", {}).values())
     }
-    assert readers == {"mediamtx", "reconciler"}
+    assert readers == {"mediamtx", "reconciler", "recorder"}
 
 
 def test_the_reconciler_drives_mediamtx_as_the_api_user_once_both_are_up() -> None:
@@ -995,3 +997,52 @@ def test_the_default_cameras_loop_the_fetched_samples() -> None:
 def test_make_fetch_samples_runs_the_script_with_uv() -> None:
     (command,) = [c for c in _make_dry_run("fetch-samples") if "fetch_samples" in c]
     assert command == "uv run scripts/fetch_samples.py"
+
+
+def test_the_recorder_reads_mediamtx_as_the_reader_into_a_footage_volume_of_its_own() -> None:
+    config = _config(
+        env={
+            "VISIONQUERY_MEDIAMTX_API_PASSWORD": "the-api-password",
+            "VISIONQUERY_MEDIAMTX_READ_PASSWORD": "chosen-read",
+            "VISIONQUERY_SEGMENT_SECONDS": "60",
+        }
+    )
+    recorder = _services(config)["recorder"]
+    assert recorder["command"] == ["visionquery-recorder"]
+    environment = recorder["environment"]
+    assert environment["VISIONQUERY_MEDIAMTX__RTSP_URL"] == "rtsp://mediamtx:8554"
+    # The readers' password, never the API user's: a reader must not be able to drive the API.
+    assert environment["VISIONQUERY_MEDIAMTX__PASSWORD"] == "chosen-read"
+    assert "VISIONQUERY_MEDIAMTX__READER_PASSWORD" not in environment
+    assert not [v for v in environment.values() if "the-api" in str(v)]
+    assert "VISIONQUERY_MEDIAMTX__USER" not in environment
+    assert environment["VISIONQUERY_SEGMENT_SECONDS"] == "60"
+    assert _example()["VISIONQUERY_SEGMENT_SECONDS"] == "300"
+    assert environment["VISIONQUERY_FOOTAGE_DIR"] == "/footage"
+    (mount,) = recorder["volumes"]
+    assert (mount["type"], mount["source"], mount["target"]) == ("volume", "footage", "/footage")
+    assert not mount.get("read_only")
+    # Footage is Visual Data (ADR 0002): no other service mounts it, and nothing is published.
+    mounting = [
+        name
+        for name, service in _services(config).items()
+        if any(m.get("source") == "footage" for m in service.get("volumes", []))
+    ]
+    assert mounting == ["recorder"]
+    assert "ports" not in recorder
+    assert recorder["depends_on"]["mediamtx"]["condition"] == "service_healthy"
+    assert recorder["healthcheck"]["test"] == ["CMD", "visionquery-recorder", "health"]
+
+
+def test_the_image_ships_the_ffmpeg_the_fake_cameras_run_and_a_footage_directory() -> None:
+    """One ffmpeg, pinned once in each Dockerfile, so the recorder's tests (which take it from
+    the root Dockerfile) and the fake cameras exercise the same build."""
+    stage = re.compile(r"^FROM (\S+) AS ffmpeg$", re.M)
+    dockerfile = (ROOT / "Dockerfile").read_text()
+    fake_cameras = (ROOT / "docker" / "fake-cameras" / "Dockerfile").read_text()
+    (ours,) = stage.findall(dockerfile)
+    assert stage.findall(fake_cameras) == [ours]
+    runtime = dockerfile[dockerfile.index("AS runtime") :]
+    assert "COPY --from=ffmpeg /ffmpeg /usr/local/bin/ffmpeg" in runtime
+    # A named volume takes the ownership of the directory it is first mounted on.
+    assert re.search(r"mkdir /footage\s*\\?\s*&& chown visionquery:visionquery /footage", runtime)

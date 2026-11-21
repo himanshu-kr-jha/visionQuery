@@ -1,0 +1,171 @@
+"""The recorder's clock: NTP's reading, carried forward by the monotonic clock.
+
+The wall clock can be stepped under a running process, by NTP or by whoever holds the machine,
+so a Segment's times are the time source's reading taken when the Segment opens, carried
+forward by a clock nobody can step. Each Segment says whether that reading was NTP's.
+"""
+
+import sys
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from clocks import T0, Clocks
+from visionquery.recorder.timebase import Reading, read_kernel_clock
+
+
+def test_time_is_the_anchor_carried_forward_by_the_monotonic_clock() -> None:
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    timebase.anchor()
+
+    clocks.tick(90)
+
+    assert timebase.now() == datetime.fromtimestamp(T0 + 90, UTC)
+    assert timebase.now().tzinfo is UTC
+
+
+def test_a_wall_clock_stepped_under_a_running_segment_moves_nothing() -> None:
+    """Somebody sets the clock an hour forward mid-Segment; the Segment's times do not jump."""
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    timebase.anchor()
+
+    clocks.tick(10)
+    clocks.wall += 3600
+
+    assert timebase.now() == datetime.fromtimestamp(T0 + 10, UTC)
+
+
+def test_the_wall_clocks_offset_is_stated() -> None:
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    timebase.anchor()
+
+    clocks.tick(10)
+    clocks.wall += 2.5
+
+    state = timebase.state()
+    assert state.source == "ntp"
+    assert state.verified
+    assert state.wall_offset_seconds == pytest.approx(2.5)
+    assert state.est_error_us == 250
+
+
+def test_each_anchor_takes_a_fresh_reading_while_ntp_is_synchronised() -> None:
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    timebase.anchor()
+    clocks.tick(10)
+    clocks.wall += 2.0  # NTP stepped the wall clock to the truth
+
+    timebase.anchor()
+
+    assert timebase.now() == datetime.fromtimestamp(T0 + 12, UTC)
+    assert timebase.state().wall_offset_seconds == pytest.approx(0.0)
+
+
+def test_a_source_that_loses_sync_keeps_the_last_good_anchor() -> None:
+    """NTP unreachable for a while: the last reading carried forward beats the bare wall."""
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    timebase.anchor()
+    clocks.tick(600)
+    clocks.wall += 7.0
+    clocks.reading = Reading(source="ntp", synchronised=False)
+
+    timebase.anchor()
+
+    assert timebase.now() == datetime.fromtimestamp(T0 + 600, UTC)
+    state = timebase.state()
+    assert state.verified
+    assert state.anchored_seconds_ago == pytest.approx(600.0)
+
+
+def test_with_no_good_reading_ever_the_wall_clock_is_used_and_said_to_be_unverified() -> None:
+    """A wrong time is worse than none only when it looks like a right one."""
+    clocks = Clocks(synchronised=False)
+    timebase = clocks.timebase()
+
+    timebase.anchor()
+    clocks.tick(5)
+
+    assert timebase.now() == datetime.fromtimestamp(T0 + 5, UTC)
+    state = timebase.state()
+    assert state.source == "wall"
+    assert not state.verified
+
+
+def test_now_before_any_anchor_takes_one() -> None:
+    clocks = Clocks()
+
+    assert clocks.timebase().now() == datetime.fromtimestamp(T0, UTC)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="adjtimex is Linux's")
+def test_the_kernel_says_whether_ntp_disciplines_its_clock() -> None:
+    reading = read_kernel_clock()
+
+    assert reading.source == "ntp"
+    assert isinstance(reading.synchronised, bool)
+    assert reading.max_error_us is not None
+    assert reading.max_error_us >= 0
+
+
+def test_an_anchor_says_how_far_it_moved_the_time() -> None:
+    """An arrival measured just before a Segment opens is put on the new anchor by this much."""
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    timebase.anchor()
+    clocks.tick(30)
+    clocks.wall += 0.25  # NTP slewed the wall clock meanwhile
+
+    assert timebase.anchor() == timedelta(seconds=0.25)
+    assert timebase.anchor() == timedelta(0)
+
+
+def test_the_first_anchor_moves_nothing() -> None:
+    assert Clocks().timebase().anchor() == timedelta(0)
+
+
+def test_a_carried_reading_stops_counting_as_verified_after_a_while() -> None:
+    """A host that lost NTP a month ago must not go on writing verified Segments."""
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    timebase.anchor()
+    clocks.reading = Reading(source="ntp", synchronised=False)
+
+    clocks.tick(1800)
+    assert timebase.verified
+    clocks.tick(2 * 3600)
+
+    assert not timebase.verified
+    assert not timebase.state().verified
+    # It is still the best time there is: the monotonic clock carries it, not the wall.
+    clocks.wall += 99
+    assert timebase.now() == datetime.fromtimestamp(T0 + 1800 + 2 * 3600, UTC)
+
+
+def test_a_fresh_synchronised_reading_makes_it_verified_again() -> None:
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    timebase.anchor()
+    clocks.reading = Reading(source="ntp", synchronised=False)
+    clocks.tick(3 * 3600)
+    assert not timebase.verified
+
+    clocks.reading = Reading(source="ntp", synchronised=True)
+    timebase.anchor()
+
+    assert timebase.verified
+
+
+def test_a_segment_lasting_its_longest_is_verified_throughout_while_ntp_is_there() -> None:
+    """A one-hour Segment opens on a reading and its last Fragment arrives an hour later: still
+    verified."""
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    timebase.anchor()
+
+    clocks.tick(3600 + 5)
+
+    assert timebase.verified
