@@ -41,7 +41,7 @@ Always verify in a detached scratch worktree of the PR head, never in the checke
 4. Read the builder's list of design concerns in its hand-back (state it did not make, secrets, privilege, the dependency's contract, partial failure, signals, concurrency).
    Attack each one that applies end to end, and the ones the builder did not list.
    When you find a defect, try the other variants of it too, and report every one that fails.
-   When the change affects runtime behaviour and the stack exists, do this by exercising the feature end to end as an Operator would, on the separate test stack, started under exactly the Compose project name the tech lead gave you (`vq-tester-pr<n>`, `docker compose -p <name>`) and taken down with `-v` at the end: the API, the UI, the fake cameras.
+   When the change affects runtime behaviour and the stack exists, do this by exercising the feature end to end as an Operator would, on the separate test stack, started under exactly the Compose project name the tech lead gave you (`vq-tester-pr<n>-<short head>`, the same key as your scratch path, `docker compose -p <name>`) and taken down with `-v` at the end: the API, the UI, the fake cameras.
    Otherwise report end-to-end use as "not applicable" with the reason, and attack the concerns through the tests and the code.
    Look for what the tests did not think of: empty inputs, boundaries, restarts mid-operation, two things at once, a camera that disappears, clock edges such as midnight and segment boundaries.
 5. Be picky about the UI if it changed: layout, alignment, states (loading, empty, error), and anything that looks off even if unrelated.
