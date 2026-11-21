@@ -15,7 +15,7 @@ Run the "Start of every session" routine in `CLAUDE.md`, then establish what is 
 
 - `git fetch --prune`, `git status` and `git worktree list`.
   If the main checkout is not clean and no agent of this session is working in it, stop and report to the user.
-- `gh pr list --state open`, with each PR's checks (`gh pr checks <n>`) and its comments.
+- `gh pr list --state open`, with each PR's checks (`gh pr checks <n>`) and its comments (`gh api repos/{owner}/{repo}/issues/<n>/comments`).
   Only PRs whose head branch matches `^(feature|fix|chore|docs)/\d+-` are picked up; release and hotfix PRs are left for the user.
 - Remote issue branches (`^(feature|fix|chore|docs)/\d+-`) with no PR, ignoring any whose issue is closed or which has a merged PR (`gh pr list --state merged --head <branch>`).
 - Builder worktrees left behind (`git worktree list`): look at each before removing it, and never lose unpushed commits.
@@ -29,10 +29,12 @@ For each open PR, oldest first, read the PR's comments, count its fix rounds (`d
 
 1. A "do not merge" verdict, or a finding that needs a design change, on the head: stop and report to the user.
 2. A draft PR (its parent is the `Depends on #<n>` line in its description): if the parent merged, send it to `developer` to merge `origin/develop` in and mark it ready (`gh pr ready <n>`); if the parent is still open, leave it; if the parent was closed without merging, or is itself a draft, stop and report to the user.
-3. A head missing a verdict it needs (a `tester` verdict, unless the change is docs-only or config-only, and a `pr-reviewer` verdict), counting verdicts carried over a clean develop merge as `CLAUDE.md` says: run the missing one(s), in parallel, from the diff since the last judged head.
-4. CI still running on the head: wait (`gh pr checks <n> --watch`).
-5. CI red on the head, or a verdict with blocking findings, and no newer `developer` hand-back:
-   - a red CI check always goes to `developer`, under the CI-fix limit in `CLAUDE.md`, whatever the round count;
+3. A head missing a verdict it needs (a `tester` verdict, unless the change is docs-only or config-only, and a `pr-reviewer` verdict), counting verdicts carried over a clean develop merge as `CLAUDE.md` says, and with no blocking finding or red check already known on it (item 5 sends those on first, `CLAUDE.md` lifecycle step 4): run the missing one(s), in parallel, from the diff since the last judged head.
+   A `tester` verdict on a change that touches Triton or the samples counts only if it lists those stack test runs; otherwise it is missing.
+4. CI still running on the head, with no blocking finding or red check already known on it: wait (`gh pr checks <n> --watch`).
+5. CI red on the head, or a verdict with blocking findings, and no newer `developer` hand-back, even while another verdict or CI is still pending:
+   - a red CI check always goes to `developer`, under the CI-fix limit in `CLAUDE.md`, whatever the round count, except a red `commits` caused by the PR's title or body, which you clear yourself by fixing the text and re-running that run (`CLAUDE.md`, CI);
+   - an agent still judging that head is stopped, and the verdict it owed is given on the fixed head;
    - blocking verdict findings go with it, as one list, while fewer than two fix rounds are done; past that, stop and report to the user if a security or correctness defect remains, and otherwise treat the rest as non-blocking (item 6).
 6. No blocking finding and CI green: if fewer than two rounds are done and there are non-blocking findings within the issue's scope, send them to `developer`; otherwise, if the PR is behind `develop`, send it to `developer` to merge `origin/develop` in (a clean merge keeps the verdicts and CI then decides); otherwise file any open findings as the PR's one follow-up issue, then merge (step 3, item 5).
 
@@ -44,12 +46,13 @@ Without `$ARGUMENTS`, if the earliest open milestone has no open sub-issues, sto
 ## 3. Drive issues through the team, pipelined
 
 Follow the lifecycle and loop rules in `CLAUDE.md`.
-Never run more than three agents at once, `developer` included; work waiting for a slot starts oldest PR first.
+Never run more than three agents at once, `developer` included; work waiting for a slot starts in the order `CLAUDE.md` gives (fixes and verdicts for open PRs, oldest PR first, then the next build).
+An agent holds its slot until its run ends: when one has reported but is still running, stop it (`TaskStop`), and count it until it has stopped.
 
 1. Start the builder with `isolation: "worktree"`, giving it the issue number and, if the issue depends on an open PR, that PR's branch to cut from.
 2. When the builder hands back (its PR is open), remove its worktree with the checks in `CLAUDE.md` (lifecycle step 2), start `tester` and `pr-reviewer` on the PR at the same time, telling each the round (0), unless it is a draft (a draft is judged only once step 2 marks it ready), and start the builder on the next issue when a slot is free (`CLAUDE.md` gives the order).
    Docs-only and config-only PRs get `pr-reviewer` alone.
-3. When both verdicts are in and CI has finished on that head, decide by step 2: blocking findings and any red CI check go to `developer` together, with the PR number, the branch and the full text of every finding; start `developer` with `isolation: "worktree"` whenever another agent uses the main checkout.
+3. When every verdict the head needs is in and CI has finished on that head, or sooner when a blocking finding or a red check is already known (`CLAUDE.md` lifecycle step 4), decide by step 2: blocking findings and any red CI check go to `developer` together, with the PR number, the branch and the full text of every finding; start `developer` with `isolation: "worktree"` whenever another agent uses the main checkout.
    After its hand-back, start `tester` (if code changed) and `pr-reviewer` again in parallel, telling them the round and that they start from the fix diff.
 4. Make sure every `developer` hand-back and every verdict is on the PR as a comment (the agents post their own; post one yourself if it is missing), without agent attribution; the builder's hand-back is the PR description.
 5. Before merging, file every finding still open, if any, as the PR's one follow-up issue (`CLAUDE.md` says how).

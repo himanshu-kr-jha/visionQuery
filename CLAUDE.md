@@ -11,7 +11,7 @@ The user starts or resumes the whole workflow with `/work` (or `/work <issue>`),
 Whether or not it was invoked, before doing anything else, orient yourself:
 
 1. Read `CONTEXT.md`, then the `docs/adr/` titles, then `docs/plan/v1.md`.
-2. `gh issue list --state open --label milestone` and `gh issue list --state open` to see what remains; `gh issue view <n>` for the one you will work on.
+2. `gh issue list --state open --label milestone` and `gh issue list --state open` to see what remains; `gh api repos/{owner}/{repo}/issues/<n>` for the one you will work on.
 3. `git log --oneline -20 develop` and `gh pr list` to see what was built most recently and what is in review.
 4. Tell the user where the project stands and which issue is next before starting it.
    Then work as the tech lead described in "The team" below.
@@ -68,6 +68,9 @@ Subagents cannot start other subagents, so all hand-offs go through the tech lea
 `tester` and `pr-reviewer` have no Edit or Write tools but keep Bash (needed for `uv` and `gh`), so being read-only is ultimately by instruction.
 They never commit, push, merge or edit files; each posts its own verdict as a PR comment.
 
+Every agent ends its run with its report: anything it started in the background is finished or stopped first, so that no agent holds a slot after it has reported.
+`gh pr view` and `gh issue view` can fail with a Projects (classic) GraphQL deprecation error, so agents read a PR, an issue and their comments with `gh api repos/{owner}/{repo}/pulls/<n>`, `.../issues/<n>` and `.../issues/<n>/comments`.
+
 CI is the full check suite: it runs `make check` and the stack tests (without Triton or the real samples) on every PR head, so no agent re-runs `make check` or the whole stack tests to stand in for it.
 The tester still runs `make test` once more locally, so that with CI's run the suite runs twice and an order- or state-dependent failure shows, repeats every new or changed test that involves threads, subprocesses, containers, sockets or clocks, and runs the Triton or real-samples stack tests when the change touches them, because CI runs neither.
 Agents spend the rest of their time on what CI cannot judge: design, whether a test would fail if the behaviour broke, and end-to-end use.
@@ -82,12 +85,14 @@ Lifecycle of one issue:
    The tech lead then removes the builder's worktree (`git worktree unlock <path>; git worktree remove --force <path>`), after confirming it has no uncommitted changes and `git rev-parse <branch>` equals `origin/<branch>`.
 3. **`tester` and `pr-reviewer` run at the same time** on the PR head, while CI runs; a check still pending when an agent finishes is reported as pending, not waited for.
    Docs-only and config-only changes skip the tester: `pr-reviewer` alone checks them.
-4. **Fixes:** once both verdicts are in and CI has finished on that head, the tech lead sends every blocking finding and any red CI check together to `developer`, which pushes the fixes and posts its hand-back on the PR.
+4. **Fixes:** once every verdict the head needs is in and CI has finished on that head, the tech lead sends every blocking finding and any red CI check together to `developer`, which pushes the fixes and posts its hand-back on the PR.
    Then `tester` (if code changed) and `pr-reviewer` re-judge that head at the same time, each starting from the fix diff.
    The same holds for a CI-fix push and for a develop merge that had to resolve a conflict.
+   When a blocking finding or a red check is already known, the head will change anyway, so the tech lead may send it to `developer` without waiting for the rest; any verdict still missing is then given on the fixed head (an agent still judging the old head is stopped), and it is still one round.
+   A red `commits` check whose cause is the PR's title or body is cleared by fixing the text and re-running that run (see CI under Commands), not by a push, and needs no `developer`.
    A develop merge without conflicts, pushed with nothing else, carries the verdicts over, and CI decides it; the `developer` hand-back for it says "clean" or names each file whose conflict it resolved.
    When a PR falls behind `develop` (the rulesets require it up to date), `developer` merges `origin/develop` into it.
-5. **Tech lead** squash-merges (`gh pr merge --squash --delete-branch`) once CI is green on the head and the head has verdicts, its own or carried over from a clean develop merge, with no blocking finding; it confirms each issue the PR closes is closed (if GitHub did not close one, close it with a comment linking the merged PR).
+5. **Tech lead** squash-merges (`gh pr merge --squash --delete-branch`) once CI is green on the head and the head has every verdict it needs, its own or carried over from a clean develop merge, with no blocking finding (a `tester` verdict on a change that touches Triton or the samples counts only if it lists those stack test runs); it confirms each issue the PR closes is closed (if GitHub did not close one, close it with a comment linking the merged PR).
    The tech lead updates the GitHub wiki (a separate repo) directly when a milestone completes or setup changes.
    After the user approves a milestone's demo, the tech lead closes the milestone issue with a comment summarising what shipped.
 
@@ -197,7 +202,7 @@ Scripts the workflow and the hooks run live in `scripts/`, with their tests in `
 2. Run `make branch-rules` as a repository admin.
 3. Verify both rulesets with `gh api repos/{owner}/{repo}/rulesets`, then `gh api repos/{owner}/{repo}/rulesets/<id>` for `protect-develop` and `protect-main`: `enforcement` is `active`, the `pull_request`, `non_fast_forward` and `deletion` rules are present, and `required_status_checks` lists every job as a context.
 4. Open a throwaway, non-draft PR into `develop` from a branch (`chore/ci-gate-check`) that adds one failing test.
-   Confirm the `test` check goes red, `gh pr view <n> --json mergeStateStatus` reports `BLOCKED`, and `gh pr merge <n> --squash` is refused.
+   Confirm the `test` check goes red, `gh api repos/{owner}/{repo}/pulls/<n> --jq .mergeable_state` reports `blocked`, and `gh pr merge <n> --squash` is refused.
 5. Close the PR without merging (`gh pr close <n> --delete-branch`), and confirm the branch is gone.
 
 **The web app** (`web/`) is React, TypeScript in strict mode and Vite, linted by eslint with typescript-eslint's strict type-checked rules and tested by vitest with React Testing Library.

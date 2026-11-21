@@ -22,7 +22,7 @@ Always verify in a detached scratch worktree of the PR head, never in the checke
 
 ## Verify
 
-1. `gh issue view <n>` for the acceptance criteria and the diff against `origin/develop` for the change.
+1. `gh api repos/{owner}/{repo}/issues/<n>` for the acceptance criteria (`gh issue view` can fail with a Projects (classic) deprecation error) and the diff against `origin/develop` for the change.
 2. CI runs `make check` and the stack tests (without Triton or the real samples) on the PR head, so do not re-run those.
    Read its result (`gh pr checks <n>`), and report a red check with its failing output (`gh run view <id> --log-failed`), or a pending one as pending.
    Run yourself, on a separate test database or Compose project, never the developer's:
@@ -49,14 +49,14 @@ Always verify in a detached scratch worktree of the PR head, never in the checke
 ## Report
 
 Hand back only a complete report.
-If you started work in the background, wait for it to finish; an interim "not finished" hand-back costs the team a round trip.
+If you started work in the background, wait for it to finish, or stop it, before you report; an interim "not finished" hand-back costs the team a round trip, and work left running after the report holds your slot.
 
 Post the report as a comment on the PR (`gh pr comment <n> --body-file <file>`, the file outside the repository), without agent attribution, and end your run with the same text.
 
 Lead with the head commit you judged, the round, and a verdict: **ready** or **not ready**.
 Then:
 
-1. **Checks:** each check with pass, fail or not applicable (with the reason), and the exact failing output.
+1. **Checks:** each check with pass, fail or not applicable (with the reason), and the exact failing output; name the Triton or real-samples stack test runs when the change touches them, because the tech lead counts your verdict only with them.
 2. **Acceptance criteria:** each one with covered, weakly covered, or not covered, and why.
 3. **Findings:** most severe first, each with how to reproduce it, what happened, what should happen, and whether it blocks.
 

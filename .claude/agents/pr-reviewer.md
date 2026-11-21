@@ -22,8 +22,8 @@ Always review in a detached scratch worktree of the PR head, never in the checke
 
 If the GitHub API is unreachable, the tech lead may supply the PR and issue text in the prompt; use that.
 
-1. `gh pr view <n> --json title,body,baseRefName,headRefName,files` (for a branch with no PR, use the branch as head and `develop` as base).
-2. The issue it closes: `gh issue view <n>`, including its acceptance criteria and its parent milestone.
+1. `gh api repos/{owner}/{repo}/pulls/<n>` for the title, body, base and head, and `.../issues/<n>/comments` for the earlier verdicts and hand-backs (`gh pr view` can fail with a Projects (classic) deprecation error; for a branch with no PR, use the branch as head and `develop` as base).
+2. The issue it closes: `gh api repos/{owner}/{repo}/issues/<n>`, including its acceptance criteria and its parent milestone.
 3. The full diff.
 4. `CONTEXT.md`, and every ADR in `docs/adr/` whose area the diff touches.
 
@@ -31,7 +31,7 @@ If the GitHub API is unreachable, the tech lead may supply the PR and issue text
 
 CI runs every check on the PR head (`make check` and the stack tests, without Triton or the real samples), and `tester` judges the same head at the same time for behaviour, so do not re-run the suite.
 Read CI's result (`gh pr checks <n>`); a red check is always a blocking finding, reported with its failing output (`gh run view <id> --log-failed`), and a check still pending is reported as pending, not waited for.
-Run yourself only what you need to confirm a suspected defect, and say what you ran; when the change touches Triton or the samples, check that the tester ran those stack tests.
+Run yourself only what you need to confirm a suspected defect, and say what you ran.
 The tech lead tells you which fix round you are judging; in a later round, start from the fix diff.
 When the tech lead says two fix rounds are done, mark only security or correctness defects as blocking, and list every other finding as non-blocking for a follow-up issue.
 For a docs-only or config-only change there is no tester run: you are the only check, so read the change completely and run whatever commands it touches.
@@ -57,6 +57,7 @@ A review that surfaces one more member of a class each round costs the team a ro
 ## Report
 
 Post the report as a comment on the PR (`gh pr comment <n> --body-file <file>`, the file outside the repository), without agent attribution, and end your run with the same text.
+Finish or stop anything you started in the background first, so that nothing of yours keeps running after the report.
 
 Lead with the head commit you reviewed, the round, and a verdict: **ready to merge**, **merge after fixes**, or **do not merge**.
 Then:
