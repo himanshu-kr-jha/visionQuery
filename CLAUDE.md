@@ -295,7 +295,7 @@ A package's tests live in `packages/<package>/tests/`; tests about the workspace
 
 Every process starts with `visionquery.runtime.start("<service>", <Settings subclass>)` (ADR 0012): it reads the settings from `VISIONQUERY_*` environment variables (a missing or invalid one, or a metrics address it cannot listen on, is logged by name and the process exits with status 2), sends every log record to stdout as one JSON line with `service` and `level`, scrubbed of URL credentials, and serves Prometheus metrics on `/metrics`; it returns a `Process` holding the settings and the metrics port, with a `close()`.
 A service adds its own settings as fields of a `Settings` subclass (`footage_dir: Path` is read from `VISIONQUERY_FOOTAGE_DIR`), declares credentials as `SecretStr`, and declares metrics with `prometheus_client` where they are measured.
-A nested model is set with a double underscore (`VISIONQUERY_DATABASE__URL`), a list or dict as JSON in one variable (`VISIONQUERY_PORTS='[8554, 8555]'`), and a settings field takes no alias.
+A nested model is set with a double underscore (`VISIONQUERY_DATABASE__URL`), a list or dict as JSON in one variable (`VISIONQUERY_PORTS='[8554, 8555]'`; a list, dict or group variable set to JSON `null` is refused, so unset it for the default), and a settings field, or a field of a nested model, takes no alias.
 In `compose.yaml` every VisionQuery service merges `<<: *runtime-environment` into its `environment`, which sets the log level and `VISIONQUERY_METRICS_HOST=0.0.0.0` so Prometheus can scrape it (`tests/test_compose.py` checks it).
 Each service has its own env file, never one shared by all, so a service sees only the variables it declares.
 Secrets are declared as `SecretStr`.
