@@ -118,8 +118,10 @@ def test_a_duration_or_attempts_that_make_no_sense_are_refused(changes: dict[str
         Settings.from_environment(_environment(**changes))
 
 
-#: A name of the publisher's settings, as a whole word (FAKE_CAMERAS is not FAKE_CAMERAS_RTSP).
-_SETTING = re.compile(r"\bFAKE_CAMERAS(?:_[A-Z]+)*\b")
+#: A name of the publisher's settings, and any name that starts like one, so that a name built
+#: from a prefix (`"FAKE_CAMERAS_" + key`, an f-string) or a misspelt one is not missed. Used on
+#: the code and on the docstring alike.
+_SETTING = re.compile(r"\bFAKE_CAMERAS\w*")
 #: The settings only tests set, which a Deployment's operator should leave alone.
 _TEST_ONLY = {"FAKE_CAMERAS_PREPARE_RETRY", "FAKE_CAMERAS_STALE_AFTER"}
 
@@ -165,7 +167,7 @@ def _documented_settings() -> dict[str, str]:
     entries: dict[str, str] = {}
     name = None
     for line in (fake_cameras.__doc__ or "").splitlines():
-        if entry := re.fullmatch(r" {4}(FAKE_CAMERAS\w*) +(\S.*)", line):
+        if entry := re.fullmatch(rf" {{4}}({_SETTING.pattern}) +(\S.*)", line):
             name = entry[1]
             entries[name] = entry[2]
         elif name and re.match(r" {5,}\S", line):
@@ -200,6 +202,44 @@ def test_the_docstring_lists_every_setting_the_module_reads() -> None:
     read = _settings_read()
     assert read >= _TEST_ONLY
     assert set(_documented_settings()) == read
+
+
+#: The entries whose default is said in words, not as the value: what the entry must say.
+_PROSE_DEFAULTS = {
+    "FAKE_CAMERAS": "required",
+    "FAKE_CAMERAS_PASSWORD": "none: publish without credentials",
+    "FAKE_CAMERAS_FFMPEG": "ffmpeg, from the PATH",
+}
+
+
+def _default_as_written(value: object) -> str:
+    return f"{value:g}" if isinstance(value, float) else str(value)
+
+
+def test_the_docstring_gives_the_default_of_every_setting() -> None:
+    settings = Settings.from_environment({"FAKE_CAMERAS": "a=synthetic"})
+    defaults = {
+        "FAKE_CAMERAS_RTSP": settings.rtsp,
+        "FAKE_CAMERAS_DURATION": settings.duration,
+        "FAKE_CAMERAS_PREPARE_ATTEMPTS": settings.prepare_attempts,
+        "FAKE_CAMERAS_SAMPLES": settings.samples,
+        "FAKE_CAMERAS_CACHE": settings.cache,
+        "FAKE_CAMERAS_STATUS": settings.status,
+        "FAKE_CAMERAS_PREPARE_RETRY": settings.prepare_retry,
+        "FAKE_CAMERAS_STALE_AFTER": settings.stale_after,
+    }
+    # The prose ones, checked against the value they describe.
+    assert settings.password is None
+    assert settings.ffmpeg == "ffmpeg"
+    expected = {name: _default_as_written(value) for name, value in defaults.items()}
+    expected |= _PROSE_DEFAULTS
+    documented = _documented_settings()
+    assert set(documented) == set(expected)
+    for name, entry in documented.items():
+        # The first parenthesis of an entry is its default.
+        written = re.search(r"\(([^)]*)\)", entry)
+        assert written, name
+        assert written[1] == expected[name], name
 
 
 def test_the_docstring_says_which_settings_are_for_tests_only() -> None:
