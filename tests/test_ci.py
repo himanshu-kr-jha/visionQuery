@@ -14,7 +14,10 @@ from typing import Any
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+WORKFLOWS = ROOT / ".github" / "workflows"
+WORKFLOW = WORKFLOWS / "ci.yml"
+#: Re-runs the commits job alone when a PR's title, body or base is edited.
+EDITED = WORKFLOWS / "pr-edited.yml"
 SETUP = ROOT / ".github" / "actions" / "setup" / "action.yml"
 #: A full commit SHA, which unlike a tag cannot be moved to other code, and the version it is.
 PINNED = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
@@ -32,10 +35,25 @@ def _jobs() -> dict[str, dict[str, Any]]:
     return _workflow()["jobs"]
 
 
+def _all_workflows() -> dict[str, dict[Any, Any]]:
+    return {path.name: _yaml(path) for path in sorted(WORKFLOWS.glob("*.yml"))}
+
+
 def _steps() -> Iterator[dict[str, Any]]:
-    for job in _jobs().values():
-        yield from job["steps"]
+    for workflow in _all_workflows().values():
+        for job in workflow["jobs"].values():
+            yield from job["steps"]
     yield from _yaml(SETUP)["runs"]["steps"]
+
+
+def _jobs_run_on_pull_request(action: str) -> set[str]:
+    """The jobs, of every workflow, that a pull_request event with this action starts."""
+    started: set[str] = set()
+    for workflow in _all_workflows().values():
+        pull_request = workflow[True].get("pull_request")
+        if pull_request is not None and action in pull_request["types"]:
+            started.update(workflow["jobs"])
+    return started
 
 
 def _runs(job: dict[str, Any]) -> str:
@@ -54,9 +72,8 @@ def test_it_runs_on_prs_and_pushes_to_develop_and_main() -> None:
     # PyYAML reads the bare key `on` as True.
     triggers = _workflow()[True]
     assert triggers["pull_request"]["branches"] == ["develop", "main"]
-    # `edited` re-runs the commits job when a title or body is fixed (or the base changed);
-    # the default types would leave a red check red after the edit that fixes it.
-    assert triggers["pull_request"]["types"] == ["opened", "edited", "synchronize", "reopened"]
+    # An edit of the title, body or base is pr-edited.yml's, which runs the commits job alone.
+    assert triggers["pull_request"]["types"] == ["opened", "synchronize", "reopened"]
     assert triggers["push"]["branches"] == ["develop", "main"]
     # No manual trigger: a run started by hand would replace the result of a required check on
     # the same SHA. A run is repeated with `gh run rerun`, which keeps its event.
@@ -171,14 +188,15 @@ def test_the_commits_job_checks_attribution_and_the_title_of_a_pr() -> None:
 def test_the_commits_job_checks_something_on_every_event_that_triggers_it() -> None:
     # A step guarded by an event never runs on another, so an event none of the steps accepts
     # would pass the (required) job having checked nothing.
-    job = _jobs()["commits"]
-    checks = [step for step in job["steps"][2:] if "run" in step]
-    assert checks
-    for event in _workflow()[True]:
-        guards = [step.get("if") for step in checks]
-        assert any(
-            guard is None or f"github.event_name == '{event}'" in guard for guard in guards
-        ), event
+    for path in (WORKFLOW, EDITED):
+        workflow = _yaml(path)
+        checks = [step for step in workflow["jobs"]["commits"]["steps"][2:] if "run" in step]
+        assert checks
+        for event in workflow[True]:
+            guards = [step.get("if") for step in checks]
+            assert any(
+                guard is None or f"github.event_name == '{event}'" in guard for guard in guards
+            ), (path.name, event)
 
 
 def test_a_newer_push_to_a_pr_cancels_the_run_it_supersedes() -> None:
@@ -188,13 +206,14 @@ def test_a_newer_push_to_a_pr_cancels_the_run_it_supersedes() -> None:
 
 
 def test_editing_a_pr_neither_cancels_nor_is_cancelled_by_the_run_of_a_push() -> None:
-    # An `edited` run has a group of its own: editing the title mid-run must not cancel a
+    # The edited run's group is its own, per PR: editing the title mid-run must not cancel a
     # full run for the same head (which would leave its checks cancelled), and a push cancels
-    # the full run, not the edit's.
-    group = _workflow()["concurrency"]["group"]
-    assert "github.event.action == 'edited'" in group
-    edited = group.index("github.event.action == 'edited'")
-    assert "-edited" in group[edited:]
+    # the full run, not the edit's. A newer edit makes an older edit's run pointless.
+    full = _workflow()["concurrency"]["group"]
+    edited = _yaml(EDITED)["concurrency"]
+    assert full == "ci-${{ github.event.pull_request.number || github.ref }}"
+    assert edited["group"] == "pr-edited-${{ github.event.pull_request.number }}"
+    assert edited["cancel-in-progress"] is True
 
 
 def test_make_lint_lints_the_workflows_too() -> None:
@@ -208,3 +227,26 @@ def test_make_lint_lints_the_workflows_too() -> None:
         check=True,
     ).stdout.splitlines()
     assert "uv run actionlint" in dry
+
+
+def test_editing_a_pr_re_runs_only_the_commits_job() -> None:
+    # A title or body is all an edit can fix, and the commits job is all that reads them; the
+    # rest of the suite, the 7-minute stack included, keeps its result for the head.
+    assert _jobs_run_on_pull_request("edited") == {"commits"}
+    assert _jobs_run_on_pull_request("synchronize") == set(_jobs())
+
+
+def test_the_edited_run_is_the_ci_commits_job_itself_on_the_same_branches() -> None:
+    # Its job id is its check's name: the same `commits` the rulesets require, so its result
+    # replaces the full run's for that check, and it adds no check of its own.
+    edited = _yaml(EDITED)
+    assert edited[True] == {"pull_request": {"branches": ["develop", "main"], "types": ["edited"]}}
+    assert edited["permissions"] == _workflow()["permissions"]
+    assert edited["jobs"] == {"commits": _jobs()["commits"]}
+
+
+def test_no_ci_job_is_skipped_by_a_condition() -> None:
+    # A job skipped by its `if:` reports success to a required check: skipping the suite on an
+    # edit that way would let an edit turn a red check green. Edits get a workflow of their own.
+    for name, job in _jobs().items():
+        assert "if" not in job, name

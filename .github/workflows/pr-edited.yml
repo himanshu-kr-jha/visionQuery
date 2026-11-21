@@ -1,0 +1,57 @@
+# The commits check again, alone, when a PR's title, body or base is edited.
+#
+# An edit changes nothing the rest of CI reads, so it keeps its results for the head and only
+# the commits job, which checks the PR's text and the range of its commits, runs again. The job
+# is ci.yml's own, copied unchanged (tests/test_ci.py fails when the two differ): its id is the
+# required check's name, so its result replaces the full run's for that check and adds none.
+# The suite is not skipped by a condition in ci.yml instead, because a skipped job reports
+# success to a required check, and an edit would then turn every red check green.
+
+name: PR edited
+
+on:
+  pull_request:
+    branches: [develop, main]
+    types: [edited]
+
+permissions:
+  contents: read
+
+# Only the latest text matters, and this group is apart from ci.yml's, so an edit never cancels
+# a full run for the head, nor a push the run of an edit.
+concurrency:
+  group: pr-edited-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  commits:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/setup
+      - name: Commits of the PR carry no attribution
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: uv run --frozen scripts/check_attribution.py --commits "$BASE..$HEAD"
+      - name: The PR's title and body carry no attribution, and the title is a Conventional Commit
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          uv run --frozen scripts/check_attribution.py --env PR_TITLE --env PR_BODY
+          uv run --frozen scripts/check_commit_message.py --env PR_TITLE
+      - name: Pushed commits carry no attribution
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        # A push that created the branch has no previous commit: check the pushed one alone.
+        run: |
+          if [ "$BEFORE" = 0000000000000000000000000000000000000000 ]; then range="$AFTER^!"; else range="$BEFORE..$AFTER"; fi
+          uv run --frozen scripts/check_attribution.py --commits "$range"

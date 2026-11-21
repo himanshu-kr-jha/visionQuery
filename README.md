@@ -155,6 +155,7 @@ The details are in [`CLAUDE.md`](CLAUDE.md), which serves as the working guide f
 
 `make check` runs locally what CI runs on every PR, except the stack tests (`make test-stack`).
 CI (`.github/workflows/ci.yml`) runs lint (ruff, ruff format, actionlint), the type check, the import contracts, the Python tests against Postgres, the web app's lint, type check and tests with its API types check, the Compose stack tests, the setup above from a fresh clone, and a check that no commit, PR title or PR body carries agent attribution and that the PR title is a Conventional Commit.
+Editing a PR's title or body re-runs that last check alone (`.github/workflows/pr-edited.yml`).
 `develop` and `main` accept changes only through a PR on which every one of those checks passed.
 
 To have git run the fast checks for you, opt in to the pre-commit hooks:
