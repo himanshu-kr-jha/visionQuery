@@ -16,6 +16,7 @@ from uuid import uuid4
 
 import psycopg
 import pytest
+from visionquery.memory import footage
 from visionquery.memory.cameras import CameraRegistry
 from visionquery.memory.connection import connect
 from visionquery.memory.footage import (
@@ -341,6 +342,9 @@ def test_a_segment_of_a_camera_the_registry_never_had_is_refused(
         pytest.param({"path": PurePosixPath("1/2026-10-06/a.frags")}, "path", id="not-mp4"),
         pytest.param({"path": PurePosixPath(".")}, "path", id="empty-path"),
         pytest.param({"path": PurePosixPath("1/a\x00.mp4")}, "path", id="nul-in-path"),
+        pytest.param(
+            {"path": PurePosixPath("1/a\udcff.mp4")}, "path", id="path-not-utf-8"
+        ),  # as Python names a file whose name is not UTF-8
     ],
 )
 def test_a_segment_that_cannot_be_footage_is_refused_before_the_database_sees_it(
@@ -380,6 +384,35 @@ def test_the_database_refuses_what_the_index_would_refuse(
         with pytest.raises(psycopg.errors.CheckViolation):
             connection.execute(insert, bad)
     connection.execute(insert, good)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        pytest.param({"reason": "exploded"}, id="check-violation"),
+        pytest.param({"fragments": 2**31}, id="out-of-range"),
+    ],
+)
+def test_a_segment_the_database_refuses_is_refused_for_good_not_a_failure(
+    index: SegmentIndex,
+    connection: psycopg.Connection,
+    cameras: tuple[int, int],
+    monkeypatch: pytest.MonkeyPatch,
+    changes: dict[str, object],
+) -> None:
+    """Whatever the index's own checks miss, the table refuses; that is a refusal, which no
+    retry changes, never a database failure an indexer would retry forever."""
+    dock, _ = cameras
+
+    def check_nothing(segment: IndexedSegment) -> None:
+        pass
+
+    monkeypatch.setattr(footage, "_check", check_nothing)
+    with pytest.raises(InvalidSegmentError, match="the database refused") as refused:
+        index.index(replace(segment(dock), **changes))
+    assert "exploded" not in str(refused.value)
+    assert refused.value.__context__ is None
+    assert rows(connection) == 0
 
 
 def test_a_database_that_fails_is_named_by_the_class_of_its_error_only(

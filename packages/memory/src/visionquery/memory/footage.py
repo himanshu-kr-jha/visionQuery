@@ -17,8 +17,10 @@ nothing; with other facts it is refused (`SegmentConflictError`), because a Segm
 once and never changes, so two accounts of one cannot both be true and the index does not
 guess which is. A Segment that overlaps another of its camera's, or whose camera the registry
 never had, is refused too, and so is one that cannot be Footage at all (`InvalidSegmentError`),
-before the database sees it. Every refusal is a `SegmentRefusedError`, which indexing again
-will not change; a `SegmentIndexError` is the database failing, which it may.
+before the database sees it; whatever those checks miss and the table refuses (a constraint, a
+value out of range) is an `InvalidSegmentError` too. Every refusal is a `SegmentRefusedError`,
+which indexing again will not change; a `SegmentIndexError` is the database failing, which it
+may.
 
 **The offset is on the Deployment's clock**: how long after the Segment began the instant is.
 Within the file it is the same but where the stream stalled, which only the Segment's Fragment
@@ -176,6 +178,15 @@ def _aware(at: datetime, what: str) -> None:
         raise InvalidSegmentError(f"{what} has no time zone; Footage is timed in UTC")
 
 
+def _utf_8(text: str) -> bool:
+    """Whether `text` is UTF-8 text, as a file name Python read off disk need not be."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _check(segment: IndexedSegment) -> None:
     """Refuse a Segment that cannot be Footage, saying why, before the database sees it."""
     if segment.camera_id not in _INTEGER:
@@ -209,6 +220,7 @@ def _check(segment: IndexedSegment) -> None:
         or path.suffix != ".mp4"
         or path.name == ".mp4"
         or "\x00" in str(path)
+        or not _utf_8(str(path))
     ):
         raise InvalidSegmentError(
             f"Segment {segment.segment_id}'s path must be its .mp4 file relative to the "
@@ -275,6 +287,11 @@ class SegmentIndex:
                     return True
         except psycopg.errors.ForeignKeyViolation:
             refused = UnknownCameraError(segment.camera_id)
+        except (psycopg.errors.IntegrityError, psycopg.errors.DataError) as error:
+            # A rule of the table's that `_check` missed: no retry changes what the Segment is.
+            refused = InvalidSegmentError(
+                f"the database refused Segment {segment.segment_id} ({type(error).__name__})"
+            )
         except psycopg.Error as error:
             failed = type(error).__name__
         # Raised here, outside the `except`, so the driver's error is not even its context.
