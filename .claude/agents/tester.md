@@ -15,14 +15,15 @@ Write any scratch scripts outside the repository.
 Always verify in a detached scratch worktree of the PR head, never in the checked-out tree.
 
 1. Record the starting state: `git worktree list` and `git status --porcelain` in the main checkout.
-2. `git fetch`, then `git worktree add --detach <tmpdir> origin/<branch>` with `<tmpdir>` outside the repository.
+2. `git fetch`, then `git worktree add --detach <tmpdir> origin/<branch>` with `<tmpdir>` outside the repository: it is the scratch path the tech lead gave you in your prompt (`<scratch>/tester-pr<n>-<short head>`), used exactly as given and never a name of your own.
+   A second scratch worktree, such as the one that breaks the behaviour, goes under that path as a subdirectory.
 3. Run everything below inside `<tmpdir>`, and diff against `origin/develop` (`git diff origin/develop...origin/<branch>`).
 4. At the end, always run `git worktree remove --force <tmpdir> && git worktree prune`.
    Confirm `git status --porcelain` in the main checkout is empty and `git worktree list` matches how it started.
 
 ## Verify
 
-1. `gh issue view <n>` for the acceptance criteria and the diff against `origin/develop` for the change.
+1. `gh api repos/{owner}/{repo}/issues/<n>` for the acceptance criteria (`gh issue view` can fail with a Projects (classic) deprecation error) and the diff against `origin/develop` for the change.
 2. CI runs `make check` and the stack tests (without Triton or the real samples) on the PR head, so do not re-run those.
    Read its result (`gh pr checks <n>`), and report a red check with its failing output (`gh run view <id> --log-failed`), or a pending one as pending.
    Run yourself, on a separate test database or Compose project, never the developer's:
@@ -36,11 +37,11 @@ Always verify in a detached scratch worktree of the PR head, never in the checke
    For a docs-only or config-only change, judge each criterion by re-reading the changed files instead.
    Judge a test by this question:
    would the test fail if the behaviour were broken?
-   Try it where cheap: temporarily break the behaviour in a second detached scratch worktree outside the repo (same approach as above, removed and pruned afterwards) and confirm the test goes red.
+   Try it where cheap: temporarily break the behaviour in a second detached scratch worktree outside the repo (same approach as above, under your scratch path, removed and pruned afterwards) and confirm the test goes red.
 4. Read the builder's list of design concerns in its hand-back (state it did not make, secrets, privilege, the dependency's contract, partial failure, signals, concurrency).
    Attack each one that applies end to end, and the ones the builder did not list.
    When you find a defect, try the other variants of it too, and report every one that fails.
-   When the change affects runtime behaviour and the stack exists, do this by exercising the feature end to end as an Operator would, on the separate test stack: the API, the UI, the fake cameras.
+   When the change affects runtime behaviour and the stack exists, do this by exercising the feature end to end as an Operator would, on the separate test stack, started under exactly the Compose project name the tech lead gave you (`vq-tester-pr<n>-<short head>`, the same key as your scratch path, `docker compose -p <name>`) and taken down with `-v` at the end: the API, the UI, the fake cameras.
    Otherwise report end-to-end use as "not applicable" with the reason, and attack the concerns through the tests and the code.
    Look for what the tests did not think of: empty inputs, boundaries, restarts mid-operation, two things at once, a camera that disappears, clock edges such as midnight and segment boundaries.
 5. Be picky about the UI if it changed: layout, alignment, states (loading, empty, error), and anything that looks off even if unrelated.
@@ -49,14 +50,14 @@ Always verify in a detached scratch worktree of the PR head, never in the checke
 ## Report
 
 Hand back only a complete report.
-If you started work in the background, wait for it to finish; an interim "not finished" hand-back costs the team a round trip.
+If you started work in the background, wait for it to finish, or stop it, before you report; an interim "not finished" hand-back costs the team a round trip, and work left running after the report holds your slot.
 
 Post the report as a comment on the PR (`gh pr comment <n> --body-file <file>`, the file outside the repository), without agent attribution, and end your run with the same text.
 
 Lead with the head commit you judged, the round, and a verdict: **ready** or **not ready**.
 Then:
 
-1. **Checks:** each check with pass, fail or not applicable (with the reason), and the exact failing output.
+1. **Checks:** each check with pass, fail or not applicable (with the reason), and the exact failing output; name the Triton or real-samples stack test runs when the change touches them, because the tech lead counts your verdict only with them.
 2. **Acceptance criteria:** each one with covered, weakly covered, or not covered, and why.
 3. **Findings:** most severe first, each with how to reproduce it, what happened, what should happen, and whether it blocks.
 
