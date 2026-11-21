@@ -143,19 +143,29 @@ def frame_hashes(ffmpeg: Path, video: Path, *, ended: bool = False) -> list[str]
     ]
 
 
+#: The known clip: a lead-in the recorder may join part-way through, then the part every frame of
+#: which is checked (no two frames alike), then a lead-out. The stream ends when the clip does,
+#: and MediaMTX ends a reader's session then with whatever it has already sent it, so the last
+#: second or so of what a camera sent may never reach a reader that is a little behind: the
+#: lead-out is what that can cost, never the known part.
+LEAD_IN, KNOWN, LEAD_OUT = 6, 8, 4
+FPS = 10
+
+
 @pytest.fixture(scope="module")
 def known_clip(ffmpeg: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Four seconds of colour bars as a lead-in, then eight of a pattern no two frames of which
-    are alike: H.264 at 10 fps, a keyframe every second, as a camera sends it."""
+    """Colour bars as a lead-in, then a pattern no two frames of which are alike, then another
+    such pattern as a lead-out: H.264 at 10 fps, a keyframe every second, as a camera sends it."""
     path = tmp_path_factory.mktemp("clip") / "known.mp4"
     subprocess.run(
         [
             str(ffmpeg), "-nostdin", "-loglevel", "error",
-            "-f", "lavfi", "-i", "smptebars=size=320x240:rate=10:duration=4",
-            "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10:duration=8",
-            "-filter_complex", "[0:v][1:v]concat=n=2:v=1[v]", "-map", "[v]",
+            "-f", "lavfi", "-i", f"smptebars=size=320x240:rate={FPS}:duration={LEAD_IN}",
+            "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate={FPS}:duration={KNOWN}",
+            "-f", "lavfi", "-i", f"testsrc=size=320x240:rate={FPS}:duration={LEAD_OUT}",
+            "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1[v]", "-map", "[v]",
             "-c:v", "libx264", "-preset", "ultrafast", "-bf", "0",
-            "-g", "10", "-keyint_min", "10", "-sc_threshold", "0", "-pix_fmt", "yuv420p",
+            "-g", str(FPS), "-keyint_min", str(FPS), "-sc_threshold", "0", "-pix_fmt", "yuv420p",
             str(path),
         ],
         check=True,
@@ -163,6 +173,61 @@ def known_clip(ffmpeg: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
         timeout=120,
     )  # fmt: skip
     return path
+
+
+def assert_gapless_copy(recorded: list[str], clip: list[str], known_from: int, known: int) -> None:
+    """`recorded` (every decoded frame's hash, in order) is a run of `clip`'s own frames with
+    nothing missing or repeated, and holds the whole of the known part, `known` frames from
+    `known_from`. It may begin anywhere before the known part (the recorder joined a stream
+    already running) and end anywhere after it (a stream ends with what it has sent), and its very
+    last frame is left out, since a stream may have ended inside it."""
+    part = clip[known_from : known_from + known]
+    assert len(set(part)) == known, "the known part's frames must differ for this to mean anything"
+    assert part[0] in recorded, "the recorder joined after the known part began"
+    start = recorded.index(part[0])
+    offset = known_from - start
+    assert offset >= 0, "more of the lead-in recorded than the clip has"
+    assert recorded[:-1] == clip[offset : offset + len(recorded) - 1], "not a gapless run"
+    assert start + known < len(recorded), "the known part is not all there"
+
+
+def test_a_recording_that_ends_a_little_before_the_clip_does_is_still_a_gapless_copy() -> None:
+    clip = [f"lead-in-{n % 3}" for n in range(60)] + [f"known-{n}" for n in range(80)]
+    clip += [f"lead-out-{n}" for n in range(40)]
+    joined_late = clip[15:150]  # the last 10 frames of the clip never arrived
+
+    assert_gapless_copy(joined_late, clip, 60, 80)
+
+
+def lost(frames: list[str]) -> list[str]:
+    return frames[:70] + frames[71:]  # a frame lost in the known part
+
+
+def repeated(frames: list[str]) -> list[str]:
+    return frames[:70] + frames[69:]
+
+
+def lost_in_lead_in(frames: list[str]) -> list[str]:
+    return frames[:20] + frames[21:]
+
+
+def cut_short(frames: list[str]) -> list[str]:
+    return frames[:100]  # the recording ends inside the known part
+
+
+def joined_late(frames: list[str]) -> list[str]:
+    return frames[70:]  # it joined after the known part began
+
+
+@pytest.mark.parametrize("damage", [lost, repeated, lost_in_lead_in, cut_short, joined_late])
+def test_a_recording_with_a_gap_or_without_the_known_part_is_not_a_gapless_copy(
+    damage: Callable[[list[str]], list[str]],
+) -> None:
+    clip = [f"lead-in-{n}" for n in range(60)] + [f"known-{n}" for n in range(80)]
+    clip += [f"lead-out-{n}" for n in range(40)]
+
+    with pytest.raises(AssertionError):
+        assert_gapless_copy(damage(clip[10:]), clip, 60, 80)
 
 
 # --- end to end -------------------------------------------------------------------------------
@@ -209,13 +274,9 @@ def test_a_published_clip_is_read_back_whole_from_the_segments_covering_it(
         for frame in frame_hashes(ffmpeg, segment.path, ended=segment is found[-1])
     ]
     clip = frame_hashes(ffmpeg, known_clip)
-    known = clip[40:]  # the eight seconds after the lead-in
-    assert len(set(known)) == 80
-    # Copy-only and gapless: a run of the clip's own frames, ending where the clip does (its
-    # very last frame, which the stream may have ended inside, is there but may be damaged).
-    assert len(recorded) >= 80
-    assert recorded[:-1] == clip[-len(recorded) : -1]
-    assert recorded[-80:-1] == known[:-1]
+    assert len(clip) == (LEAD_IN + KNOWN + LEAD_OUT) * FPS
+    # Copy-only and gapless: a run of the clip's own frames that holds the whole known part.
+    assert_gapless_copy(recorded, clip, LEAD_IN * FPS, KNOWN * FPS)
     # Cut on 3-second boundaries of the epoch, one Segment running on from the next.
     assert {segment.reason for segment in found[:-1]} == {"rolled"}
     assert found[-1].reason == "stream_ended"
@@ -223,7 +284,7 @@ def test_a_published_clip_is_read_back_whole_from_the_segments_covering_it(
     assert all(int(s.time_from.timestamp()) % 3 == 0 for s in found[1:])
     # The span is the time the clip arrived, on the recorder's NTP-anchored timebase.
     assert abs(found[-1].time_to - ended) < timedelta(seconds=2)
-    assert found[-1].time_to - found[0].time_from >= timedelta(seconds=8)
+    assert found[-1].time_to - found[0].time_from >= timedelta(seconds=KNOWN)
     assert all(segment.verified for segment in found) or not _ntp_synchronised()
 
 
