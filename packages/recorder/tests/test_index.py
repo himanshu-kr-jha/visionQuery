@@ -381,19 +381,34 @@ def test_what_is_not_a_cameras_footage_is_left_alone(
     cameras: tuple[int, int],
     tmp_path: Path,
     start: Callable[[Path, str], Running],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Only a directory named as the recorder names a camera's, its id in plain digits, holds
+    that camera's Footage: `012` or `١٢` is not camera 12's, and an id no camera can have is
+    nobody's, so none of them is indexed, refused or retried."""
+    caplog.set_level(logging.INFO, logger="visionquery.recorder")
     dock, _ = cameras
     (tmp_path / ".lock").write_text("")
     (tmp_path / "lost+found").mkdir()
     (tmp_path / "lost+found" / "x.mp4").write_bytes(b"")
     segment = finish(tmp_path, dock, AT)
+    stray = tmp_path.parent / f"{tmp_path.name}-stray"
+    for n, name in enumerate(
+        (f"0{dock}", "".join(chr(0x0660 + int(d)) for d in str(dock)), str(2**31))
+    ):
+        # A finished Segment of the dock's, an hour on, in a directory of that name.
+        finish(stray / name, dock, AT + timedelta(hours=1 + n))
+        (stray / name / str(dock)).rename(tmp_path / name)
 
     running = start(tmp_path, migrated)
 
     within(SLACK, lambda: held(memory) == 1, lambda: held(memory))
-    assert SegmentIndex(memory).latest(dock) == indexed(tmp_path, dock, segment)
     running.stop()
     assert running.failure is None
+    assert held(memory) == 1
+    assert SegmentIndex(memory).latest(dock) == indexed(tmp_path, dock, segment)
+    said = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert said == []
 
 
 # --- when the memory cannot be reached --------------------------------------------------------

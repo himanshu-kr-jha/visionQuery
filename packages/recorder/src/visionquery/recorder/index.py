@@ -34,6 +34,7 @@ import asyncio
 import collections
 import contextlib
 import logging
+import re
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -292,13 +293,25 @@ def _unreadable(camera_id: int) -> Callable[[Path, Exception], None]:
     return unreadable
 
 
+#: A camera's directory is named for its id as the recorder writes it: ASCII digits, no leading
+#: zero, and no larger than a camera's id can be.
+_CAMERA_DIRECTORY = re.compile(r"[1-9][0-9]{0,9}")
+_LARGEST_CAMERA_ID = 2**31 - 1
+
+
 def _camera_directories(footage: Path) -> list[Path]:
     """Each camera's directory under `footage`, named for its id; nothing else there (the lock,
-    a file system's `lost+found`) is a camera's Footage."""
+    a file system's `lost+found`, `012`, which is not camera 12's) is a camera's Footage."""
     if not footage.is_dir():
         return []
     return sorted(
-        (path for path in footage.iterdir() if path.is_dir() and path.name.isdigit()),
+        (
+            path
+            for path in footage.iterdir()
+            if path.is_dir()
+            and _CAMERA_DIRECTORY.fullmatch(path.name)
+            and int(path.name) <= _LARGEST_CAMERA_ID
+        ),
         key=lambda path: int(path.name),
     )
 
