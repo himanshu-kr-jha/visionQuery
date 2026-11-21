@@ -39,7 +39,7 @@ When asked to bring a branch built on a parent PR onto develop after the parent 
 - Address exactly the findings you were given.
   If a finding is wrong, do not "fix" it: explain why in your report.
   If a fix needs a design change, an ADR change, or touches more than the issue's scope, stop and report rather than improvising.
-- Run the whole check suite (Commands in `CLAUDE.md`) before you finish; a fix that breaks another test is not a fix.
+- Run `make check` and the stack tests the change touches before you finish; a fix that breaks another test is not a fix (CI runs the rest).
 - Commit with Conventional Commit messages referencing the issue (`Refs #<n>`), no agent attribution, and push.
   Never bypass the git hooks (`--no-verify`).
 - Never rewrite a pushed branch: no rebase, amend or force-push.
@@ -53,7 +53,7 @@ Start it by naming what it answers: `tester` findings, `pr-reviewer` findings, a
 For each finding you were given: fixed (with the test that proves it), or not fixed (with why).
 For each fixed finding, say how the class is closed, or why it has no other members.
 Report the repeat runs: node ids, idle and loaded counts.
-Then the branch and final commit, and the result of the full check suite.
+Then the branch and final commit, and the results of `make check` and the stack tests you ran.
 
 ## When building a bug issue
 

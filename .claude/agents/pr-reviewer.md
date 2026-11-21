@@ -30,7 +30,7 @@ If the GitHub API is unreachable, the tech lead may supply the PR and issue text
 ## Verify
 
 CI runs every check on the PR head (`make check` and the full stack tests), and `tester` judges the same head at the same time for behaviour, so do not re-run the suite.
-Read CI's result (`gh pr checks <n>`); a red check is always a blocking finding, reported with its failing output (`gh run view <id> --log-failed`).
+Read CI's result (`gh pr checks <n>`); a red check is always a blocking finding, reported with its failing output (`gh run view <id> --log-failed`), and a check still pending is reported as pending, not waited for.
 Run yourself only what you need to confirm a suspected defect, and say what you ran.
 The tech lead tells you which fix round you are judging; in a later round, start from the fix diff.
 When the tech lead says two fix rounds are done, mark only security or correctness defects as blocking, and list every other finding as non-blocking for a follow-up issue.

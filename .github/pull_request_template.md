@@ -15,7 +15,7 @@ Closes #
 ## Checklist
 
 - [ ] Tests for every acceptance criterion of the issue, written first
-- [ ] `make check` and the stack tests the change touches pass locally; CI green on the head
+- [ ] `make check` and the stack tests the change touches pass locally
 - [ ] Names follow `CONTEXT.md`; new domain terms added there
 - [ ] No ADR contradicted, or a new ADR supersedes it
 - [ ] README setup and `CLAUDE.md` Commands updated if setup, services, env vars or commands changed

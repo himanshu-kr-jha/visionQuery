@@ -23,10 +23,14 @@ Always verify in a detached scratch worktree of the PR head, never in the checke
 ## Verify
 
 1. `gh issue view <n>` for the acceptance criteria and the diff against `origin/develop` for the change.
-2. CI runs every check on the PR head, the full stack tests included, so do not re-run the whole suite to stand in for it.
-   Read its result (`gh pr checks <n>`), and report a red check with its failing output (`gh run view <id> --log-failed`).
-   Run yourself only what you need to judge the change: `uv sync --locked` (a failure is blocking), the new or changed tests, and the stack tests the change touches (`uv run pytest -m stack tests/test_stack.py::<test>`), on a separate test database or Compose project, never the developer's.
-   If you suspect a flaky test, repeat it 10 times, 3 of them loaded, with the "Repeat runs" and "Loaded run" bullets of `.claude/agents/senior-developer.md`, keeping every run's output in a file outside the repository (`... 2>&1 | tee <dir>/run-<i>.log`); anything that passes once and fails once is a blocking finding, reported with its assertion and stderr.
+2. CI runs `make check` and the stack tests (without Triton or the real samples) on the PR head, so do not re-run those.
+   Read its result (`gh pr checks <n>`), and report a red check with its failing output (`gh run view <id> --log-failed`), or a pending one as pending.
+   Run yourself, on a separate test database or Compose project, never the developer's:
+   - `uv sync --locked` (a failure is blocking);
+   - `make test` once, so that with CI's run the suite runs twice and an order- or state-dependent failure shows;
+   - each new or changed test that involves threads, subprocesses, containers, sockets or clocks, 10 times, 3 of them loaded, with the "Repeat runs" and "Loaded run" bullets of `.claude/agents/senior-developer.md` (`-m stack` tests are out of scope);
+   - the stack tests the change touches (`uv run pytest -m stack tests/test_stack.py::<test>`), and with `VISIONQUERY_TEST_TRITON` or `VISIONQUERY_TEST_SAMPLES=1` when it touches Triton or the samples, because CI runs neither.
+   Keep every run's full output in a file outside the repository (`... 2>&1 | tee <dir>/run-<i>.log`); anything that passes once and fails once is a flaky test and a blocking finding, reported with its assertion and stderr.
 3. For each acceptance criterion, find the test that covers it and judge whether it really does.
    Missing tests for the acceptance criteria of an issue that changes behaviour are a blocking finding.
    For a docs-only or config-only change, judge each criterion by re-reading the changed files instead.
