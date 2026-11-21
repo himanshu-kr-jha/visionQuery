@@ -26,7 +26,8 @@ from visionquery.recorder.segment import Segment, recover, segments
 
 DOCK = Camera(1, "Dock", "dock", None, datetime(2026, 10, 6, tzinfo=UTC), None)
 #: Short Segments and short waits, so that rolling and reconnecting happen while a test runs.
-TIMING = Timing(segment=timedelta(seconds=3), first_wait=0.2, last_wait=1.0, stall_after=5.0)
+TIMING = Timing(segment=timedelta(seconds=3), first_wait=0.2, last_wait=1.0)
+STALL_AFTER = 5.0
 
 
 @pytest.fixture
@@ -37,7 +38,7 @@ def dock(mediamtx: MediaMTX) -> MediaMTX:
 
 def source(server: MediaMTX, ffmpeg: Path, path: str) -> Source:
     url = server.rtsp_url(path, READER_USER, server.reader_password)
-    return Source(url=SecretStr(url), ffmpeg=str(ffmpeg), stall_after=TIMING.stall_after)
+    return Source(url=SecretStr(url), ffmpeg=str(ffmpeg), stall_after=STALL_AFTER)
 
 
 def recording(

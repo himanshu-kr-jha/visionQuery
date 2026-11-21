@@ -203,9 +203,12 @@ class MediaMTX:
         )  # fmt: skip
 
     @contextmanager
-    def publishing(self, path: str, user: str, password: str) -> Generator[None]:
-        """A camera publishing to `path` until the block ends; it fails the test if refused."""
-        name = f"vq-test-publisher-{uuid.uuid4().hex[:12]}"
+    def publishing(
+        self, path: str, user: str, password: str, *, name: str | None = None
+    ) -> Generator[None]:
+        """A camera publishing to `path` until the block ends; it fails the test if refused.
+        `name` is its container's, for a test that pauses it (a camera gone silent)."""
+        name = name or f"vq-test-publisher-{uuid.uuid4().hex[:12]}"
         command = self._publisher(path, user, password, 120, name=name, detach=True)
         assert _docker(*command).returncode == 0
         try:

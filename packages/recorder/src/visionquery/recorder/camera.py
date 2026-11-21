@@ -12,7 +12,7 @@ clock (`visionquery.recorder.timebase`); an arrival is read from it the moment i
 read, never from when the file was written.
 
 **A dropped stream is a finished Segment and a wait, never a stopped camera.** When the camera's
-stream ends (it stopped publishing, MediaMTX restarted, or it went silent for `stall_after`),
+stream ends (it stopped publishing, MediaMTX restarted, or it went silent for `Source.stall_after`),
 its Segment is finished `stream_ended` and the recorder connects again after a wait that doubles
 from `first_wait` to `last_wait` and starts again from `first_wait` once video arrives. The time
 the camera was away is the gap between two Segments, stated rather than filled. That it was lost
@@ -54,8 +54,6 @@ class Timing:
     #: Seconds to wait before connecting again, doubling from the first to the last.
     first_wait: float = 1.0
     last_wait: float = 10.0
-    #: Seconds of silence on a connection before it is given up on.
-    stall_after: float = 10.0
 
 
 class Backoff:

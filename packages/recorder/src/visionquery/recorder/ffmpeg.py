@@ -14,8 +14,13 @@ make every such camera fail to record at all.
 
 **ffmpeg's stderr is piped, never inherited** (ADR 0012): each line is logged at DEBUG, and the
 last few say why a recording ended, all scrubbed of credentials first, because ffmpeg repeats
-the URL it was given in its errors. The URL, with VisionQuery's own MediaMTX password, is on
-ffmpeg's command line, which only the recorder's own container can see.
+the URL it was given in its errors.
+
+**The URL is never on ffmpeg's command line** (ADR 0019). A command line is readable by every
+user of the host, a container's processes being the host's, and the URL carries the password of
+the MediaMTX user that can read every camera. An RTSP source is handed to ffmpeg in a file only
+the recorder can read (`visionquery.runtime.private_input`), which lives as long as the
+recording does.
 
 Adapted from phyOS's Photon recorder (`adapters.photon.recorder`).
 """
@@ -24,7 +29,7 @@ import asyncio
 import contextlib
 import logging
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Generator
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Self
@@ -33,6 +38,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import SecretStr
 from visionquery.recorder.mp4 import Fragment, Init, Stream
 from visionquery.runtime import scrub
+from visionquery.runtime.private_input import private_ffmpeg_input
 
 __all__ = ["Recording", "Source"]
 
@@ -83,17 +89,26 @@ class Source:
             text = text.replace(self._password, "***")
         return scrub(text)
 
-    def argv(self) -> list[str]:
+    @contextlib.contextmanager
+    def command(self) -> Generator[list[str]]:
+        """The ffmpeg command line for this source, which holds no credential: an RTSP URL is
+        read from a private file that exists until the block ends."""
         url = self.url.get_secret_value()
-        transport: list[str] = []
         if url.startswith(("rtsp://", "rtsps://")):
-            transport = [
-                "-rtsp_transport", "tcp",
-                "-timeout", str(round(self.stall_after * 1_000_000)),
-            ]  # fmt: skip
+            # A camera can stop sending without anything closing the connection, and without a
+            # timeout the recorder would wait for ever, never finishing what it has.
+            options = {
+                "rtsp_transport": "tcp",
+                "timeout": str(round(self.stall_after * 1_000_000)),
+            }
+            with private_ffmpeg_input(url, options) as source:
+                yield self._argv([*self.options, *source])
+        else:
+            yield self._argv([*self.options, "-i", url])
+
+    def _argv(self, source: list[str]) -> list[str]:
         return [
-            self.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error",
-            *transport, *self.options, "-i", url,
+            self.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", *source,
             "-map", "0:v:0", "-c", "copy",
             "-f", "mp4", "-movflags", _FRAGMENTED, "-flush_packets", "1",
             "pipe:1",
@@ -114,14 +129,25 @@ class Recording:
         self._process: asyncio.subprocess.Process | None = None
         self._stderr: deque[str] = deque(maxlen=_LAST_WORDS)
         self._drain: asyncio.Task[None] | None = None
+        self._held = contextlib.ExitStack()
+
+    @property
+    def pid(self) -> int | None:
+        """ffmpeg's process id while it runs."""
+        return None if self._process is None else self._process.pid
 
     async def __aenter__(self) -> Self:
-        self._process = await asyncio.create_subprocess_exec(
-            *self.source.argv(),
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        argv = self._held.enter_context(self.source.command())
+        try:
+            self._process = await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except BaseException:
+            self._held.close()
+            raise
         self._drain = asyncio.create_task(self._read_stderr())
         return self
 
@@ -132,7 +158,10 @@ class Recording:
         tb: TracebackType | None,
     ) -> None:
         # Whoever iterated has left, perhaps on an error with ffmpeg's stdout unread.
-        await self.stop(drain=True)
+        try:
+            await self.stop(drain=True)
+        finally:
+            self._held.close()
 
     async def _read_stderr(self) -> None:
         assert self._process is not None

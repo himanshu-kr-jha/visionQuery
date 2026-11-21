@@ -8,10 +8,14 @@ import asyncio
 import logging
 import subprocess
 import time
+import uuid
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
+from publishers import PASSWORD, open_paths
 from pydantic import SecretStr
+from real_mediamtx import READER_USER, MediaMTX
 from visionquery.recorder.ffmpeg import Recording, Source
 from visionquery.recorder.mp4 import Fragment, Init
 
@@ -136,9 +140,154 @@ def test_leaving_without_reading_does_not_hang(ffmpeg: Path, clip: Path) -> None
 
 
 def test_an_rtsp_source_is_read_over_tcp_and_given_up_on_when_silent(ffmpeg: Path) -> None:
-    argv = source(ffmpeg, "rtsp://visionquery:pw@mediamtx:8554/dock").argv()
+    """The options are the input file's, where they apply to the camera's connection."""
+    seen: list[str] = []
+    with source(ffmpeg, "rtsp://visionquery:pw@mediamtx:8554/dock").command() as argv:
+        listed = Path(argv[argv.index("-i") + 1])
+        seen = listed.read_text().splitlines()
 
-    assert argv[argv.index("-rtsp_transport") + 1] == "tcp"
-    assert int(argv[argv.index("-timeout") + 1]) == 10_000_000
     assert argv[argv.index("-c") + 1] == "copy"
     assert argv[argv.index("-map") + 1] == "0:v:0"
+    assert seen == [
+        "ffconcat version 1.0",
+        "file 'rtsp://visionquery:pw@mediamtx:8554/dock'",
+        "option rtsp_transport tcp",
+        "option timeout 10000000",
+    ]
+    assert not listed.exists(), "the file lives as long as the command does"
+
+
+# --- credentials never reach a command line (ADR 0019) -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "rtsp://visionquery-reader:Pa55w0rd-Zz@mediamtx:8554/dock",
+        "rtsps://visionquery-reader:Pa55w0rd-Zz@mediamtx:8322/dock",
+        "rtsp://visionquery-reader:Pa55w0rd-Zz@mediamtx:8554/dock?token=Pa55w0rd-Zz",
+    ],
+)
+def test_no_command_line_the_recorder_builds_holds_the_password_or_the_user(
+    ffmpeg: Path, url: str
+) -> None:
+    with source(ffmpeg, url).command() as argv:
+        joined = " ".join(argv)
+
+    assert "Pa55w0rd-Zz" not in joined
+    assert "visionquery-reader" not in joined
+    assert "mediamtx" not in joined, "the URL is wholly in the file"
+
+
+def test_the_read_password_is_in_no_process_listing_while_ffmpeg_reads_a_camera(
+    mediamtx: MediaMTX, ffmpeg: Path
+) -> None:
+    """What any user of the host sees with `ps` while the recorder reads a camera: the password
+    of the MediaMTX user that can read every camera must not be in it, nor in the process's
+    `/proc/<pid>/cmdline`, which is where `ps` reads it.
+
+    It also proves the input file's `rtsp_transport` option is applied: ffmpeg is allowed only
+    the file, RTSP and TCP, and fails outright the moment it tries UDP."""
+    open_paths(mediamtx, "dock")
+    url = mediamtx.rtsp_url("dock", READER_USER, mediamtx.reader_password)
+    password = mediamtx.reader_password
+
+    async def run() -> tuple[str, str]:
+        async with Recording(source(ffmpeg, url)) as recording:
+            pid = recording.pid
+            assert pid is not None
+            items = aiter(recording)
+            try:
+                await anext(items)  # the Init: ffmpeg has read the camera
+            except StopAsyncIteration:
+                pytest.fail(f"ffmpeg read nothing: {recording.ended_because}")
+            listing = subprocess.run(
+                ["ps", "-eo", "args"], capture_output=True, text=True, check=True, timeout=30
+            ).stdout
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+            return listing, cmdline
+
+    with mediamtx.publishing("dock", "dock", PASSWORD):
+        listing, cmdline = asyncio.run(asyncio.wait_for(run(), timeout=60))
+
+    assert str(ffmpeg) in cmdline, "the process looked at is the recorder's ffmpeg"
+    assert password not in cmdline
+    assert password not in listing
+    assert READER_USER not in cmdline, "nor the user's name: it is half of the credential"
+    assert "127.0.0.1" not in cmdline, "the URL itself is in a file only the recorder can read"
+
+
+def test_a_camera_that_goes_silent_is_given_up_on_after_the_timeout_in_the_file(
+    mediamtx: MediaMTX, ffmpeg: Path
+) -> None:
+    """A camera can stop sending without anything closing its connection (here its container is
+    paused). The `timeout` option, now an `option` line of the input file, is what makes ffmpeg
+    give up on it, so that the recorder finishes what it has and connects again."""
+    open_paths(mediamtx, "dock")
+    url = mediamtx.rtsp_url("dock", READER_USER, mediamtx.reader_password)
+    name = f"vq-test-silent-{uuid.uuid4().hex[:12]}"
+
+    async def run() -> tuple[float, str | None]:
+        stalled = Source(url=SecretStr(url), ffmpeg=str(ffmpeg), stall_after=2.0)
+        async with Recording(stalled) as recording:
+            items = aiter(recording)
+            await anext(items)
+            subprocess.run(["docker", "pause", name], check=True, capture_output=True, timeout=30)
+            began = time.monotonic()
+            async for _ in items:
+                pass
+            return time.monotonic() - began, recording.ended_because
+
+    with mediamtx.publishing("dock", "dock", PASSWORD, name=name):
+        try:
+            waited, why = asyncio.run(asyncio.wait_for(run(), timeout=60))
+        finally:
+            subprocess.run(["docker", "unpause", name], capture_output=True, timeout=30)
+
+    assert 1.5 <= waited < 12, f"given up on after {waited:.1f} s, not the 2 s asked for"
+    assert why is not None
+    assert why.startswith("ffmpeg exited ")
+
+
+def test_a_live_camera_read_through_the_file_keeps_its_own_timestamps(
+    mediamtx: MediaMTX, ffmpeg: Path, tmp_path: Path
+) -> None:
+    """Reading through the concat demuxer must not move a frame: Fragments follow one another
+    in decode time, each lasting what the camera's keyframe interval says (a keyframe a
+    second), and the whole plays from time zero without a jump."""
+    open_paths(mediamtx, "dock")
+    url = mediamtx.rtsp_url("dock", READER_USER, mediamtx.reader_password)
+
+    async def run() -> list[Init | Fragment]:
+        async with Recording(source(ffmpeg, url)) as recording:
+            items: list[Init | Fragment] = []
+            async for item in recording:
+                items.append(item)
+                if sum(isinstance(i, Fragment) for i in items) == 4:
+                    await recording.stop()
+            return items
+
+    with mediamtx.publishing("dock", "dock", PASSWORD):
+        items = asyncio.run(asyncio.wait_for(run(), timeout=60))
+
+    fragments = [item for item in items if isinstance(item, Fragment)]
+    assert len(fragments) >= 4
+    assert all(abs(frag.seconds - 1.0) < 0.15 for frag in fragments[:3]), [
+        frag.seconds for frag in fragments
+    ]
+    for before, after in pairwise(fragments):
+        assert after.decode_time == before.decode_time + before.duration
+    whole = tmp_path / "live.mp4"
+    whole.write_bytes(b"".join(item.data for item in items if not isinstance(item, Init)))
+    head = next(item for item in items if isinstance(item, Init))
+    whole.write_bytes(head.data + whole.read_bytes())
+    decoded = subprocess.run(
+        [str(ffmpeg), "-nostdin", "-v", "error", "-i", str(whole), "-f", "framecrc", "-"],
+        capture_output=True, text=True, check=False, timeout=60,
+    )  # fmt: skip
+    assert decoded.returncode == 0, decoded.stderr
+    times = [
+        int(line.split(",")[2]) for line in decoded.stdout.splitlines() if not line.startswith("#")
+    ]
+    assert times == sorted(times), "frames in order"
+    assert times[0] < 15_000, "the timeline starts at the camera's first frame"

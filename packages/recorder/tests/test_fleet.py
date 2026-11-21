@@ -25,13 +25,14 @@ from visionquery.recorder.segment import Segment, segments
 ADDED = datetime(2026, 10, 6, tzinfo=UTC)
 DOCK = Camera(1, "Dock", "dock", None, ADDED, None)
 GATE = Camera(2, "Gate 2", "gate", None, ADDED, None)
-TIMING = Timing(segment=timedelta(seconds=2), first_wait=0.2, last_wait=1.0, stall_after=5.0)
+TIMING = Timing(segment=timedelta(seconds=2), first_wait=0.2, last_wait=1.0)
+STALL_AFTER = 5.0
 
 
 def sources(server: MediaMTX, ffmpeg: Path) -> Callable[[Camera], Source]:
     def source(camera: Camera) -> Source:
         url = server.rtsp_url(camera.path, READER_USER, server.reader_password)
-        return Source(url=SecretStr(url), ffmpeg=str(ffmpeg), stall_after=TIMING.stall_after)
+        return Source(url=SecretStr(url), ffmpeg=str(ffmpeg), stall_after=STALL_AFTER)
 
     return source
 
