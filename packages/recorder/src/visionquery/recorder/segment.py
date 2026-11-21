@@ -46,6 +46,7 @@ import logging
 import os
 import re
 import shutil
+import struct
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -432,6 +433,78 @@ def _read_closed(path: Path) -> Segment:
     )
 
 
+def _init_size(data: Path) -> int:
+    """Where the first Fragment begins: the init's size, read from the boxes' own headers."""
+    at = 0
+    with data.open("rb") as file:
+        while header := file.read(8):
+            if len(header) < 8:
+                break
+            size, kind = struct.unpack(">I4s", header)
+            if kind == b"moof":
+                return at
+            if size == 1:
+                (size,) = struct.unpack(">Q", file.read(8).ljust(8, b"\0"))
+            if size < 8:
+                break
+            at += size
+            file.seek(at)
+    return at  # no Fragment yet: everything is init
+
+
+def _instant(raw: object) -> datetime:
+    value = datetime.fromisoformat(str(raw))
+    if value.tzinfo is None:
+        raise ValueError(f"{raw!r} has no time zone")
+    return value
+
+
+def _timed(entry: dict[str, Any], key: str) -> datetime:
+    return _instant(entry[key])
+
+
+def _validate(lines: list[dict[str, Any]], *, init_size: int) -> None:
+    """Raise ValueError unless the index says only what the writer could have written.
+
+    A writer fsyncs each whole line, in order, so its `end`s grow past the init, its arrivals
+    never go back, every Fragment lasts, and the first line begins no later than it arrives,
+    with a window that is a start before an end. An index that says otherwise is damaged, and
+    nothing it says can be trusted: `recover` quarantines it, with the media untouched, rather
+    than cut the file at an `end` or publish a span it names."""
+    previous_end = init_size
+    previous_arrived: datetime | None = None
+    for number, entry in enumerate(lines, 1):
+        end, seconds = entry["end"], entry["seconds"]
+        if not isinstance(end, int) or isinstance(end, bool) or end <= previous_end:
+            raise ValueError(f"line {number}: end {end!r} does not follow {previous_end}")
+        if (
+            not isinstance(seconds, int | float)
+            or isinstance(seconds, bool)
+            or not seconds > 0
+            or seconds == float("inf")
+        ):
+            raise ValueError(f"line {number}: a Fragment of {seconds!r} seconds")
+        arrived = _timed(entry, "arrived")
+        if previous_arrived is not None and arrived < previous_arrived:
+            raise ValueError(f"line {number}: arrived {arrived} before {previous_arrived}")
+        previous_end, previous_arrived = end, arrived
+    if not lines:
+        return
+    first = lines[0]
+    begins = _timed(first, "from")
+    if begins > _timed(first, "arrived"):
+        raise ValueError(f"the Segment begins ({begins}) after its first Fragment arrived")
+    window = first.get("window")
+    if window is not None:
+        if not isinstance(window, list) or len(window) != 2:
+            raise ValueError(f"window {window!r} is not a start and an end")
+        start, end_of_window = (_instant(window[0]), _instant(window[1]))
+        # Whether the Segment lies inside it is `span_problem`'s to judge, not damage: a stall
+        # before its first Fragment puts the Segment outside its window and it is still whole.
+        if not start < end_of_window:
+            raise ValueError(f"window {start} to {end_of_window} ends before it begins")
+
+
 def _recover(path: Path) -> Segment | None:
     """Truncate an unfinished Segment to its last vouched-for Fragment and finish it."""
     data, index, closed = _files(path)
@@ -445,6 +518,7 @@ def _recover(path: Path) -> Segment | None:
                 break  # a line the crash interrupted vouches for nothing
             lines.append(json.loads(line))
     size = data.stat().st_size if data.exists() else 0
+    _validate(lines, init_size=_init_size(data) if size else 0)
     lines = [entry for entry in lines if entry["end"] <= size]
     if not lines:
         for file in _files(path):

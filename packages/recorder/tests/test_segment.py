@@ -545,11 +545,66 @@ def no_from(path: Path) -> None:
     index.write_text("".join(json.dumps(line) + "\n" for line in [first, *rest]))
 
 
-def end_before_begin(path: Path) -> None:
+def edited(path: Path, change: Callable[[list[dict[str, Any]]], None]) -> None:
+    """Rewrite a Segment's index after `change` has altered its lines in place."""
     index = path.with_suffix(".frags")
-    first, *rest = [json.loads(line) for line in index.read_text().splitlines()]
-    first["from"] = (AT + timedelta(hours=1)).isoformat()
-    index.write_text("".join(json.dumps(line) + "\n" for line in [first, *rest]))
+    lines = [json.loads(line) for line in index.read_text().splitlines()]
+    change(lines)
+    index.write_text("".join(json.dumps(line) + "\n" for line in lines))
+
+
+def end_before_begin(path: Path) -> None:
+    edited(path, lambda lines: lines[0].update({"from": (AT + timedelta(hours=1)).isoformat()}))
+
+
+def ends_out_of_order(path: Path) -> None:
+    def swap(lines: list[dict[str, Any]]) -> None:
+        lines[0]["end"], lines[-1]["end"] = lines[-1]["end"], lines[0]["end"]
+
+    edited(path, swap)
+
+
+def ends_inside_the_init(path: Path) -> None:
+    edited(path, lambda lines: lines[0].update({"end": 1}))
+
+
+def negative_seconds(path: Path) -> None:
+    edited(path, lambda lines: lines[-1].update({"seconds": -1e9}))
+
+
+def zero_seconds(path: Path) -> None:
+    edited(path, lambda lines: lines[0].update({"seconds": 0}))
+
+
+def missing_end(path: Path) -> None:
+    edited(path, lambda lines: lines[-1].pop("end"))
+
+
+def missing_arrived(path: Path) -> None:
+    edited(path, lambda lines: lines[-1].pop("arrived"))
+
+
+def missing_seconds(path: Path) -> None:
+    edited(path, lambda lines: lines[-1].pop("seconds"))
+
+
+def decreasing_arrived(path: Path) -> None:
+    edited(path, lambda lines: lines[-1].update({"arrived": (AT - timedelta(hours=1)).isoformat()}))
+
+
+def window_not_a_pair(path: Path) -> None:
+    edited(path, lambda lines: lines[0].update({"window": ["nonsense"]}))
+
+
+def window_backwards(path: Path) -> None:
+    def backwards(lines: list[dict[str, Any]]) -> None:
+        start = datetime.fromisoformat(lines[0]["from"])
+        lines[0]["window"] = [
+            (start + timedelta(seconds=5)).isoformat(),
+            (start - timedelta(seconds=5)).isoformat(),
+        ]
+
+    edited(path, backwards)
 
 
 def index_not_text(path: Path) -> None:
@@ -562,7 +617,23 @@ def index_not_utf8(path: Path) -> None:
     path.with_suffix(".frags").write_bytes(b"\xff\xfe{}\n")
 
 
-DAMAGES = [damaged_line, no_from, index_not_text, index_not_utf8]
+DAMAGES = [
+    damaged_line,
+    no_from,
+    end_before_begin,
+    ends_out_of_order,
+    ends_inside_the_init,
+    negative_seconds,
+    zero_seconds,
+    missing_end,
+    missing_arrived,
+    missing_seconds,
+    decreasing_arrived,
+    window_not_a_pair,
+    window_backwards,
+    index_not_text,
+    index_not_utf8,
+]
 
 
 @pytest.mark.parametrize("damage", DAMAGES)
@@ -573,6 +644,7 @@ def test_a_segment_that_cannot_be_recovered_is_quarantined_beside_one_that_can(
     bad = unfinished(footage / "1")
     good = unfinished(footage / "2", count=3)
     damage(bad)
+    media = bad.read_bytes()
     told: list[Path] = []
     caplog.set_level(logging.ERROR, logger="visionquery.recorder")
 
@@ -591,6 +663,8 @@ def test_a_segment_that_cannot_be_recovered_is_quarantined_beside_one_that_can(
         bad.with_suffix(".frags").name,
         bad.with_suffix(".closed").name,
     }
+    # Nothing was cut from the media before the damage was found.
+    assert (moved / bad.name).read_bytes() == media
     # The next start does not meet it again, and the good one is finished for good.
     caplog.clear()
     assert recover(footage) == []
@@ -598,19 +672,29 @@ def test_a_segment_that_cannot_be_recovered_is_quarantined_beside_one_that_can(
     assert [segment.path for segment in segments(footage / "2")] == [good]
 
 
-def test_a_recovered_segment_whose_index_ends_before_it_begins_is_finished_not_verified(
+def test_a_recovered_segment_that_overran_its_window_is_finished_not_verified(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A span no clock could have recorded is the same fact in `recover` as in `close`: it is
-    said (ERROR) and the Segment is kept unverified, so that no camera stops over it."""
+    """The one span `recover` keeps although it cannot be true: a live Segment that ran past its
+    window (a stall) is a fact about the time, and the index is whole. It is said (ERROR) and
+    kept unverified, so that no camera stops over it."""
     path = unfinished(tmp_path / "1")
-    end_before_begin(path)
+
+    def overran(lines: list[dict[str, Any]]) -> None:
+        start = datetime.fromisoformat(lines[0]["from"])
+        lines[0]["window"] = [
+            (start - timedelta(seconds=1)).isoformat(),
+            (start + timedelta(seconds=1)).isoformat(),
+        ]
+        lines[-1]["arrived"] = (start + timedelta(hours=1)).isoformat()
+
+    edited(path, overran)
     caplog.set_level(logging.ERROR, logger="visionquery.recorder")
 
     (found,) = recover(tmp_path)
 
-    assert (found.reason, found.verified) == ("recovered", False)
-    assert "before it begins" in caplog.records[0].getMessage()
+    assert (found.reason, found.verified, found.fragments) == ("recovered", False, 2)
+    assert "outside its window" in caplog.records[0].getMessage()
 
 
 def test_a_segment_whose_media_is_gone_has_nothing_to_recover_and_stops_nothing(
