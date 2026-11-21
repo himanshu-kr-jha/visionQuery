@@ -56,6 +56,35 @@ OTHER_MARKERS = [
     "Generated with `" + "Claude Code`",
     "Generated with [**" + "Claude Code**](https://example.com)",
     "Generated with *" + "Claude* *Code*",
+    # The hyphenated key is a trailer's and never prose: refused wherever it stands.
+    "<p>Co-" + "Authored-By: Claude Opus 5.5</p>",
+    "<b>Co-" + "Authored-By:</b> Claude Opus 5.5",
+    "<details><summary>Co-" + "Authored-By: Claude Opus 5.5</summary>",
+    "[Co-" + "Authored-By]: Claude Opus 5.5",
+    "[Co-" + "Authored-By](x): Claude Opus 5.5",
+    "~~Co-" + "Authored-By~~: Claude Opus 5.5",
+    "| Co-" + "Authored-By | Claude Opus 5.5 |",
+    "Co-" + "Authored-By&#58; Claude Opus 5.5",
+    "Co-" + "Authored-By\uff1a Claude Opus 5.5",
+    "Note: Co-" + "Authored-By: Claude Opus 5.5",
+    "Thanks. Co-" + "Authored-By: Claude Opus 5.5",
+    "Co-" + "Authored-By Claude Opus 5.5",
+    "coauthored-" + "by Claude Opus 5.5",
+    # Written to look different from the text a reader sees, or from what a check reads.
+    "Co-Auth\u200bored-By: Claude Opus 5.5",
+    "claude\u200b" + ".ai/code/session_01ABC",
+    "Generated with Clau\u200bde Code",
+    "Co\u2011Authored\u2011By: Claude Opus 5.5",
+    "Co-Auth\u043ered-By: Claude Opus 5.5",
+    "C\u043e-Auth\u043ered-By: Claude Opus 5.5",
+    'Generated with <a href="https://example.com">Claude Code</a>',
+    "Generated with<br>Claude Code",
+    "Co&#45;Authored-By: Claude Opus 5.5",
+    "noreply&#64;anthropic.com",
+    "claude%2Eai/code/session_01ABC",
+    "https://claude" + ".com/claude-code",
+    "[Claude](https://claude.com/claude-code)",
+    "CLAUDE.COM/CLAUDE-CODE",
 ]
 
 
@@ -263,13 +292,12 @@ def test_other_spellings_of_the_markers_fail_in_a_commit_message(
     assert _check(str(message)).returncode == 1, marker
 
 
-#: The trailers' words in a sentence: no colon after them, or not at the line's start.
+#: The spaced trailer words in a sentence: no colon after them, or not at the line's start.
 TRAILER_WORDS_IN_PROSE = [
     "This paper was co-" + "authored by two people.",
     "I resumed the Claude " + "session yesterday.",
     "I resumed the Claude " + "Code session yesterday.",
     "Co-" + "authored by two people: Alice and Bob.",
-    "The note says co-" + "authored-by: nobody, as a quote.",
 ]
 
 
