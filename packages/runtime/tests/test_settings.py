@@ -6,7 +6,10 @@ from typing import Self
 
 import pytest
 from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic_settings import BaseSettings, EnvSettingsSource
+from pydantic_settings import SettingsError as SourceError
 from visionquery.runtime import Settings, SettingsError, VariableError
+from visionquery.runtime.settings import SOURCE_ERROR_FIELD
 
 
 class RecorderSettings(Settings):
@@ -227,6 +230,7 @@ def test_a_field_with_an_alias_is_rejected_when_the_settings_are_declared() -> N
 
 class Pool(BaseModel):
     hosts: list[str] = []
+    zones: list[str] = []
     size: int = 5
 
 
@@ -277,6 +281,108 @@ def test_an_invalid_item_names_the_variable_that_holds_it(
     error = _bad_variables(monkeypatch, name, value)
     assert error.variables == (name,)
     assert f"{name} is invalid: " in str(error)
+    assert "hunter2" not in str(error)
+
+
+def test_every_list_or_dict_that_is_not_json_is_named_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # pydantic-settings stops at the first value it cannot decode; the Operator should not
+    # have to fix them one restart at a time.
+    monkeypatch.setenv("VISIONQUERY_PORTS", "hunter2")
+    monkeypatch.setenv("VISIONQUERY_LIMITS", "hunter3")
+    monkeypatch.setenv("VISIONQUERY_POOL__HOSTS", "hunter4")
+    monkeypatch.setenv("VISIONQUERY_POOL__ZONES", "hunter5")
+    with pytest.raises(SettingsError) as raised:
+        FleetSettings.load()
+    error = raised.value
+    assert error.variables == (
+        "VISIONQUERY_PORTS",
+        "VISIONQUERY_LIMITS",
+        "VISIONQUERY_POOL__HOSTS",
+        "VISIONQUERY_POOL__ZONES",
+    )
+    assert str(error).count("is invalid: not valid JSON") == 4
+    assert "hunter" not in str(error)
+    assert error.__cause__ is None
+    assert error.__suppress_context__
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["VISIONQUERY_PORTS", "VISIONQUERY_LIMITS", "VISIONQUERY_POOL", "VISIONQUERY_POOL__HOSTS"],
+)
+def test_a_list_dict_or_group_set_to_null_is_refused(
+    monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    # pydantic-settings drops a top-level null and falls back to the default, so a variable
+    # that is set would silently do nothing.
+    error = _bad_variables(monkeypatch, name, "null")
+    assert error.variables == (name,)
+    assert f"{name} is invalid: null is not accepted" in str(error)
+
+
+class OptionalPortsSettings(Settings):
+    ports: list[int] | None = Field(default_factory=lambda: [8554])
+
+
+def test_null_is_refused_even_where_the_field_could_be_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # It would not mean None: pydantic-settings would use the default, [8554].
+    monkeypatch.setenv("VISIONQUERY_PORTS", "null")
+    with pytest.raises(SettingsError) as raised:
+        OptionalPortsSettings.load()
+    assert raised.value.variables == ("VISIONQUERY_PORTS",)
+    assert "VISIONQUERY_PORTS is invalid: null is not accepted" in str(raised.value)
+
+
+class LooseSettings(Settings):
+    hosts: list[str] | str = "db"
+
+
+def test_a_field_that_also_takes_a_string_still_takes_one_that_is_not_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VISIONQUERY_HOSTS", "db-1")
+    assert LooseSettings.load().hosts == "db-1"
+    monkeypatch.setenv("VISIONQUERY_HOSTS", '["db-1", "db-2"]')
+    assert LooseSettings.load().hosts == ["db-1", "db-2"]
+
+
+class PlainSettings(BaseSettings):
+    footage_dir: str = "/srv/footage"
+
+
+@pytest.mark.parametrize("hook", ["_get_resolved_field_value", "prepare_field_value"])
+def test_the_source_error_pattern_matches_what_pydantic_settings_raises(
+    monkeypatch: pytest.MonkeyPatch, hook: str
+) -> None:
+    # `Settings.load` finds the field of a source error in pydantic-settings' message; if a
+    # new release rewords it, this fails rather than the error silently naming no variable.
+    def refuse(*args: object) -> object:
+        raise ValueError("cannot be read")
+
+    monkeypatch.setattr(EnvSettingsSource, hook, refuse)
+    with pytest.raises(SourceError) as raised:
+        PlainSettings()
+    named = SOURCE_ERROR_FIELD.search(str(raised.value))
+    assert named is not None, f"pydantic-settings now says: {raised.value}"
+    assert named.group(1) == "footage_dir"
+
+
+def test_a_source_error_while_parsing_is_named_as_a_variable_without_its_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refuse(*args: object) -> object:
+        raise ValueError("hunter2 cannot be parsed")
+
+    monkeypatch.setattr(EnvSettingsSource, "prepare_field_value", refuse)
+    with pytest.raises(SettingsError) as raised:
+        RecorderSettings.load()
+    error = raised.value
+    assert error.variables == ("VISIONQUERY_LOG_LEVEL",)
+    assert "VISIONQUERY_LOG_LEVEL could not be read" in str(error)
     assert "hunter2" not in str(error)
 
 

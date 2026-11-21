@@ -8,15 +8,17 @@ A service declares what it needs by extending `Settings` with its own fields:
     settings = RecorderSettings.load()  # reads VISIONQUERY_FOOTAGE_DIR
 
 A nested model is set with a double underscore (`VISIONQUERY_DATABASE__URL`), and a list or
-dict as JSON (`VISIONQUERY_PORTS='[8554, 8555]'`). A field takes no alias, so each is read
-from exactly the variable named after it, and an error names the variable that was set.
+dict as JSON (`VISIONQUERY_PORTS='[8554, 8555]'`); JSON `null` is refused for any of them,
+since unsetting the variable is how to ask for the default. A field takes no alias, so each
+is read from exactly the variable named after it, and an error names every variable that was
+set wrong at once.
 
 Credentials are declared as `SecretStr`, so neither `repr` nor a log line shows them.
 """
 
 import os
 import re
-from collections.abc import Iterable, Set
+from collections.abc import Iterable, Sequence, Set
 from typing import Annotated, Any, Literal, Self, override
 
 from pydantic import BaseModel, BeforeValidator, Field, ValidationError
@@ -34,6 +36,11 @@ __all__ = ["LogLevel", "Settings", "SettingsError"]
 PREFIX = "VISIONQUERY_"
 #: Between a nested group and its field, as in VISIONQUERY_DATABASE__URL.
 NESTED = "__"
+
+#: Finds the field in pydantic-settings' message for a source that failed to read one
+#: (`error getting value for field "ports" from source ...`); a test pins it to the
+#: installed release's wording.
+SOURCE_ERROR_FIELD = re.compile(r'field "(\w+)"')
 
 type LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 
@@ -93,15 +100,14 @@ class Settings(BaseSettings):
             return cls()
         except ValidationError as error:
             raise SettingsError(cls, _problems(cls, error)) from None
-        except SourceError as error:
+        except _UndecodableError as error:
             # pydantic-settings decodes lists, dicts and groups before validation, so a value
-            # that is not JSON fails here, outside the ValidationError.
-            cause = error.__cause__
-            if isinstance(cause, _NotJsonError):
-                raise SettingsError(cls, [(cause.variable, "is invalid: not valid JSON")]) from None
+            # that is not JSON, or is null, is refused here, outside the ValidationError.
+            raise SettingsError(cls, error.problems) from None
+        except SourceError as error:
             # Any other failure of the source names its field in quotes; its cause may hold
             # the value, so only the variable is kept.
-            named = re.search(r'field "(\w+)"', str(error))
+            named = SOURCE_ERROR_FIELD.search(str(error))
             variable = f"{PREFIX}{named.group(1)}".upper() if named else None
             raise SettingsError(cls, [(variable, "could not be read")]) from None
 
@@ -176,24 +182,35 @@ def _holding(loc: tuple[int | str, ...], present: Set[str]) -> str:
     return _variable(loc)
 
 
-class _NotJsonError(ValueError):
-    """The value of `variable`, a list, dict or nested group, is not valid JSON."""
+class _UndecodableError(ValueError):
+    """Lists, dicts or nested groups whose variables are not valid JSON, or are null."""
 
-    def __init__(self, variable: str) -> None:
-        super().__init__(f"{variable} is not valid JSON")
-        self.variable = variable
+    def __init__(self, problems: Sequence[Problem]) -> None:
+        super().__init__("; ".join(f"{variable} {what}" for variable, what in problems))
+        self.problems = tuple(problems)
 
 
 class _Environment(EnvSettingsSource):
-    """The environment, naming the variable whose list, dict or group is not valid JSON.
+    """The environment, naming every variable whose list, dict or group cannot be decoded.
 
-    pydantic-settings decodes those values itself, before validation, and reports a failure
-    for the field as a whole, without saying which variable held it.
+    pydantic-settings decodes those values itself, before validation, and stops at the first
+    that is not JSON, reporting the field as a whole without saying which variable held it.
+    It also drops a top-level null, so the default would be used for a variable that is set;
+    null is refused instead, wherever it is given (unset the variable for the default).
     """
 
     def __init__(self, settings_cls: type[BaseSettings]) -> None:
         super().__init__(settings_cls)
         self._field_variable = ""
+        self._undecodable: list[Problem] = []
+
+    @override
+    def __call__(self) -> dict[str, Any]:
+        self._undecodable = []
+        values = super().__call__()
+        if self._undecodable:
+            raise _UndecodableError(self._undecodable)
+        return values
 
     @override
     def prepare_field_value(
@@ -204,11 +221,23 @@ class _Environment(EnvSettingsSource):
         return super().prepare_field_value(field_name, field, value, value_is_complex)
 
     @override
-    def decode_complex_value(self, field_name: str, field: FieldInfo, value: Any) -> Any:
+    def decode_complex_value(self, field_name: str, field: FieldInfo | None, value: Any) -> Any:
+        # `field` is None for an item of a dict (pydantic-settings passes None despite its
+        # annotation), whose value is kept as text when it is not JSON, as it is for a field
+        # that also takes a string.
         try:
-            return super().decode_complex_value(field_name, field, value)
-        except ValueError as error:
-            raise _NotJsonError(self._holding(field_name, value)) from error
+            decoded = super().decode_complex_value(field_name, field, value)  # pyright: ignore[reportArgumentType]
+        except ValueError:
+            if field is None or self._field_is_complex(field)[1]:
+                raise
+            return self._refuse(field_name, value, "not valid JSON")
+        if decoded is None:
+            return self._refuse(field_name, value, "null is not accepted; unset it for the default")
+        return decoded
+
+    def _refuse(self, name: str, value: object, what: str) -> None:
+        """Note the variable holding `value` as invalid, and read the rest before refusing."""
+        self._undecodable.append((self._holding(name, value), f"is invalid: {what}"))
 
     def _holding(self, name: str, value: object) -> str:
         """The variable of the current field, or under it, that ends in `name` and holds `value`."""
