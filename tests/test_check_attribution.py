@@ -85,6 +85,31 @@ OTHER_MARKERS = [
     "https://claude" + ".com/claude-code",
     "[Claude](https://claude.com/claude-code)",
     "CLAUDE.COM/CLAUDE-CODE",
+    # Markdown escapes, emphasis and code spans inside the key, which GitHub renders away.
+    "Co\\-" + "Authored\\-By: Claude Opus 5.5",
+    "See claude\\" + ".ai/code/session_01ABC",
+    "Someone <noreply\\" + "@anthropic.com>",
+    "noreply\\" + "@anthropic\\.com",
+    "Co-**Authored**-" + "By: Claude Opus 5.5",
+    "Co-Auth*ored*-" + "By: Claude Opus 5.5",
+    "Co-Auth`ored`-" + "By: Claude Opus 5.5",
+    "Co-Auth_ored_-" + "By: Claude Opus 5.5",
+    "**Co-Authored-" + "By**: Claude Opus 5.5",
+    # Characters that show as nothing, or as a hyphen, or that sit on the letter before them.
+    "Co-Authored-By\u034f: Claude Opus 5.5",
+    "Co-Auth\ufe00ored-By: Claude Opus 5.5",
+    "Co\u3164-Authored-By: Claude Opus 5.5",
+    "Co\u115f-Authored-By: Claude Opus 5.5",
+    "Co\uffa0-Authored-By: Claude Opus 5.5",
+    "Co\u02d7Authored\u02d7By: Claude Opus 5.5",
+    "Co\u2043Authored\u2043By: Claude Opus 5.5",
+    "Co\u058aAuthored\u058aBy: Claude Opus 5.5",
+    "Co\u30fcAuthored\u30fcBy: Claude Opus 5.5",
+    "Co-Authored-By\u0301: Claude Opus 5.5",
+    "Co-Authored-B\u0301y: Claude Opus 5.5",
+    "Co-Authored-By:\u0301 Claude Opus 5.5",
+    "Claude\u034f Session: abc",
+    "Generated with Claude Co\u0301de",
 ]
 
 
@@ -298,6 +323,9 @@ TRAILER_WORDS_IN_PROSE = [
     "I resumed the Claude " + "session yesterday.",
     "I resumed the Claude " + "Code session yesterday.",
     "Co-" + "authored by two people: Alice and Bob.",
+    "Co-" + "authored -- by the way, it works.",
+    "It was co-" + "authored - by the reviewers.",
+    "Caf\u00e9 r\u00e9sum\u00e9, snake_case_names and *emphasis* in a `code span`.",
 ]
 
 

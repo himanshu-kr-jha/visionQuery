@@ -16,8 +16,9 @@ on:
     branches: [develop, main]
     # Not `edited` (a title, body or base change): pr-edited.yml re-runs the commits job alone
     # then, since the rest of the suite reads neither the title nor the body. An edit that changes
-    # the base fails that job (its "base changed" step): close and reopen the PR, so that every
-    # check runs against the new base.
+    # the base fails that job (its "base changed" step): push a commit (merge origin/<new base>,
+    # or an empty commit), so that every check runs against the new base. GitHub reads the latest
+    # result of every run's `commits` for the head, so a red or cancelled one is re-run.
     types: [opened, synchronize, reopened]
   push:
     branches: [develop, main]
@@ -146,7 +147,7 @@ jobs:
       - name: A PR moved to another base is refused
         if: github.event.changes.base
         run: |
-          echo "The base changed: close and reopen the PR so that every check runs against it." >&2
+          echo "The base changed: push a commit (merge origin/<new base>, or an empty commit) so that every check runs against it; a re-run of this job would not clear it." >&2
           exit 1
       - name: The PR's commits, title and body carry no attribution, and the title is a Conventional Commit
         if: github.event_name == 'pull_request'
@@ -155,15 +156,16 @@ jobs:
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          pr=$(gh api "repos/$REPO/pulls/$PR_NUMBER")
+          pr=$(gh api -H "Accept: application/vnd.github.full+json" "repos/$REPO/pulls/$PR_NUMBER")
           PR_TITLE=$(jq -r '.title' <<<"$pr")
           PR_BODY=$(jq -r '.body // ""' <<<"$pr")
+          PR_BODY_TEXT=$(jq -r '.body_text // ""' <<<"$pr")
           base=$(jq -r '.base.sha' <<<"$pr")
           head=$(jq -r '.head.sha' <<<"$pr")
-          export PR_TITLE PR_BODY
+          export PR_TITLE PR_BODY PR_BODY_TEXT
           git fetch --quiet origin "refs/pull/$PR_NUMBER/head"
           uv run --frozen scripts/check_attribution.py --commits "$base..$head"
-          uv run --frozen scripts/check_attribution.py --env PR_TITLE --env PR_BODY
+          uv run --frozen scripts/check_attribution.py --env PR_TITLE --env PR_BODY --env PR_BODY_TEXT
           uv run --frozen scripts/check_commit_message.py --env PR_TITLE
       - name: Pushed commits carry no attribution
         if: github.event_name == 'push'

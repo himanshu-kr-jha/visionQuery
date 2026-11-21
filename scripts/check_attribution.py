@@ -8,8 +8,13 @@
                                                  is nothing to check)
 
 The text is normalised before matching (HTML entities and percent-encoding undone, tags
-removed, NFKC, invisible format characters dropped, dash and letter look-alikes mapped), so a
-marker written to look different from what a reader sees is still found.
+removed, Markdown backslash escapes undone, emphasis marks between letters dropped, NFKD with
+invisible and combining characters dropped, every dash and hyphen look-alike mapped to a hyphen,
+Cyrillic and Greek letter look-alikes mapped), so a marker written to look different from what a
+reader sees is still found; in CI the body is also checked as GitHub renders it (`body_text`).
+Letter look-alikes outside the table below (other scripts, the Latin letters of other blocks that
+NFKD does not fold) are a known limit: the check finds the text as written, not every text that
+could be made to look like it.
 Matching is case-insensitive, and the footer is found across spaces, hyphens and line breaks.
 This enforces the trailer forms CLAUDE.md names, not the whole "no agent attribution" rule,
 which still binds whoever writes the text: the hyphenated trailer key is refused wherever it
@@ -43,7 +48,7 @@ from pathlib import Path
 _LINE_START = r"^[^a-z\n]*"
 _KEY_END = r"[ \t*_`]*:"
 FORBIDDEN = re.compile(
-    r"co[\s-]*authored[ \t]*-[\s-]*by"
+    r"co[\s-]*authored-[\s-]*by"
     r"|claude[ \t]*-[ \t-]*session"
     rf"|{_LINE_START}co[ \t-]*authored[ \t-]*by{_KEY_END}"
     rf"|{_LINE_START}claude[ \t-]*session{_KEY_END}"
@@ -54,10 +59,17 @@ FORBIDDEN = re.compile(
     re.MULTILINE,
 )
 _TAG = re.compile(r"<[^>]*>")
-# The hyphen through the horizontal bar, the minus sign, the small and full-width hyphen-minus.
-_DASHES = re.compile(
-    "[\N{HYPHEN}-\N{HORIZONTAL BAR}\N{MINUS SIGN}\N{SMALL HYPHEN-MINUS}\N{FULLWIDTH HYPHEN-MINUS}]"
-)
+#: Every dash punctuation character (Unicode category Pd) is read as a hyphen, and so are these,
+#: which the category does not hold: the minus sign, the modifier minus, the hyphen bullet, the
+#: katakana prolonged sound mark.
+_EXTRA_DASHES = frozenset("\N{MINUS SIGN}\N{MODIFIER LETTER MINUS SIGN}\N{HYPHEN BULLET}\u30fc")
+#: Characters that show as nothing but are letters, not format characters: the Hangul fillers.
+_BLANKS = frozenset("\u115f\u1160\u3164\uffa0")
+#: A Markdown backslash escape (`\-`, `\.`, `\@`) shows as its character.
+_ESCAPE = re.compile(r"\\([!-/:-@\[-`{-~])")
+#: Emphasis and code marks between two letters (`Auth*ored*`, `Auth_ored_`).
+_INSIDE_WORD = re.compile(r"(?<=[^\W\d_])[*_`~]+(?=[^\W\d_])")
+_MARKUP = re.compile(r"[*_`~]+")
 #: Cyrillic and Greek letters, by code point, that look like Latin ones (the text is lower case
 #: by then).
 _LOOK_ALIKES = {
@@ -99,20 +111,34 @@ def _undone(text: str) -> str:
     return text
 
 
+def _folded(text: str) -> str:
+    """The text as one reads it: decomposed, invisible and combining marks gone, dashes unified."""
+    kept: list[str] = []
+    for char in unicodedata.normalize("NFKD", text):
+        category = unicodedata.category(char)
+        if category in ("Cf", "Mn") or char in _BLANKS:
+            continue
+        kept.append("-" if category == "Pd" or char in _EXTRA_DASHES else char)
+    return unicodedata.normalize("NFKC", "".join(kept))
+
+
 def _tag_as(replacement: str, tag: re.Match[str]) -> str:
     return replacement + "\n" * tag[0].count("\n")
 
 
 def _views(text: str) -> Iterator[str]:
     """What a reader or a trailer parser may see: tags kept, removed, or read as spaces."""
-    text = _undone(text)
+    text = _ESCAPE.sub(r"\1", _undone(text))
     for tag_as in (None, "", " "):
         view = text
         if tag_as is not None:
             view = _TAG.sub(partial(_tag_as, tag_as), text)
-        view = unicodedata.normalize("NFKC", view)
-        view = "".join(c for c in view if unicodedata.category(c) != "Cf")
-        yield _DASHES.sub("-", view).lower().translate(_LOOK_ALIKES)
+        view = _folded(view).lower().translate(_LOOK_ALIKES)
+        view = _INSIDE_WORD.sub("", view)
+        # Once with every emphasis and code mark, which `Co-**Authored**-By` puts next to a
+        # hyphen and not between letters, left out as well.
+        yield view
+        yield _MARKUP.sub("", view)
 
 
 def _matches(where: str, text: str) -> Iterator[str]:

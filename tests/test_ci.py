@@ -209,6 +209,33 @@ def test_the_commits_job_reads_the_pr_as_it_is_now_not_as_its_event_was() -> Non
             assert f".{field}" in read["run"], (path.name, field)
 
 
+def test_the_commits_job_checks_the_body_as_github_renders_it_too() -> None:
+    # A body's Markdown, entities and invisible characters show as other text than they are
+    # written as: the rendered text (`body_text`, from the full media type) is checked as well.
+    for path in (WORKFLOW, EDITED):
+        job = _yaml(path)["jobs"]["commits"]
+        (read,) = (s for s in job["steps"] if "gh api" in s.get("run", ""))
+        assert "Accept: application/vnd.github.full+json" in read["run"], path.name
+        assert ".body_text" in read["run"], path.name
+        assert "--env PR_TITLE --env PR_BODY --env PR_BODY_TEXT" in read["run"], path.name
+
+
+def test_the_docs_of_a_changed_base_and_a_red_commits_say_what_clears_them() -> None:
+    # GitHub reads the latest `commits` of every suite for the head: a re-run reuses the old
+    # payload, so a changed base is cleared by a pushed commit; an edit's red or cancelled run
+    # is re-run. The three places that say so must agree and not tell of closing and reopening.
+    claude = (ROOT / "CLAUDE.md").read_text()
+    assert "close and reopen" not in claude
+    assert "push a commit" in claude
+    assert "every run's `commits`" in claude
+    assert "cancelled" in claude
+    for path in (WORKFLOW, EDITED):
+        text = path.read_text()
+        assert "close and reopen" not in text, path.name
+        assert "push a commit" in text, path.name
+        assert "every run's `commits`" in text, path.name
+
+
 def test_a_changed_base_fails_the_commits_job() -> None:
     # Edits re-run only `commits`, so a PR moved to another base would keep its other results,
     # merged against the old base. The step is in both copies of the job (they must stay equal)
@@ -217,7 +244,12 @@ def test_a_changed_base_fails_the_commits_job() -> None:
         steps = _yaml(path)["jobs"]["commits"]["steps"]
         (step,) = (s for s in steps if s.get("if") == "github.event.changes.base")
         assert "exit 1" in step["run"], path.name
-        assert "close and reopen" in step["run"], path.name
+        # GitHub needs a `commits` result for the head that is green in every suite, and a
+        # re-run reuses the old payload (and base), so the recovery is a new head: a commit.
+        assert "push a commit" in step["run"], path.name
+        assert "merge origin/" in step["run"], path.name
+        assert "empty commit" in step["run"], path.name
+        assert "close and reopen" not in step["run"], path.name
 
 
 def test_the_commits_job_checks_something_on_every_event_that_triggers_it() -> None:
@@ -248,7 +280,9 @@ def test_editing_a_pr_neither_cancels_nor_is_cancelled_by_the_run_of_a_push() ->
     edited = _yaml(EDITED)["concurrency"]
     assert full == "ci-${{ github.event.pull_request.number || github.ref }}"
     assert edited["group"] == "pr-edited-${{ github.event.pull_request.number }}"
-    assert edited["cancel-in-progress"] is True
+    # A run cancelled by a second quick edit is a `commits` for the head that blocks the merge
+    # until it is re-run, so no edit's run is cancelled by a later one.
+    assert edited["cancel-in-progress"] is False
 
 
 def test_make_lint_lints_the_workflows_too() -> None:
