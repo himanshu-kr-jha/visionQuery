@@ -44,7 +44,16 @@ from uuid import UUID, uuid4
 
 from visionquery.recorder.mp4 import Fragment, Init, rebase
 
-__all__ = ["Reason", "Segment", "SegmentFile", "recover", "segments", "window"]
+__all__ = [
+    "SLACK",
+    "Reason",
+    "Segment",
+    "SegmentFile",
+    "SpanError",
+    "recover",
+    "segments",
+    "window",
+]
 
 #: Why a Segment was finished: at its window's end; when the camera's stream went away; when
 #: the recorder stopped recording the camera (told to stop, or the camera was removed); or, by
@@ -52,6 +61,16 @@ __all__ = ["Reason", "Segment", "SegmentFile", "recover", "segments", "window"]
 type Reason = Literal["rolled", "stream_ended", "stopped", "recovered"]
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
+
+#: How far a Segment's times may lie outside its window: a Fragment (a keyframe interval, a few
+#: seconds, ten at most) that began inside it and ended outside, and a stall within what a
+#: connection tolerates (ten seconds) that stays inside the span. A Segment further out than this
+#: stands on a clock that stepped, or on a bug, and is never written.
+SLACK = timedelta(seconds=30)
+
+
+class SpanError(ValueError):
+    """A Segment whose times cannot be true: it ends before it begins or lies outside its window."""
 
 
 def window(at: datetime, length: timedelta) -> tuple[datetime, datetime]:
@@ -112,12 +131,16 @@ class SegmentFile:
         not_before: datetime | None,
         begins_at: datetime | None,
         verified: bool,
+        window: tuple[datetime, datetime] | None,
+        slack: timedelta,
     ) -> None:
         self.path = path
         self.segment_id = segment_id
         self._not_before = not_before
         self._begins_at = begins_at
         self._verified = verified
+        self._window = window
+        self._slack = slack
         self._fragments = 0
         self._time_from: datetime | None = None
         self._time_to: datetime | None = None
@@ -135,14 +158,19 @@ class SegmentFile:
         not_before: datetime | None,
         verified: bool,
         begins_at: datetime | None = None,
+        window_end: datetime | None = None,
+        slack: timedelta = SLACK,
     ) -> SegmentFile:
         """Fix the Segment's identity and write its init in `directory`, the camera's.
 
         `window_start` names the file. `not_before` is the earliest instant the Segment can
         honestly begin: when its connection opened, or when the Segment before it on that
         connection ended. `begins_at`, for a Segment whose media runs on from the one before it,
-        is exactly when it begins: where that one ended. `verified` says whether the timebase
-        stood on NTP when it opened.
+        is exactly when it begins: where that one ended. `verified` says whether everything the
+        Segment's beginning rests on stood on NTP, and each Fragment appended can only take it
+        away. `window_end`, when given, is the end of the window `window_start` begins: the
+        Segment is then refused, when it is finished, if its times lie outside the window by more
+        than `slack`.
         """
         start = window_start.astimezone(UTC)
         day = directory / start.strftime("%Y-%m-%d")
@@ -154,6 +182,8 @@ class SegmentFile:
             not_before,
             begins_at,
             verified,
+            None if window_end is None else (start, window_end),
+            slack,
         )
         segment._data.write(init.data)
         segment._data.flush()
@@ -166,8 +196,16 @@ class SegmentFile:
     def fragments(self) -> int:
         return self._fragments
 
-    def append(self, fragment: Fragment, *, arrived_at: datetime) -> None:
-        """Write one Fragment, then the index line that vouches for it; kept once this returns."""
+    @property
+    def verified(self) -> bool:
+        """Whether every time the Segment rests on so far stood on NTP."""
+        return self._verified
+
+    def append(self, fragment: Fragment, *, arrived_at: datetime, verified: bool = True) -> None:
+        """Write one Fragment, then the index line that vouches for it; kept once this returns.
+
+        `verified` says whether `arrived_at` stood on NTP. A Segment is verified only if every
+        time it holds was, so a Fragment that was not makes it not, from its line on."""
         if self._base is None:
             self._base = dict(fragment.starts)
         fragment = rebase(fragment, self._base)
@@ -179,14 +217,19 @@ class SegmentFile:
             "arrived": arrived_at.isoformat(),
             "seconds": fragment.seconds,
         }
+        self._verified = self._verified and verified
         if self._time_from is None:
             begins = arrived_at - timedelta(seconds=fragment.seconds)
             if self._not_before is not None:
                 begins = max(begins, self._not_before)
             if self._begins_at is not None:
                 begins = self._begins_at
-            line["from"] = begins.isoformat()
+            # Never after its own end: a pin a little past the arrival (a slew within the
+            # tolerance) gives way to the arrival.
+            line["from"] = min(begins, arrived_at).isoformat()
             line["verified"] = self._verified
+        elif not verified:
+            line["verified"] = False
         self._lines.write(json.dumps(line, separators=(",", ":")) + "\n")
         self._lines.flush()
         os.fsync(self._lines.fileno())
@@ -207,6 +250,7 @@ class SegmentFile:
             return None
         assert self._time_from is not None
         assert self._time_to is not None
+        self._check_span(self._time_from, self._time_to)
         segment = Segment(
             segment_id=self.segment_id,
             path=self.path,
@@ -218,6 +262,19 @@ class SegmentFile:
         )
         _mark(segment)
         return segment
+
+    def _check_span(self, time_from: datetime, time_to: datetime) -> None:
+        """Refuse a Segment that no clock could have recorded: the last way a step of the clock
+        could be written down as Footage."""
+        if time_to < time_from:
+            raise SpanError(f"Segment {self.path.name} would end ({time_to}) before it begins")
+        if self._window is not None:
+            start, end = self._window
+            if time_from < start - self._slack or time_to > end + self._slack:
+                raise SpanError(
+                    f"Segment {self.path.name} would span {time_from} to {time_to}, outside its "
+                    f"window {start} to {end}"
+                )
 
 
 def _mark(segment: Segment) -> None:
@@ -284,7 +341,7 @@ def _recover(path: Path) -> Segment | None:
         time_to=datetime.fromisoformat(lines[-1]["arrived"]),
         reason="recovered",
         fragments=len(lines),
-        verified=first["verified"],
+        verified=first["verified"] and all(entry.get("verified", True) for entry in lines),
     )
     _mark(segment)
     return segment

@@ -16,7 +16,14 @@ from uuid import UUID
 import pytest
 from boxes import HEAD, fragments, parsed_init
 from visionquery.recorder.mp4 import Fragment, Init, Stream
-from visionquery.recorder.segment import Segment, SegmentFile, recover, segments, window
+from visionquery.recorder.segment import (
+    Segment,
+    SegmentFile,
+    SpanError,
+    recover,
+    segments,
+    window,
+)
 
 AT = datetime(2026, 10, 6, 10, 0, tzinfo=UTC)
 FIVE_MINUTES = timedelta(minutes=5)
@@ -347,3 +354,99 @@ def test_a_segment_recovered_after_a_crash_plays_to_its_last_whole_fragment(
     assert decoded.stderr == ""
     frames = [line for line in decoded.stdout.splitlines() if not line.startswith("#")]
     assert len(frames) == 30  # three one-second Fragments at 10 fps
+
+
+# --- spans that cannot be true, and what a Segment's verification rests on ---------------------
+
+
+def test_a_segment_that_would_end_before_it_begins_is_refused_when_finished(
+    tmp_path: Path,
+) -> None:
+    """The last way a step of the clock could be written down as Footage."""
+    segment = opened(tmp_path)
+    segment.append(fragments(2)[0], arrived_at=AT + timedelta(seconds=10))
+    segment.append(fragments(2)[1], arrived_at=AT + timedelta(seconds=5))  # the clock went back
+
+    with pytest.raises(SpanError, match="before it begins"):
+        segment.close("stream_ended")
+
+    assert list(tmp_path.rglob("*.closed")) == [], "nothing says it is whole"
+
+
+@pytest.mark.parametrize("hours", [1, -1])
+def test_a_segment_far_outside_its_window_is_refused_when_finished(
+    tmp_path: Path, hours: int
+) -> None:
+    segment = SegmentFile.open(
+        tmp_path,
+        parsed_init(),
+        window_start=AT,
+        window_end=AT + FIVE_MINUTES,
+        not_before=None,
+        verified=True,
+    )
+    segment.append(fragments(1)[0], arrived_at=AT + timedelta(hours=hours, seconds=2))
+
+    with pytest.raises(SpanError, match="outside its window"):
+        segment.close("stream_ended")
+
+
+def test_a_segment_overrunning_its_window_by_a_fragment_or_a_stall_is_kept(tmp_path: Path) -> None:
+    """Copy-only Footage is cut at keyframes, so a Fragment begun in the window may end after it,
+    and a stall inside the connection's tolerance stays inside the span."""
+    segment = SegmentFile.open(
+        tmp_path,
+        parsed_init(),
+        window_start=AT,
+        window_end=AT + timedelta(seconds=10),
+        not_before=None,
+        verified=True,
+    )
+    segment.append(fragments(1)[0], arrived_at=AT + timedelta(seconds=10 + 2 + 10))
+
+    assert finished(segment, "stream_ended").fragments == 1
+
+
+def test_a_fragment_that_was_not_verified_makes_the_segment_not_verified(tmp_path: Path) -> None:
+    """The clock was verified when the Segment opened and its reading went stale during it."""
+    segment = opened(tmp_path)
+    first, second, third = fragments(3)
+    segment.append(first, arrived_at=AT + timedelta(seconds=2))
+    segment.append(second, arrived_at=AT + timedelta(seconds=4), verified=False)
+    segment.append(third, arrived_at=AT + timedelta(seconds=6))
+
+    assert not segment.verified
+    assert not finished(segment).verified
+    lines = [json.loads(line) for line in next(tmp_path.rglob("*.frags")).read_text().splitlines()]
+    assert [line.get("verified") for line in lines] == [True, False, None]
+
+
+def test_a_recovered_segment_is_verified_only_if_every_fragment_was(tmp_path: Path) -> None:
+    segment = opened(tmp_path)
+    first, second = fragments(2)
+    segment.append(first, arrived_at=AT + timedelta(seconds=2))
+    segment.append(second, arrived_at=AT + timedelta(seconds=4), verified=False)
+    # The recorder dies here: the Segment is neither finished nor closed.
+
+    (found,) = recover(tmp_path)
+
+    assert found.reason == "recovered"
+    assert not found.verified
+
+
+def test_a_pin_in_the_future_gives_way_to_the_arrival(tmp_path: Path) -> None:
+    """A Segment pinned to where the last one ended, a hair after this Fragment arrived (a slew
+    within the tolerance), begins at the arrival: a span is never negative."""
+    segment = SegmentFile.open(
+        tmp_path,
+        parsed_init(),
+        window_start=AT,
+        not_before=None,
+        verified=True,
+        begins_at=AT + timedelta(seconds=2.1),
+    )
+    segment.append(fragments(1)[0], arrived_at=AT + timedelta(seconds=2))
+
+    done = finished(segment)
+
+    assert done.time_from == done.time_to == AT + timedelta(seconds=2)

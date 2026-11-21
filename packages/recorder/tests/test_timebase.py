@@ -125,3 +125,47 @@ def test_an_anchor_says_how_far_it_moved_the_time() -> None:
 
 def test_the_first_anchor_moves_nothing() -> None:
     assert Clocks().timebase().anchor() == timedelta(0)
+
+
+def test_a_carried_reading_stops_counting_as_verified_after_a_while() -> None:
+    """A host that lost NTP a month ago must not go on writing verified Segments."""
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    timebase.anchor()
+    clocks.reading = Reading(source="ntp", synchronised=False)
+
+    clocks.tick(1800)
+    assert timebase.verified
+    clocks.tick(2 * 3600)
+
+    assert not timebase.verified
+    assert not timebase.state().verified
+    # It is still the best time there is: the monotonic clock carries it, not the wall.
+    clocks.wall += 99
+    assert timebase.now() == datetime.fromtimestamp(T0 + 1800 + 2 * 3600, UTC)
+
+
+def test_a_fresh_synchronised_reading_makes_it_verified_again() -> None:
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    timebase.anchor()
+    clocks.reading = Reading(source="ntp", synchronised=False)
+    clocks.tick(3 * 3600)
+    assert not timebase.verified
+
+    clocks.reading = Reading(source="ntp", synchronised=True)
+    timebase.anchor()
+
+    assert timebase.verified
+
+
+def test_a_segment_lasting_its_longest_is_verified_throughout_while_ntp_is_there() -> None:
+    """A one-hour Segment opens on a reading and its last Fragment arrives an hour later: still
+    verified."""
+    clocks = Clocks()
+    timebase = clocks.timebase()
+    timebase.anchor()
+
+    clocks.tick(3600 + 5)
+
+    assert timebase.verified

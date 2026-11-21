@@ -9,7 +9,10 @@ The recorder itself cuts that stream into Segments, at Fragment (keyframe) bound
 
 - **Time.** A Segment's times are when its Fragments arrived at the recorder, on a timebase that reads the kernel's NTP-disciplined clock when the Segment opens and carries that reading forward with the monotonic clock, so a wall clock stepped under a running Segment moves nothing.
   A Segment begins at its first Fragment's arrival less that Fragment's own duration, read from the media (never before its connection opened or the Segment before it ended; a Segment rolled on the same connection begins exactly where the one before it ended), and ends at its last Fragment's arrival.
-  Each Segment records whether a synchronised NTP reading stood behind its times; with none ever, it is still kept, timed by the wall clock, and says so.
+  Anchoring again can move the time: a slew (NTP's, at most 150 ms in five minutes) keeps Segments joined, but a larger shift is a step of the clock, and the old timeline's pins mean nothing on the new one.
+  The Segment then begins where its own first Fragment puts it on the new timeline, is filed under that window, and the step is logged and counted, so the time between it and the Segment before is a gap or an overlap, never a span that claims time not recorded.
+  A Segment whose span cannot be true (negative, or further outside its window than a Fragment and a stall) is refused when it is finished.
+  Each Segment records whether a synchronised NTP reading stood behind every time it rests on (what it begins on and each Fragment's arrival; a reading carried forward counts for two hours); with none ever, it is still kept, timed by the wall clock, and says so.
 - **Layout.** A Camera's Footage is `<footage>/<camera id>/<YYYY-MM-DD>/<HHMMSS>-<segment id>.mp4` (the UTC day and window it starts in), beside `.frags`, the Fragment index (one JSON line per Fragment: where it ends in the file, when it arrived, how long it lasts), and `.closed`, written once when the Segment is finished (why, its span, its Fragment count, whether NTP stood behind it).
   Each file's own timeline starts at zero: the only bytes changed from what the camera sent are each Fragment's decode time.
   Only video is kept.

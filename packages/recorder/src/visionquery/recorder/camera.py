@@ -9,7 +9,9 @@ on the same connection begins, in time, exactly where the one before it ended (A
 
 **The timebase is anchored again when a Segment opens** and carried forward by the monotonic
 clock (`visionquery.recorder.timebase`); an arrival is read from it the moment its Fragment is
-read, never from when the file was written.
+read, never from when the file was written. When anchoring moves the time by more than a slew,
+that is a step of the clock: the next Segment begins on the new time instead of the old, and the
+step is logged and counted (`Segmenter`).
 
 **A dropped stream is a finished Segment and a wait, never a stopped camera.** When the camera's
 stream ends (it stopped publishing, MediaMTX restarted, or it went silent for `Source.stall_after`),
@@ -27,7 +29,9 @@ Adapted from phyOS's Photon recorder (`adapters.photon.camera`), without signing
 
 import asyncio
 import contextlib
+import functools
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -38,9 +42,9 @@ from visionquery.recorder import metrics
 from visionquery.recorder.ffmpeg import Recording, Source
 from visionquery.recorder.mp4 import Fragment, Init, MalformedError
 from visionquery.recorder.segment import Reason, Segment, SegmentFile, window
-from visionquery.recorder.timebase import TimeBase
+from visionquery.recorder.timebase import STEP_TOLERANCE, TimeBase
 
-__all__ = ["Backoff", "Segmenter", "Timing", "record_camera"]
+__all__ = ["Backoff", "Segmenter", "Timing", "clock_stepped", "record_camera"]
 
 _log = logging.getLogger(__name__)
 
@@ -77,6 +81,14 @@ class Segmenter:
     """Cuts one connection's Fragments into Segments in `directory`, the camera's.
 
     Its calls write to disk and fsync, so an event loop runs them in a thread.
+
+    **A step of the clock is a discontinuity, never bridged.** The timebase is anchored again
+    when a Segment opens, and that can move the time (`TimeBase.anchor`). A slew within
+    `STEP_TOLERANCE` keeps a Segment beginning exactly where the one before it ended. A larger
+    shift is a step: the old timeline's `not_before`, and the end of the Segment before, mean
+    nothing on the new one, so the Segment begins where its own first Fragment says on the new
+    timeline, is filed under that window, and `on_step` is told. That leaves a gap, or an
+    overlap, between two Segments of one camera, which is what happened to its clock.
     """
 
     def __init__(
@@ -87,16 +99,26 @@ class Segmenter:
         length: timedelta,
         *,
         not_before: datetime | None,
+        on_step: Callable[[timedelta], None] | None = None,
     ) -> None:
         self._directory = directory
         self._init = init
         self._timebase = timebase
         self._length = length
+        self._on_step = on_step
         #: Nothing on this connection can have been received before it opened, and nothing in a
         #: Segment before the Segment ahead of it ended.
         self._not_before = not_before
+        #: Whether `_not_before` stood on NTP: a Segment that begins on it is no more verified.
+        self._pin_verified = timebase.verified
         self._segment: SegmentFile | None = None
         self._ends_at: datetime | None = None
+        self._last_verified = timebase.verified
+
+    @property
+    def verified(self) -> bool:
+        """Whether the Segment being written is verified so far, else the last Fragment was."""
+        return self._last_verified if self._segment is None else self._segment.verified
 
     def add(self, fragment: Fragment, *, arrived_at: datetime) -> Segment | None:
         """Write `fragment`, which arrived at `arrived_at` on the timebase; the Segment it
@@ -106,23 +128,32 @@ class Segmenter:
         if self._segment is not None and self._ends_at is not None and begins >= self._ends_at:
             rolled = self.finish("rolled")
         if self._segment is None:
-            arrived_at += self._timebase.anchor()
-            if rolled is None:
+            shift = self._timebase.anchor()
+            stepped = abs(shift) > STEP_TOLERANCE
+            if stepped:
+                self._not_before = None
+                if self._on_step is not None:
+                    self._on_step(shift)
+            arrived_at += shift
+            if stepped or rolled is None:
                 begins = arrived_at - timedelta(seconds=fragment.seconds)
                 if self._not_before is not None:
                     begins = max(begins, self._not_before)
             # A rolled Segment's media runs on from the last one's: it begins where that one
             # ended, and is filed under the window its first Fragment begins in.
             start, self._ends_at = window(begins, self._length)
+            pinned = self._not_before is not None
             self._segment = SegmentFile.open(
                 self._directory,
                 self._init,
                 window_start=start,
+                window_end=self._ends_at,
                 not_before=self._not_before,
-                verified=self._timebase.verified,
-                begins_at=None if rolled is None else rolled.time_to,
+                verified=self._pin_verified if pinned else True,
+                begins_at=rolled.time_to if rolled is not None and pinned else None,
             )
-        self._segment.append(fragment, arrived_at=arrived_at)
+        self._last_verified = self._timebase.verified
+        self._segment.append(fragment, arrived_at=arrived_at, verified=self._last_verified)
         return rolled
 
     def finish(self, reason: Reason) -> Segment | None:
@@ -133,6 +164,7 @@ class Segmenter:
         done = segment.close(reason)
         if done is not None:
             self._not_before = done.time_to
+            self._pin_verified = self._last_verified
         return done
 
 
@@ -217,6 +249,8 @@ async def record_camera(
                 await asyncio.wait_for(stop.wait(), timeout=backoff.next())
     finally:
         metrics.RECEIVING.labels(str(camera.id)).set(0)
+        with contextlib.suppress(KeyError):
+            metrics.CLOCK_VERIFIED.remove(str(camera.id))
 
 
 async def _connect_once(
@@ -243,7 +277,12 @@ async def _connect_once(
                 if isinstance(item, Init):
                     if segmenter is None:
                         segmenter = Segmenter(
-                            directory, item, timebase, timing.segment, not_before=not_before
+                            directory,
+                            item,
+                            timebase,
+                            timing.segment,
+                            not_before=not_before,
+                            on_step=functools.partial(clock_stepped, camera),
                         )
                     continue
                 arrived = timebase.now()
@@ -252,7 +291,9 @@ async def _connect_once(
                 if not received:
                     received = True
                     outage.back()
-                    metrics.CLOCK_VERIFIED.set(int(timebase.verified))
+                # Whether the Segment being written is verified, as it is written: it turns false
+                # when NTP is lost for long enough, and true again at the next fresh reading.
+                metrics.CLOCK_VERIFIED.labels(label).set(int(segmenter.verified))
                 metrics.FRAGMENTS.labels(label).inc()
                 metrics.BYTES.labels(label).inc(len(item.data))
                 if rolled is not None:
@@ -276,6 +317,19 @@ async def _connect_once(
 async def _stop_when(stop: asyncio.Event, recording: Recording) -> None:
     await stop.wait()
     await recording.stop()
+
+
+def clock_stepped(camera: Camera, shift: timedelta) -> None:
+    """The timebase moved by more than a slew when a Segment opened: said, and counted."""
+    metrics.CLOCK_STEPS.labels(str(camera.id)).inc()
+    _log.warning(
+        "%s (%s): the clock stepped by %+.3f s; the next Segment begins on the new time, so "
+        "the time between it and the one before is a gap or an overlap",
+        camera.name,
+        camera.path,
+        shift.total_seconds(),
+        extra={**_said(camera), "step_seconds": round(shift.total_seconds(), 3)},
+    )
 
 
 def _finished(camera: Camera, segment: Segment, timebase: TimeBase) -> None:

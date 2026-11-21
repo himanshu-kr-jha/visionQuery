@@ -9,6 +9,7 @@ from prometheus_client import Counter, Gauge
 __all__ = [
     "BYTES",
     "CAMERAS",
+    "CLOCK_STEPS",
     "CLOCK_VERIFIED",
     "CONNECTIONS",
     "FRAGMENTS",
@@ -41,7 +42,15 @@ CAMERAS = Gauge(
 )
 CLOCK_VERIFIED = Gauge(
     "visionquery_recorder_clock_verified",
-    "1 when a camera's last Segment opened on a synchronised NTP reading, 0 on the wall clock.",
+    "1 while everything a camera's Segment being written rests on stands on a synchronised NTP "
+    "reading, 0 on the wall clock or a reading too old to vouch for; set at every Fragment, by "
+    "camera id.",
+    ["camera"],
+)
+CLOCK_STEPS = Counter(
+    "visionquery_recorder_clock_steps",
+    "Times the clock stepped by more than a slew when a camera's Segment opened, by camera id.",
+    ["camera"],
 )
 WALL_OFFSET = Gauge(
     "visionquery_recorder_clock_wall_offset_seconds",

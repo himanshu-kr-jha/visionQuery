@@ -20,9 +20,10 @@ from publishers import PASSWORD, open_paths
 from pydantic import SecretStr
 from real_mediamtx import READER_USER, MediaMTX
 from visionquery.memory.cameras import Camera
-from visionquery.recorder.camera import Backoff, Timing, record_camera
+from visionquery.recorder.camera import Backoff, Timing, clock_stepped, record_camera
 from visionquery.recorder.ffmpeg import Source
 from visionquery.recorder.segment import Segment, recover, segments
+from visionquery.recorder.timebase import Reading, TimeBase
 
 DOCK = Camera(1, "Dock", "dock", None, datetime(2026, 10, 6, tzinfo=UTC), None)
 #: Short Segments and short waits, so that rolling and reconnecting happen while a test runs.
@@ -34,6 +35,10 @@ STALL_AFTER = 5.0
 def dock(mediamtx: MediaMTX) -> MediaMTX:
     open_paths(mediamtx, DOCK.path)
     return mediamtx
+
+
+def source_of(server: MediaMTX, ffmpeg: Path) -> Source:
+    return source(server, ffmpeg, DOCK.path)
 
 
 def source(server: MediaMTX, ffmpeg: Path, path: str) -> Source:
@@ -220,3 +225,64 @@ def test_a_recorder_that_dies_mid_segment_leaves_it_to_be_recovered_playable(
     assert found.path == unfinished[0]
     assert found.reason == "recovered"
     assert frames(ffmpeg, found) >= 10  # at least one whole second, a Fragment
+
+
+# --- the clock ---------------------------------------------------------------------------------
+
+
+def clock_verified(camera: Camera) -> float | None:
+    return REGISTRY.get_sample_value(
+        "visionquery_recorder_clock_verified", {"camera": str(camera.id)}
+    )
+
+
+def test_the_clock_verified_gauge_turns_false_when_ntp_is_lost_and_stays_per_camera(
+    dock: MediaMTX, ffmpeg: Path, tmp_path: Path
+) -> None:
+    """NTP was there when recording began and is gone: six seconds on, the reading carried
+    forward is too old to vouch for, and the gauge says so on the next Fragment, not at some
+    later connection. The Segments say the same."""
+    readings = iter([Reading("ntp", True, 250, 1000)])
+
+    def source() -> Reading:
+        return next(readings, Reading("ntp", False))
+
+    timebase = TimeBase(source=source, verified_for=timedelta(seconds=6))
+
+    async def run() -> None:
+        stop = asyncio.Event()
+        with dock.publishing(DOCK.path, DOCK.path, PASSWORD):
+            timebase.anchor()  # the last reading NTP vouched for
+            task = asyncio.create_task(
+                record_camera(
+                    DOCK, source_of(dock, ffmpeg), tmp_path, TIMING, stop, timebase=timebase
+                )
+            )
+            try:
+                await until(lambda: clock_verified(DOCK) == 1, 20)
+                await until(lambda: clock_verified(DOCK) == 0, 30)
+            finally:
+                stop.set()
+                await asyncio.wait_for(task, timeout=30)
+
+    asyncio.run(run())
+
+    found = segments(tmp_path)
+    assert found
+    assert any(not segment.verified for segment in found)
+    assert clock_verified(DOCK) is None, "a camera no longer recorded has no reading"
+
+
+def test_a_step_of_the_clock_is_logged_once_and_counted(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.WARNING, logger="visionquery.recorder")
+    before = (
+        REGISTRY.get_sample_value("visionquery_recorder_clock_steps_total", {"camera": "1"}) or 0
+    )
+
+    clock_stepped(DOCK, timedelta(seconds=-3600))
+
+    (record,) = caplog.records
+    assert "stepped by -3600.000 s" in record.getMessage()
+    assert record.__dict__["camera_id"] == DOCK.id
+    after = REGISTRY.get_sample_value("visionquery_recorder_clock_steps_total", {"camera": "1"})
+    assert after == before + 1

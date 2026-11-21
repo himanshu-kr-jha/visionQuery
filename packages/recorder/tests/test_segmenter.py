@@ -11,10 +11,12 @@ from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 from pathlib import Path
 
+import pytest
 from boxes import fragments, parsed_init
 from clocks import Clocks
 from visionquery.recorder.camera import Segmenter
 from visionquery.recorder.segment import Segment, segments
+from visionquery.recorder.timebase import Reading
 
 FIVE_MINUTES = timedelta(minutes=5)
 
@@ -184,3 +186,130 @@ def test_a_rolled_segment_begins_exactly_where_the_one_before_it_ended(tmp_path:
     assert len(found) == 3
     assert all(a.time_to == b.time_from for a, b in pairwise(found))
     assert [segment.path.name[:6] for segment in found] == ["100000", "100010", "100020"]
+
+
+# --- the clock stepped when the timebase is anchored again -------------------------------------
+#
+# The README's "no NTP yet, recording anyway" case, then NTP syncs and steps the wall clock: the
+# normal sequence on a host that has just booted. A Segment must never claim time that was not
+# recorded, nor have a negative length, nor stand verified on a timeline it was not measured on.
+
+
+def stepped(
+    directory: Path, step: float, *, at_fragment: int, length: timedelta = timedelta(seconds=10)
+) -> tuple[list[Segment], list[timedelta]]:
+    """Two-second Fragments from 10:00:00 on a clock that has no NTP, until, just before the
+    Fragment `at_fragment` arrives, NTP syncs and steps the wall clock by `step` seconds. The
+    first Segment ends at the fifth Fragment, so `at_fragment=5` is a roll and `0` is the first
+    Fragment of a connection. The Segments, and the steps the segmenter noticed."""
+    clocks = Clocks(synchronised=False)
+    timebase = clocks.timebase()
+    steps: list[timedelta] = []
+    segmenter = Segmenter(
+        directory, parsed_init(), timebase, length, not_before=timebase.now(), on_step=steps.append
+    )
+    found: list[Segment] = []
+    for n, frag in enumerate(fragments(8)):
+        clocks.tick(2)
+        if n == at_fragment:
+            clocks.reading = Reading(source="ntp", synchronised=True, est_error_us=250)
+            clocks.wall += step
+        done = segmenter.add(frag, arrived_at=timebase.now())
+        if done is not None:
+            found.append(done)
+    last = segmenter.finish("stream_ended")
+    assert last is not None
+    return [*found, last], steps
+
+
+@pytest.mark.parametrize("step", [3600.0, -3600.0, 45.0, -45.0, 0.5])
+def test_a_clock_stepped_at_a_roll_starts_the_next_segment_on_the_new_timeline(
+    tmp_path: Path, step: float
+) -> None:
+    found, steps = stepped(tmp_path, step, at_fragment=5)
+
+    first, second = found
+    jump = timedelta(seconds=step)
+    assert steps == [jump]
+    # The second Segment is what was received after the step: three Fragments, the first of them
+    # ending at 10:00:12 on the old timeline, so at 10:00:12 + step on the new, and lasting two
+    # seconds; the span is the six seconds received, wherever the clock then was.
+    assert second.time_from == at("10:00:10") + jump
+    assert second.time_to == at("10:00:16") + jump
+    assert second.time_to >= second.time_from
+    begun = second.time_from
+    window_start = begun.replace(second=begun.second // 10 * 10, microsecond=0)
+    assert second.path.name[:6] == window_start.strftime("%H%M%S"), "filed where it really is"
+    # The first stands where it was measured, on the clock that had no NTP.
+    assert (first.time_from, first.time_to) == (at("10:00:00"), at("10:00:10"))
+    assert not first.verified
+    assert second.verified, "all of it was measured on the synchronised reading"
+
+
+@pytest.mark.parametrize("step", [3600.0, -3600.0, 45.0, -45.0])
+def test_a_clock_stepped_before_a_connections_first_fragment_does_not_pin_it_to_the_old_one(
+    tmp_path: Path, step: float
+) -> None:
+    """The connection opened at 10:00:00, on the old timeline; its first Fragment arrives after
+    the step. Nothing about the old time bounds it."""
+    (only,), steps = stepped(tmp_path, step, at_fragment=0, length=timedelta(minutes=5))
+
+    jump = timedelta(seconds=step)
+    assert steps == [jump]
+    assert only.time_from == at("10:00:00") + jump
+    assert only.time_to == at("10:00:16") + jump
+    assert only.verified
+
+
+def test_a_slew_within_the_tolerance_is_not_a_step(tmp_path: Path) -> None:
+    """NTP slews the clock by up to 500 ppm: 150 ms in a five-minute Segment. That keeps the
+    Segments joined, exactly as before, and is not reported."""
+    found, steps = stepped(tmp_path, 0.1, at_fragment=5)
+
+    first, second = found
+    assert steps == []
+    assert second.time_from == first.time_to
+
+
+def test_a_segment_pinned_to_a_time_nothing_vouched_for_is_not_verified(tmp_path: Path) -> None:
+    """A slew too small to be a step joins the new Segment to the end of one measured with no
+    NTP: its beginning is that unverified time, so it is not verified, though its anchor is.
+    The one after it begins on a time NTP did vouch for, and is."""
+    clocks = Clocks(synchronised=False)
+    timebase = clocks.timebase()
+    segmenter = Segmenter(
+        tmp_path, parsed_init(), timebase, timedelta(seconds=10), not_before=timebase.now()
+    )
+    found: list[Segment] = []
+    for n, frag in enumerate(fragments(14)):
+        clocks.tick(2)
+        if n == 5:
+            clocks.reading = Reading(source="ntp", synchronised=True)
+            clocks.wall += 0.01
+        done = segmenter.add(frag, arrived_at=timebase.now())
+        if done is not None:
+            found.append(done)
+    last = segmenter.finish("stopped")
+    assert last is not None
+
+    first, second, third = [*found, last]
+
+    assert [s.verified for s in (first, second, third)] == [False, False, True]
+    assert second.time_from == first.time_to
+
+
+def test_a_connection_pinned_to_an_unverified_connect_time_is_not_verified(tmp_path: Path) -> None:
+    clocks = Clocks(synchronised=False)
+    timebase = clocks.timebase()
+    not_before = timebase.now()
+    clocks.tick(1)
+    clocks.reading = Reading(source="ntp", synchronised=True)
+    segmenter = Segmenter(tmp_path, parsed_init(), timebase, FIVE_MINUTES, not_before=not_before)
+    clocks.tick(1)  # the first Fragment lasts two seconds, so it begins before the connection
+    segmenter.add(fragments(1)[0], arrived_at=timebase.now())
+
+    done = segmenter.finish("stopped")
+
+    assert done is not None
+    assert done.time_from == not_before
+    assert not done.verified
