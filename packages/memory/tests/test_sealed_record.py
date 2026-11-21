@@ -26,14 +26,16 @@ WRITES = [
 
 @pytest.fixture
 def service(database: str) -> Iterator[str]:
-    """A role standing in for a service's, with every privilege a careless setup could give."""
+    """A role standing in for a service's, with every privilege a careless setup could give.
+
+    Default privileges are left to `_careless_defaults`, after a first run: ahead of one the
+    runner refuses the database (see test_foreign_database.py), as they would reach every table.
+    """
     name = f"service_{uuid.uuid4().hex[:12]}"
     role = sql.Identifier(name)
     with psycopg.connect(database, autocommit=True) as admin:
         admin.execute(sql.SQL("CREATE ROLE {}").format(role))
         admin.execute(sql.SQL("GRANT ALL ON SCHEMA public TO {}").format(role))
-        admin.execute(sql.SQL("ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO {}").format(role))
-        admin.execute("ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO PUBLIC")
     yield name
     with psycopg.connect(database, autocommit=True) as admin:
         admin.execute(sql.SQL("DROP OWNED BY {}").format(role))
@@ -58,15 +60,32 @@ def _cannot_write(database: str, role: str) -> None:
                 connection.execute(statement.encode())
 
 
-def test_a_new_record_is_not_writable_by_another_role(
+def _careless_defaults(database: str, role: str) -> None:
+    with psycopg.connect(database, autocommit=True) as admin:
+        admin.execute(
+            sql.SQL("ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO {}").format(
+                sql.Identifier(role)
+            )
+        )
+        admin.execute("ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO PUBLIC")
+
+
+def test_a_record_is_not_writable_by_another_role_whatever_the_defaults_say(
     database: str, migrations: Path, service: str
 ) -> None:
     migrate(database, migrations)
+    _careless_defaults(database, service)
+    # A table made now gets the defaults, and the record, which each run seals, must not.
+    (migrations / "0002_places.sql").write_text("CREATE TABLE places (id int);")
+    (migrations / "0003_grant.sql").write_text(
+        f'GRANT ALL ON ALL TABLES IN SCHEMA public TO "{service}", PUBLIC;'
+    )
+    assert migrate(database, migrations) == ("0002_places.sql", "0003_grant.sql")
     _cannot_write(database, service)
     # The default privileges still apply to the memory's own tables.
     with psycopg.connect(database, autocommit=True) as connection:
         connection.execute(sql.SQL("SET ROLE {}").format(sql.Identifier(service)))
-        connection.execute("INSERT INTO people VALUES (1)")
+        connection.execute("INSERT INTO places VALUES (1)")
 
 
 def test_grants_made_on_an_existing_record_are_taken_back_by_the_next_run(
