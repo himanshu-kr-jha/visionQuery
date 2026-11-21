@@ -53,8 +53,9 @@ testpaths = ["tests", "packages"]
 # `make test-stack` (`-m stack` on the command line replaces this `-m`).
 addopts = ["--import-mode=importlib", "--strict-markers", "--strict-config", "-m", "not stack"]
 # The development tools that are not packages: `make fetch-samples` and the fake cameras; and
-# the real MediaMTX the reconciler's tests share (real_mediamtx.py).
-pythonpath = ["scripts", "docker/fake-cameras", "packages/reconciler/tests"]
+# the real MediaMTX the reconciler's and the recorder's tests share (real_mediamtx.py); and the
+# recorder's hand-built fragmented MP4 (boxes.py).
+pythonpath = ["scripts", "docker/fake-cameras", "packages/reconciler/tests", "packages/recorder/tests"]
 markers = [
     "stack: brings the Docker Compose stack up for real; run with `make test-stack`",
 ]
@@ -84,6 +85,11 @@ select = [
 typeCheckingMode = "strict"
 pythonVersion = "3.14"
 include = ["conftest.py", "packages", "tests", "scripts", "docker/fake-cameras"]
-extraPaths = ["scripts", "docker/fake-cameras", "packages/reconciler/tests"]
+extraPaths = [
+    "scripts",
+    "docker/fake-cameras",
+    "packages/reconciler/tests",
+    "packages/recorder/tests",
+]
 venvPath = "."
 venv = ".venv"
