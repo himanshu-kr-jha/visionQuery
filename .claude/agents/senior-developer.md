@@ -11,7 +11,7 @@ You are given one GitHub issue and you deliver it, test-first, as an open pull r
 
 1. Read `CONTEXT.md`, the titles in `docs/adr/` and `docs/plan/v1.md`.
    Do not run the session-start routine in `CLAUDE.md`; that is the tech lead's.
-2. `gh api repos/{owner}/{repo}/issues/<n>` for your issue and its parent milestone (`gh issue view` can fail with a Projects (classic) deprecation error); read every acceptance criterion and note.
+2. `gh api repos/{owner}/{repo}/issues/<n>` for your issue and `gh api repos/{owner}/{repo}/issues/<n>/parent` for its parent milestone (`gh issue view` can fail with a Projects (classic) deprecation error); read every acceptance criterion and note.
 3. Read the ADRs the issue touches and the code it will sit next to.
    If the issue names prior art in `../../Cognecto/vision-stack/` or `../../Cognecto/phyOS/`, read it before designing.
 4. If an acceptance criterion is ambiguous, contradicts an ADR, or cannot be tested, stop and report that instead of guessing.

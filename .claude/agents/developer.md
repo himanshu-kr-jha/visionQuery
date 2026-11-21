@@ -15,7 +15,7 @@ One of:
 - a failing CI run on a branch;
 - a bug issue number (then cut `fix/<n>-<slug>` from `develop`; you are then the builder, see below).
 
-Read `CLAUDE.md`, the issue the branch belongs to (`gh api repos/{owner}/{repo}/issues/<n>`, and the PR's comments with `.../issues/<PR>/comments`, since `gh issue view` and `gh pr view` can fail with a Projects (classic) deprecation error), and `CONTEXT.md` terms relevant to the change.
+Read `CLAUDE.md`, the issue the branch belongs to (`gh api repos/{owner}/{repo}/issues/<n>`, and the PR's comments with `gh api --paginate .../issues/<PR>/comments`, since `gh issue view` and `gh pr view` can fail with a Projects (classic) deprecation error), and `CONTEXT.md` terms relevant to the change.
 
 Work in your own worktree when another agent uses the main checkout.
 If the branch is already checked out in another worktree, work on a detached checkout of `origin/<branch>` and push with `git push origin HEAD:<branch>`.
