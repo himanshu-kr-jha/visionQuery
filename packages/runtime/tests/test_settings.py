@@ -2,13 +2,14 @@
 
 import os
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
 import pytest
-from pydantic import BaseModel, Field, SecretStr, model_validator
+from pydantic import AliasPath, BaseModel, Field, SecretStr, create_model, model_validator
 from pydantic_settings import BaseSettings, EnvSettingsSource
 from pydantic_settings import SettingsError as SourceError
 from visionquery.runtime import Settings, SettingsError, VariableError
+from visionquery.runtime import settings as settings_module
 from visionquery.runtime.settings import SOURCE_ERROR_FIELD
 
 
@@ -232,12 +233,20 @@ class Pool(BaseModel):
     hosts: list[str] = []
     zones: list[str] = []
     size: int = 5
+    maybe: list[str] | None = Field(default_factory=lambda: ["a"])
+    loose: list[str] | str = "db"
+
+
+class Outer(BaseModel):
+    a: Pool = Pool()
+    b: Pool = Pool()
 
 
 class FleetSettings(Settings):
     ports: list[int] = Field(default_factory=list[int])
     limits: dict[str, int] = Field(default_factory=dict[str, int])
     pool: Pool = Pool()
+    fleet: Outer = Outer()
 
 
 def _bad_variables(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> SettingsError:
@@ -308,10 +317,21 @@ def test_every_list_or_dict_that_is_not_json_is_named_at_once(
     assert error.__suppress_context__
 
 
-@pytest.mark.parametrize(
-    "name",
-    ["VISIONQUERY_PORTS", "VISIONQUERY_LIMITS", "VISIONQUERY_POOL", "VISIONQUERY_POOL__HOSTS"],
-)
+def test_two_groups_of_one_shape_holding_the_same_bad_value_are_both_named(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VISIONQUERY_FLEET__A__HOSTS", "hunter2")
+    monkeypatch.setenv("VISIONQUERY_FLEET__B__HOSTS", "hunter2")
+    with pytest.raises(SettingsError) as raised:
+        FleetSettings.load()
+    assert set(raised.value.variables) == {
+        "VISIONQUERY_FLEET__A__HOSTS",
+        "VISIONQUERY_FLEET__B__HOSTS",
+    }
+    assert "hunter2" not in str(raised.value)
+
+
+@pytest.mark.parametrize("name", ["VISIONQUERY_PORTS", "VISIONQUERY_LIMITS", "VISIONQUERY_POOL"])
 def test_a_list_dict_or_group_set_to_null_is_refused(
     monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
@@ -324,6 +344,23 @@ def test_a_list_dict_or_group_set_to_null_is_refused(
 
 class OptionalPortsSettings(Settings):
     ports: list[int] | None = Field(default_factory=lambda: [8554])
+
+
+def test_a_nested_optional_set_to_null_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Inside a group null is kept, as it is inside JSON; only a top-level one is dropped.
+    monkeypatch.setenv("VISIONQUERY_POOL__MAYBE", "null")
+    assert FleetSettings.load().pool.maybe is None
+
+
+def test_a_group_set_to_null_is_refused_even_when_its_variables_are_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VISIONQUERY_POOL", "null")
+    monkeypatch.setenv("VISIONQUERY_POOL__HOSTS", '["a"]')
+    with pytest.raises(SettingsError) as raised:
+        FleetSettings.load()
+    assert raised.value.variables == ("VISIONQUERY_POOL",)
+    assert "VISIONQUERY_POOL is invalid: null is not accepted" in str(raised.value)
 
 
 def test_null_is_refused_even_where_the_field_could_be_none(
@@ -348,6 +385,62 @@ def test_a_field_that_also_takes_a_string_still_takes_one_that_is_not_json(
     assert LooseSettings.load().hosts == "db-1"
     monkeypatch.setenv("VISIONQUERY_HOSTS", '["db-1", "db-2"]')
     assert LooseSettings.load().hosts == ["db-1", "db-2"]
+
+
+def test_a_nested_field_that_also_takes_a_string_still_takes_one_that_is_not_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VISIONQUERY_POOL__LOOSE", "db-1")
+    assert FleetSettings.load().pool.loose == "db-1"
+
+
+class Shapes(BaseModel):
+    names: list[str] = []
+    tags: dict[str, int] = {}
+    inner: Pool = Pool()
+    maybe_names: list[str] | None = None
+    either: list[str] | str = ""
+    plain: str = ""
+    count: int = 0
+
+
+@pytest.mark.parametrize(
+    ("field", "is_complex", "allows_text"),
+    [
+        ("names", True, False),
+        ("tags", True, False),
+        ("inner", True, False),
+        ("maybe_names", True, True),
+        ("either", True, True),
+        ("plain", False, False),
+        ("count", False, False),
+    ],
+)
+def test_the_protected_field_rule_still_classifies_the_shapes_the_runtime_relies_on(
+    field: str, is_complex: bool, allows_text: bool
+) -> None:
+    # `_Environment` calls pydantic-settings' protected `_field_is_complex`; when an upgrade
+    # changes it, this fails naming the method, rather than a dozen settings tests.
+    source = settings_module._Environment(RecorderSettings)  # pyright: ignore[reportPrivateUsage]
+    result = source._field_is_complex(Shapes.model_fields[field])  # pyright: ignore[reportPrivateUsage]
+    assert result == (is_complex, allows_text), (
+        f"pydantic-settings' _field_is_complex changed for {field!r}: {result}"
+    )
+
+
+class AliasedPool(BaseModel):
+    name: str = Field("x", validation_alias=AliasPath("name", 0))
+
+
+@pytest.mark.parametrize(
+    "annotation",
+    [AliasedPool, list[AliasedPool], AliasedPool | None, dict[str, AliasedPool]],
+)
+def test_an_alias_on_a_nested_model_is_refused_like_one_on_the_settings(
+    annotation: Any,
+) -> None:
+    with pytest.raises(TypeError, match="declares an alias"):
+        create_model("Bad", __base__=Settings, pool=(annotation, None))
 
 
 class PlainSettings(BaseSettings):

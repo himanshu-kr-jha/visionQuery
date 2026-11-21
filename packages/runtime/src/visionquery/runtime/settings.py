@@ -8,8 +8,9 @@ A service declares what it needs by extending `Settings` with its own fields:
     settings = RecorderSettings.load()  # reads VISIONQUERY_FOOTAGE_DIR
 
 A nested model is set with a double underscore (`VISIONQUERY_DATABASE__URL`), and a list or
-dict as JSON (`VISIONQUERY_PORTS='[8554, 8555]'`); JSON `null` is refused for any of them,
-since unsetting the variable is how to ask for the default. A field takes no alias, so each
+dict as JSON (`VISIONQUERY_PORTS='[8554, 8555]'`); a list, dict or group variable set to
+`null` is refused, since pydantic-settings would drop it and use the default (unset the
+variable for that). A field, or a field of a nested model, takes no alias, so each
 is read from exactly the variable named after it, and an error names every variable that was
 set wrong at once.
 
@@ -18,8 +19,8 @@ Credentials are declared as `SecretStr`, so neither `repr` nor a log line shows 
 
 import os
 import re
-from collections.abc import Iterable, Sequence, Set
-from typing import Annotated, Any, Literal, Self, override
+from collections.abc import Iterable, Iterator, Mapping, Sequence, Set
+from typing import Annotated, Any, Literal, Self, get_args, override
 
 from pydantic import BaseModel, BeforeValidator, Field, ValidationError
 from pydantic.fields import FieldInfo
@@ -71,14 +72,7 @@ class Settings(BaseSettings):
     @classmethod
     def __pydantic_init_subclass__(cls, **kwargs: Any) -> None:
         super().__pydantic_init_subclass__(**kwargs)
-        for name, field in cls.model_fields.items():
-            if field.alias is not None or field.validation_alias is not None:
-                # An alias is read from a variable without the prefix, so errors and docs
-                # would name a variable other than the one a field is documented under.
-                raise TypeError(
-                    f"{cls.__name__}.{name} declares an alias; settings fields are read from "
-                    f"{PREFIX}{name.upper()} and take no alias"
-                )
+        _refuse_aliases(cls, cls.__name__, f"{PREFIX}{{}}")
 
     @classmethod
     def settings_customise_sources(
@@ -110,6 +104,32 @@ class Settings(BaseSettings):
             named = SOURCE_ERROR_FIELD.search(str(error))
             variable = f"{PREFIX}{named.group(1)}".upper() if named else None
             raise SettingsError(cls, [(variable, "could not be read")]) from None
+
+
+def _refuse_aliases(model: type[BaseModel], where: str, variable: str) -> None:
+    """Refuse an alias on a field of `model` or of any model nested in it.
+
+    An alias is read from a variable without the prefix, so errors and docs would name a
+    variable other than the one a field is documented under; and pydantic-settings reads a
+    nested alias differently again (an `AliasPath` head makes it decode the value as JSON).
+    """
+    for name, field in model.model_fields.items():
+        here = variable.format(name.upper())
+        if field.alias is not None or field.validation_alias is not None:
+            raise TypeError(
+                f"{where}.{name} declares an alias; settings fields are read from "
+                f"{here} and take no alias"
+            )
+        for nested in _models_in(field.annotation):
+            _refuse_aliases(nested, f"{where}.{name}", f"{here}{NESTED}{{}}")
+
+
+def _models_in(annotation: object) -> Iterator[type[BaseModel]]:
+    """The models an annotation holds, however it wraps them (`list[M]`, `M | None`...)."""
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        yield annotation
+    for argument in get_args(annotation):
+        yield from _models_in(argument)
 
 
 #: A variable at fault (None for a rule across several), and what is wrong with it.
@@ -183,11 +203,34 @@ def _holding(loc: tuple[int | str, ...], present: Set[str]) -> str:
 
 
 class _UndecodableError(ValueError):
-    """Lists, dicts or nested groups whose variables are not valid JSON, or are null."""
+    """Lists, dicts or nested groups whose variables are not valid JSON, or are dropped."""
 
     def __init__(self, problems: Sequence[Problem]) -> None:
         super().__init__("; ".join(f"{variable} {what}" for variable, what in problems))
         self.problems = tuple(problems)
+
+
+class _Recording(Mapping[str, str | None]):
+    """The environment, telling `source` which variable `items()` has just yielded."""
+
+    def __init__(self, source: _Environment, env_vars: Mapping[str, str | None]) -> None:
+        self._source = source
+        self._env_vars = env_vars
+
+    def __getitem__(self, key: str) -> str | None:
+        return self._env_vars[key]
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._env_vars)
+
+    def __len__(self) -> int:
+        return len(self._env_vars)
+
+    @override
+    def items(self) -> Iterator[tuple[str, str | None]]:  # pyright: ignore[reportIncompatibleMethodOverride]
+        for name, value in self._env_vars.items():
+            self._source.variable = name.upper()
+            yield name, value
 
 
 class _Environment(EnvSettingsSource):
@@ -195,18 +238,20 @@ class _Environment(EnvSettingsSource):
 
     pydantic-settings decodes those values itself, before validation, and stops at the first
     that is not JSON, reporting the field as a whole without saying which variable held it.
-    It also drops a top-level null, so the default would be used for a variable that is set;
-    null is refused instead, wherever it is given (unset the variable for the default).
+    It also drops a top-level variable set to `null`, so the default would be used for a
+    variable that is set; that is refused instead (unset the variable for the default).
+    Inside a group or a dict `null` is kept, as None, and validation judges it.
     """
 
     def __init__(self, settings_cls: type[BaseSettings]) -> None:
         super().__init__(settings_cls)
+        #: The variable being decoded: the field's own, or one inside it while it is exploded.
+        self.variable = ""
         self._field_variable = ""
         self._undecodable: list[Problem] = []
 
     @override
     def __call__(self) -> dict[str, Any]:
-        self._undecodable = []
         values = super().__call__()
         if self._undecodable:
             raise _UndecodableError(self._undecodable)
@@ -217,8 +262,23 @@ class _Environment(EnvSettingsSource):
         self, field_name: str, field: FieldInfo, value: Any, value_is_complex: bool
     ) -> Any:
         # No field takes an alias, so this is the variable it is read from.
-        self._field_variable = f"{PREFIX}{field_name}".lower()
-        return super().prepare_field_value(field_name, field, value, value_is_complex)
+        self._field_variable = self.variable = f"{PREFIX}{field_name}".upper()
+        prepared = super().prepare_field_value(field_name, field, value, value_is_complex)
+        if value is not None and prepared is None:
+            # pydantic-settings skips a field that prepares to None, as if it were unset.
+            self._undecodable.append(
+                (self._field_variable, "is invalid: null is not accepted; unset it for the default")
+            )
+        return prepared
+
+    @override
+    def explode_env_vars(
+        self, field_name: str, field: FieldInfo, env_vars: Mapping[str, str | None]
+    ) -> dict[str, Any]:
+        try:
+            return super().explode_env_vars(field_name, field, _Recording(self, env_vars))
+        finally:
+            self.variable = self._field_variable
 
     @override
     def decode_complex_value(self, field_name: str, field: FieldInfo | None, value: Any) -> Any:
@@ -226,31 +286,12 @@ class _Environment(EnvSettingsSource):
         # annotation), whose value is kept as text when it is not JSON, as it is for a field
         # that also takes a string.
         try:
-            decoded = super().decode_complex_value(field_name, field, value)  # pyright: ignore[reportArgumentType]
+            return super().decode_complex_value(field_name, field, value)  # pyright: ignore[reportArgumentType]
         except ValueError:
             if field is None or self._field_is_complex(field)[1]:
                 raise
-            return self._refuse(field_name, value, "not valid JSON")
-        if decoded is None:
-            return self._refuse(field_name, value, "null is not accepted; unset it for the default")
-        return decoded
-
-    def _refuse(self, name: str, value: object, what: str) -> None:
-        """Note the variable holding `value` as invalid, and read the rest before refusing."""
-        self._undecodable.append((self._holding(name, value), f"is invalid: {what}"))
-
-    def _holding(self, name: str, value: object) -> str:
-        """The variable of the current field, or under it, that ends in `name` and holds `value`."""
-        field = self._field_variable.lower()
-        for variable, held in self.env_vars.items():
-            lowered = variable.lower()
-            in_field = lowered == field or (
-                lowered.startswith(f"{field}{NESTED}")
-                and lowered.endswith(f"{NESTED}{name.lower()}")
-            )
-            if in_field and held == value:
-                return variable.upper()
-        return field.upper()
+            self._undecodable.append((self.variable, "is invalid: not valid JSON"))
+            return None
 
 
 def _required_leaves(
