@@ -494,11 +494,12 @@ def _validate(lines: list[dict[str, Any]], *, init_size: int) -> None:
     begins = _timed(first, "from")
     if begins > _timed(first, "arrived"):
         raise ValueError(f"the Segment begins ({begins}) after its first Fragment arrived")
-    window = first.get("window")
+    window: object = first.get("window")
     if window is not None:
-        if not isinstance(window, list) or len(window) != 2:
+        if not isinstance(window, list) or len(cast("list[object]", window)) != 2:
             raise ValueError(f"window {window!r} is not a start and an end")
-        start, end_of_window = (_instant(window[0]), _instant(window[1]))
+        pair = cast("list[object]", window)
+        start, end_of_window = (_instant(pair[0]), _instant(pair[1]))
         # Whether the Segment lies inside it is `span_problem`'s to judge, not damage: a stall
         # before its first Fragment puts the Segment outside its window and it is still whole.
         if not start < end_of_window:
