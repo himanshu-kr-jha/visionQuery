@@ -56,6 +56,15 @@ def migrations(tmp_path: Path) -> Path:
     return directory
 
 
+#: What `visionquery-migrate` makes, spelled out: an empty record of this is ours.
+_RECORD_LIKE = (
+    "CREATE TABLE schema_migrations ("
+    " number integer PRIMARY KEY CHECK (number > 0), name text NOT NULL UNIQUE,"
+    " sha256 bytea NOT NULL CHECK (octet_length(sha256) = 32),"
+    " applied_at timestamptz NOT NULL DEFAULT now())"
+)
+
+
 def _refused(database: str, migrations: Path) -> str:
     with pytest.raises(ForeignDatabaseError) as refused:
         migrate(database, migrations)
@@ -114,8 +123,7 @@ def test_an_empty_record_beside_unrelated_tables_is_refused(
     # Our record, with nothing in it, proves nothing about the tables beside it.
     _execute(
         database,
-        "CREATE TABLE schema_migrations (number integer PRIMARY KEY, name text NOT NULL UNIQUE,"
-        " sha256 bytea NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())",
+        _RECORD_LIKE,
         "CREATE TABLE invoices (id int)",
     )
     assert "public.invoices" in _refused(database, migrations)
@@ -381,13 +389,14 @@ def test_a_grant_on_the_public_schema_ahead_of_the_first_run_is_taken_back_by_it
     assert migrate(database, migrations) == ("0001_people.sql",)
 
 
-def test_settings_and_grants_to_other_roles_ahead_of_the_first_run_give_the_memory_no_more_access(
+def test_grants_to_other_roles_ahead_of_the_first_run_give_the_memory_no_more_access(
     database: str, migrations: Path
 ) -> None:
-    # What is left of this class (state that is no object) cannot change who may read or write
+    # What is left of this class (grants that are no object) cannot change who may read or write
     # the memory's tables: only an owner, a membership or an ACL can, and an ACL is made by a
     # grant on the table, a default privilege (counted above) or a role of ours (which `0003`
-    # refuses to adopt). A named role's grant on the schema or database, and a setting, are
+    # refuses to adopt). A named role's grant on the schema or database, and a setting of that
+    # role's in every database (which no session of this database gets from another role), are
     # what an Operator may prepare.
     other = f"other_{uuid.uuid4().hex[:8]}"
     name = urlsplit(database).path.lstrip("/")
@@ -396,10 +405,7 @@ def test_settings_and_grants_to_other_roles_ahead_of_the_first_run_give_the_memo
         f"CREATE ROLE \"{other}\" LOGIN PASSWORD '{other}'",
         f'GRANT ALL ON SCHEMA public TO "{other}"',
         f'GRANT ALL ON DATABASE "{name}" TO "{other}"',
-        f'ALTER DATABASE "{name}" SET search_path = public',
-        f'ALTER DATABASE "{name}" SET row_security = on',
         f'ALTER ROLE "{other}" SET default_transaction_read_only = off',
-        f'ALTER ROLE ALL IN DATABASE "{name}" SET session_replication_role = origin',
     )
     try:
         assert migrate(database, migrations) == ("0001_people.sql",)
@@ -415,6 +421,230 @@ def test_settings_and_grants_to_other_roles_ahead_of_the_first_run_give_the_memo
                     connection.execute(statement.encode())
     finally:
         _execute(database, f'DROP OWNED BY "{other}"', f'DROP ROLE "{other}"')
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "SET session_replication_role = replica",
+        "SET role = {other}",
+        "SET log_statement = 'all'",
+        "SET search_path = nowhere",
+    ],
+    ids=["replica", "role", "log_statement", "search_path"],
+)
+@pytest.mark.parametrize("scope", ["database", "role in database", "all in database"])
+def test_a_setting_of_the_database_makes_it_foreign_and_its_value_is_not_named(
+    postgres: str, database: str, migrations: Path, setting: str, scope: str
+) -> None:
+    # A setting reaches every session of the memory, and `RESET ALL` returns to it: `replica`
+    # turns off every foreign key and trigger, `role` and `log_statement` change who a session
+    # is and what the log holds.
+    other = f"other_{uuid.uuid4().hex[:8]}"
+    name = urlsplit(database).path.lstrip("/")
+    target = {
+        "database": f'ALTER DATABASE "{name}"',
+        "role in database": f'ALTER ROLE "{other}" IN DATABASE "{name}"',
+        "all in database": f'ALTER ROLE ALL IN DATABASE "{name}"',
+    }[scope]
+    who = {
+        "database": "all roles",
+        "role in database": f"role {other}",
+        "all in database": "all roles",
+    }[scope]
+    # Through `postgres`: a `role` setting makes this database's own sessions run as `other`.
+    _execute(postgres, f'CREATE ROLE "{other}"')
+    try:
+        _execute(postgres, f"{target} {setting.format(other=other)}")
+        message = _refused(database, migrations)
+        assert _named(message) == f"setting for {who} in database {name}"
+        for value in ("replica", "log_statement", "nowhere", "'all'"):
+            assert value not in message
+        with pytest.raises(ForeignDatabaseError):
+            status(database, migrations)
+    finally:
+        _execute(postgres, f'DROP ROLE "{other}"')
+
+
+@pytest.mark.parametrize(
+    ("statement", "named"),
+    [
+        ("ALTER ROLE ALL SET log_statement = 'all'", "setting for all roles in every database"),
+        ("ALTER ROLE {me} SET log_statement = 'all'", "setting for role {me} in every database"),
+    ],
+    ids=["all-roles", "migrating-role"],
+)
+def test_a_setting_in_every_database_for_everyone_or_the_migrating_role_counts(
+    database: str, statement: str, named: str
+) -> None:
+    # Server-wide, so it is made in a transaction that is rolled back and no other test's
+    # session ever sees it.
+    with psycopg.connect(database) as connection:
+        row = connection.execute("SELECT quote_ident(current_user)").fetchone()
+        assert row
+        me = str(row[0])
+        connection.execute(statement.format(me=me).encode())
+        reason = migrate_module._foreign(connection, database, 10)  # pyright: ignore[reportPrivateUsage]
+        connection.rollback()
+    assert reason is not None
+    assert named.format(me=me) in reason
+    assert "'all'" not in reason
+
+
+def test_a_setting_for_another_role_in_every_database_is_not_this_databases(
+    database: str, migrations: Path
+) -> None:
+    other = f"other_{uuid.uuid4().hex[:8]}"
+    _execute(database, f'CREATE ROLE "{other}"', f'ALTER ROLE "{other}" SET role = none')
+    try:
+        assert migrate(database, migrations) == ("0001_people.sql",)
+    finally:
+        _execute(database, f'DROP ROLE "{other}"')
+
+
+def test_an_empty_record_another_role_made_is_refused(database: str, migrations: Path) -> None:
+    # Its owner would keep every right on the record, and could rewrite what was applied.
+    mallory = f"mallory_{uuid.uuid4().hex[:8]}"
+    _execute(
+        database,
+        f"CREATE ROLE \"{mallory}\" LOGIN PASSWORD '{mallory}'",
+        f'GRANT ALL ON SCHEMA public TO "{mallory}"',
+    )
+    try:
+        parts = urlsplit(database)
+        as_mallory = parts._replace(
+            netloc=f"{mallory}:{mallory}@{parts.hostname}:{parts.port}"
+        ).geturl()
+        _execute(as_mallory, _RECORD_LIKE)
+        assert "schema_migrations table that VisionQuery did not create" in _refused(
+            database, migrations
+        )
+        with pytest.raises(ForeignDatabaseError):
+            status(database, migrations)
+    finally:
+        _execute(database, f'DROP OWNED BY "{mallory}"', f'DROP ROLE "{mallory}"')
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "ALTER COLUMN applied_at DROP DEFAULT",
+        "ALTER COLUMN sha256 DROP NOT NULL",
+        "ALTER COLUMN applied_at SET DEFAULT now() + interval '1 day'",
+        "DROP CONSTRAINT schema_migrations_pkey",
+        "DROP CONSTRAINT schema_migrations_name_key",
+        "DROP CONSTRAINT schema_migrations_number_check",
+        "DROP CONSTRAINT schema_migrations_sha256_check",
+        "ADD CONSTRAINT extra CHECK (number < 1000)",
+        "ENABLE ROW LEVEL SECURITY",
+        "FORCE ROW LEVEL SECURITY",
+        "SET (fillfactor = 50)",
+    ],
+    ids=[
+        "no-default",
+        "nullable",
+        "other-default",
+        "no-primary-key",
+        "no-unique-name",
+        "no-number-check",
+        "no-digest-check",
+        "extra-check",
+        "row-level-security",
+        "forced-row-level-security",
+        "option",
+    ],
+)
+def test_an_empty_record_that_is_not_what_creating_it_makes_is_refused(
+    database: str, migrations: Path, change: str
+) -> None:
+    _execute(database, _RECORD_LIKE, f"ALTER TABLE schema_migrations {change}")
+    assert "schema_migrations table that VisionQuery did not create" in _refused(
+        database, migrations
+    )
+    with pytest.raises(ForeignDatabaseError):
+        status(database, migrations)
+
+
+@pytest.mark.parametrize("missing", ["sha256", "applied_at"])
+def test_a_record_holding_a_null_is_refused_and_status_does_not_crash(
+    database: str, migrations: Path, missing: str
+) -> None:
+    # Ours has no NULL, so a record with one was made by someone else.
+    digest = "NULL" if missing == "sha256" else "decode(repeat('00', 32), 'hex')"
+    applied = "now()" if missing == "sha256" else "NULL"
+    _execute(
+        database,
+        "CREATE TABLE schema_migrations (number integer PRIMARY KEY, name text NOT NULL UNIQUE,"
+        " sha256 bytea, applied_at timestamptz)",
+        "INSERT INTO schema_migrations (number, name, sha256, applied_at)"
+        f" VALUES (1, '0001_people.sql', {digest}, {applied})",
+    )
+    with pytest.raises(ForeignDatabaseError):
+        status(database, migrations)
+    assert "schema_migrations table that VisionQuery did not create" in _refused(
+        database, migrations
+    )
+
+
+def test_the_empty_record_a_failed_first_run_leaves_is_still_ours(
+    database: str, migrations: Path
+) -> None:
+    broken = migrations.parent / "broken"
+    broken.mkdir()
+    (broken / "0001_people.sql").write_text("SELECT * FROM nowhere;")
+    with pytest.raises(migrate_module.MigrationFailedError):
+        migrate(database, broken)
+    assert status(database, migrations).pending == ("0001_people.sql",)
+    assert migrate(database, migrations) == ("0001_people.sql",)
+
+
+def test_the_empty_record_creating_it_makes_is_ours_and_status_reads_it(
+    database: str, migrations: Path
+) -> None:
+    _execute(database, _RECORD_LIKE)
+    assert status(database, migrations).pending == ("0001_people.sql",)
+    # `status` made its comparison record in a rolled-back transaction, and left nothing.
+    with psycopg.connect(database) as connection:
+        row = connection.execute(
+            "SELECT count(*) FROM pg_class WHERE relname = 'schema_migrations_scratch'"
+        ).fetchone()
+    assert row == (0,)
+
+
+def test_what_hangs_off_an_object_initdb_made_is_counted(database: str, migrations: Path) -> None:
+    # Only what hangs off a counted object, an extension's or our record is part of it.
+    _execute(
+        database,
+        "CREATE RULE r AS ON INSERT TO information_schema.sql_features DO INSTEAD NOTHING",
+        "CREATE INDEX ON information_schema.sql_parts (feature_id)",
+    )
+    message = _refused(database, migrations)
+    assert "rule r on information_schema.sql_features" in message
+    assert "sql_parts" in message
+
+
+def test_a_named_object_is_never_cut_off_by_many_that_are_gone(
+    database: str, migrations: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Many objects Postgres cannot name (and that are gone when asked again) sort before the
+    # one it can name; the limit must not drop the named one.
+    _execute(
+        database,
+        "CREATE TABLE invoices (id int)",
+        "CREATE FUNCTION public.partly(classid oid, objid oid, subid int)"
+        " RETURNS TABLE (type text, schema text, name text, identity text)"
+        " LANGUAGE sql AS $$ SELECT 'table'::text, 'public'::text, 'invoices'::text,"
+        " CASE WHEN classid = 'pg_class'::regclass AND objid = 'public.invoices'::regclass"
+        " THEN 'public.invoices' END $$",
+        *(f"CREATE TABLE filler_{n} (id int)" for n in range(130)),
+    )
+    monkeypatch.setattr(
+        migrate_module,
+        "_OBJECTS",
+        migrate_module.objects_query(sql.Identifier("public", "partly")),
+    )
+    monkeypatch.setattr(migrate_module, "_still_exists", _gone)
+    assert _named(_refused(database, migrations)) == "table public.invoices"
 
 
 def test_a_security_label_needs_a_provider_that_a_database_has_none_of(
@@ -608,12 +838,6 @@ def test_a_memory_with_tables_of_its_own_keeps_being_migrated(
     assert migrate(database, migrations) == ("0001_people.sql",)
     (migrations / "0002_places.sql").write_text("CREATE TABLE places (id int);")
     assert migrate(database, migrations) == ("0002_places.sql",)
-
-
-_RECORD_LIKE = (
-    "CREATE TABLE schema_migrations (number integer PRIMARY KEY, name text NOT NULL UNIQUE,"
-    " sha256 bytea NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())"
-)
 
 
 def test_a_child_of_an_extensions_table_is_someones_table(database: str, migrations: Path) -> None:

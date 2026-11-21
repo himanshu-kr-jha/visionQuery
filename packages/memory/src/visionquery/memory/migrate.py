@@ -200,7 +200,7 @@ def status(
     connection.read_only = True
     connection.isolation_level = psycopg.IsolationLevel.REPEATABLE_READ
     with connection, connection.transaction():
-        if reason := _foreign(connection):
+        if reason := _foreign(connection, url, connect_timeout):
             raise ForeignDatabaseError(reason, "a run would be refused, and nothing was changed")
         applied = _applied(connection)
     pending, problems = _plan(files, misnamed, applied)
@@ -227,7 +227,7 @@ def migrate(
     connection = connect(url, connect_timeout)
     with connection, _locked(connection):
         # Read under the lock, so what is pending is what nobody else is applying.
-        if reason := _foreign(connection):
+        if reason := _foreign(connection, url, connect_timeout):
             raise ForeignDatabaseError(reason)
         connection.execute(_RECORD)
         _seal(connection)
@@ -253,14 +253,20 @@ def migrate(
         return tuple(applied)
 
 
-_RECORD = b"""
-CREATE TABLE IF NOT EXISTS public.schema_migrations (
+def _record_ddl(table: str) -> bytes:
+    """The statement that makes the record as `table`; `_foreign` makes one more under another
+    name, in a transaction it rolls back, to know exactly what a record of ours is."""
+    return f"""
+CREATE TABLE IF NOT EXISTS {table} (
     number     integer     PRIMARY KEY CHECK (number > 0),
     name       text        NOT NULL UNIQUE,
     sha256     bytea       NOT NULL CHECK (octet_length(sha256) = 32),
     applied_at timestamptz NOT NULL DEFAULT now()
 )
-"""
+""".encode()
+
+
+_RECORD = _record_ddl("public.schema_migrations")
 
 
 #: Every privilege on the record, or on any of its columns, held by a role other than its
@@ -455,6 +461,11 @@ WITH RECURSIVE made AS MATERIALIZED (
           SELECT FROM pg_catalog.pg_depend d
           WHERE d.classid = o.classid AND d.objid = o.objid
             AND d.deptype IN ('a', 'i', 'P', 'S')
+            -- what hangs off an object `initdb` made (a rule on a built-in table) is no part of
+            -- anything left out; only what hangs off a counted object, an extension's or our
+            -- record is (a large object has no oid to judge by)
+            AND (d.refobjid >= %(first)s
+                 OR d.refclassid = 'pg_catalog.pg_largeobject'::regclass)
             -- an object's tie to its own column (a partitioned table's key) is not a parent
             AND NOT (d.refclassid = o.classid AND d.refobjid = o.objid)
             -- a default privilege in a schema goes with the schema, but is no part of it
@@ -492,7 +503,7 @@ FROM made CROSS JOIN LATERAL {identify}(made.classid, made.objid, 0) AS i
 WHERE NOT (made.classid = 'pg_catalog.pg_class'::regclass
            AND made.objid IN (SELECT oid FROM kids))
   AND coalesce(i.schema, '') !~ '^pg_(toast_)?temp_'
-ORDER BY 1
+ORDER BY identified DESC, name
 LIMIT 100
 """
     ).format(
@@ -509,7 +520,12 @@ _ROW_CATALOG = {"pg_largeobject": "pg_largeobject_metadata"}
 
 
 def _still_exists(connection: psycopg.Connection, catalog: str, objid: int) -> bool:
-    """Whether the object is still there, asked in a statement of its own (a new snapshot)."""
+    """Whether the object is still there, asked in a statement of its own.
+
+    A run (READ COMMITTED) sees a new snapshot, so an object dropped since the scan is gone. In
+    `status`, which is REPEATABLE READ, the statement reuses the scan's snapshot and still sees
+    it, so there `status` may refuse (exit 3) where a run a moment later would not.
+    """
     query = sql.SQL("SELECT EXISTS (SELECT FROM {} WHERE oid = %s)").format(
         sql.Identifier("pg_catalog", _ROW_CATALOG.get(catalog, catalog))
     )
@@ -517,19 +533,119 @@ def _still_exists(connection: psycopg.Connection, catalog: str, objid: int) -> b
     return bool(row and row[0])
 
 
-def _foreign(connection: psycopg.Connection) -> str | None:
+_ALIEN = "it has a schema_migrations table that VisionQuery did not create"
+
+_RECORD_COLUMN_DETAILS = """
+SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull,
+       pg_get_expr(d.adbin, d.adrelid), a.attgenerated::text, a.attidentity::text,
+       a.attcollation::regcollation::text
+FROM pg_catalog.pg_attribute a
+LEFT JOIN pg_catalog.pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+WHERE a.attrelid = %s::regclass AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum
+"""
+
+_RECORD_CONSTRAINTS = """
+SELECT contype::text, pg_get_constraintdef(oid)
+FROM pg_catalog.pg_constraint WHERE conrelid = %s::regclass ORDER BY 1, 2
+"""
+
+_RECORD_FLAGS = """
+SELECT relkind::text, relrowsecurity, relforcerowsecurity, reloftype::int, reloptions::text
+FROM pg_catalog.pg_class WHERE oid = %s::regclass
+"""
+
+#: Whether the record at `public.schema_migrations` belongs to the role that is migrating, and
+#: is an ordinary (logged) table.
+_RECORD_OWNER = """
+SELECT pg_catalog.pg_get_userbyid(relowner) = current_user, relpersistence = 'p'
+FROM pg_catalog.pg_class WHERE oid = to_regclass('public.schema_migrations')
+"""
+
+_RECORD_INCOMPLETE = """
+SELECT EXISTS (
+    SELECT FROM public.schema_migrations
+    WHERE number IS NULL OR name IS NULL OR sha256 IS NULL OR applied_at IS NULL
+)
+"""
+
+
+def _fingerprint(connection: psycopg.Connection, table: str) -> tuple[object, ...]:
+    """Everything of a table that makes it the record, bar its name: columns with their types,
+    `NOT NULL`s, defaults and collations, constraints as Postgres prints them, and the flags
+    that change what a write does (row-level security, a type it is made of, options)."""
+    return (
+        connection.execute(_RECORD_COLUMN_DETAILS, (table,)).fetchall(),
+        connection.execute(_RECORD_CONSTRAINTS, (table,)).fetchall(),
+        connection.execute(_RECORD_FLAGS, (table,)).fetchone(),
+    )
+
+
+def _is_the_record_we_make(connection: psycopg.Connection, url: str, connect_timeout: int) -> bool:
+    """Whether `public.schema_migrations` is exactly what `_RECORD` makes, and the migrating
+    role's own.
+
+    An empty record that anyone could have made with our columns proves nothing: its owner would
+    keep every right on it for good, and a missing key, default, `NOT NULL` or a row-level
+    security flag would change what the runner's reads and writes do. So its definition is
+    compared with a record made now from `_RECORD`, so that the two cannot drift apart. That one
+    is a temporary table on a connection of its own, rolled back, because `status` reads in a
+    transaction that may not make a table.
+    """
+    owner = connection.execute(_RECORD_OWNER).fetchone()
+    if owner is None or owner[0] is not True or owner[1] is not True:
+        return False
+    scratch = "pg_temp.schema_migrations_scratch"
+    with connect(url, connect_timeout) as other, other.transaction(force_rollback=True):
+        other.execute(_record_ddl(scratch))
+        expected = _fingerprint(other, scratch)
+    return _fingerprint(connection, "public.schema_migrations") == expected
+
+
+#: The settings that would apply to a session in this database: a database's own, for any role,
+#: and a role's or everyone's in every database, for everyone and for the migrating role. Each
+#: persists into every session of the memory (`RESET ALL` returns to it), so one can turn off
+#: foreign keys and triggers, change the role a session runs as or log every statement with its
+#: parameters. Named by database and role only: a value can hold a secret.
+_SETTINGS = b"""
+SELECT 'setting for ' ||
+       CASE WHEN s.setrole = 0 THEN 'all roles' ELSE 'role ' || quote_ident(r.rolname) END ||
+       CASE WHEN s.setdatabase = 0 THEN ' in every database'
+            ELSE ' in database ' || quote_ident(d.datname) END
+FROM pg_catalog.pg_db_role_setting s
+LEFT JOIN pg_catalog.pg_roles r ON r.oid = s.setrole
+LEFT JOIN pg_catalog.pg_database d ON d.oid = s.setdatabase
+WHERE s.setdatabase = (SELECT oid FROM pg_catalog.pg_database WHERE datname = current_database())
+   OR (s.setdatabase = 0
+       AND (s.setrole = 0 OR s.setrole = (SELECT oid FROM pg_catalog.pg_roles
+                                          WHERE rolname = current_user)))
+ORDER BY 1
+"""
+
+
+def _foreign(connection: psycopg.Connection, url: str, connect_timeout: int) -> str | None:
     """Why the database is neither empty nor a VisionQuery memory, or None when it is one."""
     columns = connection.execute(_COLUMNS).fetchall()
-    ours = columns == _RECORD_COLUMNS
-    if columns and not ours:
-        return "it has a schema_migrations table that VisionQuery did not create"
+    if columns and columns != _RECORD_COLUMNS:
+        return _ALIEN
+    ours = bool(columns)
     if ours:
+        if connection.execute(_RECORD_INCOMPLETE).fetchone() == (True,):
+            # A record of ours has no NULL, so this one was made by someone else.
+            return _ALIEN
         row = connection.execute("SELECT EXISTS (SELECT FROM public.schema_migrations)").fetchone()
         if row and row[0]:
             return None
-    objects = [
+        if not _is_the_record_we_make(connection, url, connect_timeout):
+            return _ALIEN
+    # First, and alone when there is one: a `role` setting makes this very session another
+    # role, which may not read every catalog the scan needs.
+    settings = [str(name) for (name,) in connection.execute(_SETTINGS)]
+    objects = settings or [
         str(name)
-        for name, identified, catalog, objid in connection.execute(_OBJECTS, {"ours": ours})
+        for name, identified, catalog, objid in connection.execute(
+            _OBJECTS, {"ours": ours, "first": _FIRST_NORMAL_OID}
+        )
         # Postgres could not name it: it was dropped since the scan, or it is one to count.
         if identified or _still_exists(connection, str(catalog), int(objid))
     ]
