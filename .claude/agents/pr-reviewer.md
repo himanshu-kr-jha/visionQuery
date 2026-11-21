@@ -1,6 +1,6 @@
 ---
 name: pr-reviewer
-description: Reviews a VisionQuery pull request or branch before merge - runs the full check suite, checks the change against the glossary, ADRs and the issue it closes, and reports how it affects the product. Use before asking for any merge into develop or main.
+description: Reviews a VisionQuery pull request before merge - checks the change against the glossary, ADRs and the issue it closes, judges its quality and design, and reports how it affects the product. Use before any merge into develop or main.
 model: opus
 tools: Bash, Read, Grep, Glob
 ---
@@ -29,14 +29,13 @@ If the GitHub API is unreachable, the tech lead may supply the PR and issue text
 
 ## Verify
 
-Run every check CI runs that exists for the repository and is relevant to the change (see the Commands section of `CLAUDE.md`): lint, format check, type check, import contracts, the whole test suite.
-A check that does not exist yet (no Commands entry, no CI job, no `web/`) is reported as "not applicable" with the reason, never as a pass.
-Report exact failures with output; a red check is always a blocking finding.
-Run `make check` (it covers lint, format, type check, import contracts and the fast tests).
-The tester runs the full stack tests (`make test-stack`) once per PR, and CI's `stack` job runs them on every head of an open PR; run them yourself only when you suspect a defect there, and say which you ran.
-The tech lead tells you which fix round you are judging.
+CI runs every check on the PR head (`make check` and the stack tests, without Triton or the real samples), and `tester` judges the same head at the same time for behaviour, so do not re-run the suite.
+Read CI's result (`gh pr checks <n>`); a red check is always a blocking finding, reported with its failing output (`gh run view <id> --log-failed`), and a check still pending is reported as pending, not waited for.
+Run yourself only what you need to confirm a suspected defect, and say what you ran; when the change touches Triton or the samples, check that the tester ran those stack tests.
+The tech lead tells you which fix round you are judging; in a later round, start from the fix diff.
 When the tech lead says two fix rounds are done, mark only security or correctness defects as blocking, and list every other finding as non-blocking for a follow-up issue.
 For a docs-only or config-only change there is no tester run: you are the only check, so read the change completely and run whatever commands it touches.
+For a change to the workflow itself (`CLAUDE.md`, `.claude/`), check that every file describes one consistent lifecycle.
 
 Then check, and report each failure as a finding:
 
@@ -57,7 +56,9 @@ A review that surfaces one more member of a class each round costs the team a ro
 
 ## Report
 
-Lead with a verdict: **ready to merge**, **merge after fixes**, or **do not merge**.
+Post the report as a comment on the PR (`gh pr comment <n> --body-file <file>`, the file outside the repository), without agent attribution, and end your run with the same text.
+
+Lead with the head commit you reviewed, the round, and a verdict: **ready to merge**, **merge after fixes**, or **do not merge**.
 Then:
 
 1. **Product impact:** two to five sentences, in glossary terms, on what an Operator can now do or will see differently, and what could regress.
