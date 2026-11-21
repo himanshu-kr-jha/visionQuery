@@ -10,6 +10,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -23,7 +24,7 @@ from psycopg import sql
 from pydantic import SecretStr
 from visionquery.memory.cameras import CameraRegistry
 from visionquery.memory.connection import connect
-from visionquery.memory.footage import IndexedSegment, SegmentIndex
+from visionquery.memory.footage import IndexedSegment, Overlap, SegmentIndex
 from visionquery.memory.migrate import migrate
 from visionquery.memory.settings import DatabaseSettings
 from visionquery.recorder import index as index_module
@@ -55,19 +56,39 @@ def cameras(memory: psycopg.Connection) -> tuple[int, int]:
     return registry.add_pushed("Dock", "dock").id, registry.add_pushed("Gate 2", "gate").id
 
 
-def write(footage: Path, camera_id: int, at: datetime, count: int = 3) -> SegmentFile:
-    """A Segment of `count` two-second Fragments, the first beginning at `at`, left open."""
+def write(
+    footage: Path,
+    camera_id: int,
+    at: datetime,
+    count: int = 3,
+    *,
+    stepped_by: float | None = None,
+) -> SegmentFile:
+    """A Segment of `count` two-second Fragments, the first beginning at `at`, left open;
+    begun after the clock stepped by `stepped_by` seconds, if given."""
     start, _ = window(at, timedelta(minutes=5))
     segment = SegmentFile.open(
-        footage / str(camera_id), parsed_init(), window_start=start, not_before=at, verified=True
+        footage / str(camera_id),
+        parsed_init(),
+        window_start=start,
+        not_before=at,
+        verified=True,
+        stepped_by=stepped_by,
     )
     for n, fragment in enumerate(fragments(count)):
         segment.append(fragment, arrived_at=at + timedelta(seconds=2 * (n + 1)))
     return segment
 
 
-def finish(footage: Path, camera_id: int, at: datetime, count: int = 3) -> Segment:
-    done = write(footage, camera_id, at, count).close("rolled")
+def finish(
+    footage: Path,
+    camera_id: int,
+    at: datetime,
+    count: int = 3,
+    *,
+    stepped_by: float | None = None,
+) -> Segment:
+    done = write(footage, camera_id, at, count, stepped_by=stepped_by).close("rolled")
     assert done is not None
     return done
 
@@ -83,6 +104,7 @@ def indexed(footage: Path, camera_id: int, segment: Segment) -> IndexedSegment:
         reason=segment.reason,
         fragments=segment.fragments,
         verified=segment.verified,
+        stepped_by=segment.stepped_by,
     )
 
 
@@ -90,6 +112,12 @@ def held(memory: psycopg.Connection) -> int:
     found = memory.execute("SELECT count(*) FROM segments").fetchone()
     assert found is not None
     return found[0]
+
+
+def at_start(index: SegmentIndex, camera_id: int, segment: Segment) -> IndexedSegment | None:
+    """What the index holds at the instant `segment` begins, if anything."""
+    found = index.find(camera_id, segment.time_from)
+    return None if found is None else found.segment
 
 
 def sample(name: str, **labels: str) -> float:
@@ -172,8 +200,8 @@ def test_a_finished_segment_is_indexed_and_any_instant_it_holds_found(
     running.finished(dock, segment)
 
     index = SegmentIndex(memory)
-    within(SLACK, lambda: index.latest(dock) is not None, lambda: held(memory))
-    assert index.latest(dock) == indexed(tmp_path, dock, segment)
+    within(SLACK, lambda: held(memory) == 1, lambda: held(memory))
+    assert at_start(index, dock, segment) == indexed(tmp_path, dock, segment)
     middle = segment.time_from + (segment.time_to - segment.time_from) / 2
     found = index.find(dock, middle)
     assert found is not None
@@ -219,8 +247,8 @@ def test_one_refused_segment_does_not_stop_the_others(
     start: Callable[[Path, str], Running],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A Segment of a camera the registry never had, and one overlapping a Segment already
-    indexed, are each refused, logged once and counted; those after them are indexed."""
+    """A Segment of a camera the registry never had, and one already indexed with other facts,
+    are each refused, logged once and counted; those after them are indexed."""
     caplog.set_level(logging.INFO, logger="visionquery.recorder")
     dock, gate = cameras
     first = finish(tmp_path, dock, AT)
@@ -230,32 +258,94 @@ def test_one_refused_segment_does_not_stop_the_others(
     # Caught up on what is on disk; what follows is finished while recording.
     within(SLACK, lambda: sample("visionquery_recorder_index_up") == 1, lambda: "never up")
 
-    overlapping = finish(tmp_path, dock, AT + timedelta(seconds=1))
+    conflicting = replace(first, fragments=first.fragments + 1)
     stranger = finish(tmp_path, 4242, AT)
     good = finish(tmp_path, gate, AT)
     later = finish(tmp_path, dock, AT + timedelta(minutes=5))
-    for camera, segment in ((dock, overlapping), (4242, stranger), (gate, good), (dock, later)):
+    for camera, segment in ((dock, conflicting), (4242, stranger), (gate, good), (dock, later)):
         running.finished(camera, segment)
 
     index = SegmentIndex(memory)
     # In the order they finished, so the last one indexed means every one before it was seen.
     within(
         SLACK,
-        lambda: index.latest(dock) == indexed(tmp_path, dock, later),
-        lambda: index.latest(dock),
+        lambda: at_start(index, dock, later) == indexed(tmp_path, dock, later),
+        lambda: held(memory),
     )
     assert sample("visionquery_recorder_index_pending") == 0
-    assert index.latest(gate) == indexed(tmp_path, gate, good)
+    assert at_start(index, gate, good) == indexed(tmp_path, gate, good)
+    assert at_start(index, dock, first) == indexed(tmp_path, dock, first)
     assert index.find(4242, AT + timedelta(seconds=1)) is None
     refusals = [r for r in caplog.records if r.levelno == logging.ERROR]
     named = [r.getMessage() for r in refusals]
-    assert len([m for m in named if overlapping.path.name in m]) == 1, named
+    assert len([m for m in named if conflicting.path.name in m]) == 1, named
     assert len([m for m in named if stranger.path.name in m]) == 1, named
     assert all(r.exc_info is None for r in refusals), "a refusal is not a crash"
     assert (
         sample("visionquery_recorder_segments_refused_total", camera=str(dock))
         == refused_before + 1
     )
+    assert running.failure is None
+
+
+@pytest.mark.parametrize(
+    ("stepped_by", "says"),
+    [
+        pytest.param(-180.0, "the clock stepped by -180.000 s", id="after-a-step"),
+        pytest.param(None, "no step of the clock was seen", id="across-a-restart"),
+    ],
+)
+def test_a_segment_overlapping_one_indexed_is_indexed_too_and_the_overlap_said_once(
+    migrated: str,
+    memory: psycopg.Connection,
+    cameras: tuple[int, int],
+    tmp_path: Path,
+    start: Callable[[Path, str], Running],
+    caplog: pytest.LogCaptureFixture,
+    stepped_by: float | None,
+    says: str,
+) -> None:
+    """A clock stepped back gives a camera two Segments holding the same instants: both are
+    Footage, so both are indexed, and the Overlap is recorded, logged once and counted."""
+    caplog.set_level(logging.INFO, logger="visionquery.recorder")
+    dock, _ = cameras
+    older = finish(tmp_path, dock, AT, count=60)  # two minutes
+    running = start(tmp_path, migrated)
+    within(SLACK, lambda: held(memory) == 1, lambda: held(memory))
+    overlaps_before = sample("visionquery_recorder_segment_overlaps_total", camera=str(dock))
+
+    newer = finish(tmp_path, dock, AT + timedelta(minutes=1), stepped_by=stepped_by)
+    running.finished(dock, newer)
+
+    within(SLACK, lambda: held(memory) == 2, lambda: held(memory))
+    index = SegmentIndex(memory)
+    # The newer lies wholly inside the older.
+    expected = Overlap(
+        dock,
+        newer.time_from,
+        newer.time_to,
+        older=indexed(tmp_path, dock, older),
+        newer=indexed(tmp_path, dock, newer),
+    )
+    assert index.overlaps(dock, AT, AT + timedelta(hours=1)) == [expected]
+    inside = newer.time_from + timedelta(seconds=1)
+    found = index.find(dock, inside)
+    assert found is not None
+    assert (found.segment, found.overlaps) == (expected.newer, (expected,))
+    within(
+        SLACK,
+        lambda: (
+            sample("visionquery_recorder_segment_overlaps_total", camera=str(dock))
+            == overlaps_before + 1
+        ),
+        lambda: "not counted",
+    )
+    said = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(said) == 1, said
+    assert older.path.name in said[0]
+    assert newer.path.name in said[0]
+    assert says in said[0]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert running.failure is None
 
 
@@ -311,6 +401,36 @@ def test_starting_again_indexes_nothing_twice(
     assert held(memory) == 3
 
 
+def test_segments_recorded_after_the_clock_stepped_back_are_indexed_when_it_starts(
+    migrated: str,
+    memory: psycopg.Connection,
+    cameras: tuple[int, int],
+    tmp_path: Path,
+    start: Callable[[Path, str], Running],
+) -> None:
+    """After a step back, what the recorder finished next begins before the last Segment it
+    indexed, days before it even: a recorder that stopped before indexing them has every one
+    indexed when it starts, overlaps included, whatever their times say."""
+    dock, _ = cameras
+    last_indexed = finish(tmp_path, dock, AT)
+    SegmentIndex(memory).index(indexed(tmp_path, dock, last_indexed))
+    stepped = finish(tmp_path, dock, AT - timedelta(days=3), stepped_by=-3 * 86400.0)
+    after_it = finish(tmp_path, dock, AT - timedelta(days=3) + timedelta(minutes=5))
+    overlapping = finish(tmp_path, dock, AT - timedelta(seconds=2), stepped_by=-1.5)
+
+    start(tmp_path, migrated)
+
+    within(SLACK, lambda: held(memory) == 4, lambda: held(memory))
+    index = SegmentIndex(memory)
+    for segment in (stepped, after_it):
+        assert at_start(index, dock, segment) == indexed(tmp_path, dock, segment)
+    (overlap,) = index.overlaps(dock, AT - timedelta(days=4), AT + timedelta(hours=1))
+    assert (overlap.older, overlap.newer) == (
+        indexed(tmp_path, dock, last_indexed),
+        indexed(tmp_path, dock, overlapping),
+    )
+
+
 def test_a_segment_on_disk_that_cannot_be_read_does_not_stop_the_catch_up(
     migrated: str,
     memory: psycopg.Connection,
@@ -330,8 +450,8 @@ def test_a_segment_on_disk_that_cannot_be_read_does_not_stop_the_catch_up(
 
     within(SLACK, lambda: held(memory) == 2, lambda: held(memory))
     index = SegmentIndex(memory)
-    assert index.latest(dock) == indexed(tmp_path, dock, after)
-    assert index.latest(gate) == indexed(tmp_path, gate, other)
+    assert at_start(index, dock, after) == indexed(tmp_path, dock, after)
+    assert at_start(index, gate, other) == indexed(tmp_path, gate, other)
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert len([m for m in errors if broken.path.name in m]) == 1, errors
     running.stop()
@@ -366,7 +486,7 @@ def test_an_unforeseen_failure_is_said_once_and_indexing_goes_on(
     running = start(tmp_path, migrated)
 
     within(SLACK, lambda: held(memory) == 1, lambda: (failures, held(memory)))
-    assert SegmentIndex(memory).latest(dock) == indexed(tmp_path, dock, segment)
+    assert at_start(SegmentIndex(memory), dock, segment) == indexed(tmp_path, dock, segment)
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1, warnings
     assert "RuntimeError" in warnings[0]
@@ -406,7 +526,7 @@ def test_what_is_not_a_cameras_footage_is_left_alone(
     running.stop()
     assert running.failure is None
     assert held(memory) == 1
-    assert SegmentIndex(memory).latest(dock) == indexed(tmp_path, dock, segment)
+    assert at_start(SegmentIndex(memory), dock, segment) == indexed(tmp_path, dock, segment)
     said = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert said == []
 

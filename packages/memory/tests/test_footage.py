@@ -5,6 +5,7 @@ is, or to nothing when no Segment does. Every test runs against a real Postgres 
 migrations applied (see packages/conftest.py), in a database of its own.
 """
 
+import math
 import threading
 import time
 from collections.abc import Iterator
@@ -24,10 +25,10 @@ from visionquery.memory.footage import (
     IndexedSegment,
     Instant,
     InvalidSegmentError,
+    Overlap,
     SegmentConflictError,
     SegmentIndex,
     SegmentIndexError,
-    SegmentOverlapError,
     SegmentRefusedError,
     UnknownCameraError,
 )
@@ -83,10 +84,16 @@ def segment(
     return replace(made, **changes)  # type: ignore[arg-type]
 
 
-def rows(connection: psycopg.Connection) -> int:
-    found = connection.execute("SELECT count(*) FROM segments").fetchone()
+def rows(connection: psycopg.Connection, table: str = "segments") -> int:
+    found = connection.execute(f"SELECT count(*) FROM {table}").fetchone()  # type: ignore[arg-type]
     assert found is not None
     return found[0]
+
+
+def at(index: SegmentIndex, camera_id: int, instant: datetime) -> IndexedSegment | None:
+    """The Segment an instant of camera `camera_id` resolves to, if any."""
+    found = index.find(camera_id, instant)
+    return None if found is None else found.segment
 
 
 # --- the table --------------------------------------------------------------------------------
@@ -122,7 +129,7 @@ def test_a_segment_is_indexed_with_its_camera_span_and_path(
 
     assert index.index(made) is True
 
-    assert index.latest(dock) == made
+    assert index.segment_ids(dock) == {made.segment_id}
     found = index.find(dock, AT + timedelta(minutes=2))
     assert found is not None
     assert found.segment == made
@@ -134,7 +141,21 @@ def test_every_reason_a_segment_ends_is_kept(index: SegmentIndex, cameras: tuple
     for n, reason in enumerate(("rolled", "stream_ended", "stopped", "recovered")):
         made = segment(dock, AT + n * FIVE_MINUTES, reason=reason)
         index.index(made)
-        assert index.latest(dock) == made
+        assert at(index, dock, made.time_from) == made
+
+
+def test_by_how_much_the_clock_stepped_before_a_segment_is_kept(
+    index: SegmentIndex, cameras: tuple[int, int]
+) -> None:
+    dock, _ = cameras
+    stepped = segment(dock, AT, stepped_by=-42.125)
+    plain = segment(dock, AT + FIVE_MINUTES)
+    index.index(stepped)
+    index.index(plain)
+
+    assert at(index, dock, AT) == stepped
+    assert at(index, dock, plain.time_from) == plain
+    assert plain.stepped_by is None
 
 
 # --- finding an instant -----------------------------------------------------------------------
@@ -232,11 +253,18 @@ def test_a_removed_cameras_footage_is_still_found(
     assert index.index(later) is True
 
 
-def test_a_camera_with_no_segment_has_no_latest(
+def test_the_ids_of_a_cameras_segments_are_every_one_indexed_whenever_it_begins(
     index: SegmentIndex, cameras: tuple[int, int]
 ) -> None:
-    dock, _ = cameras
-    assert index.latest(dock) is None
+    """What a catch-up compares the Segments on disk with, whatever their times say."""
+    dock, gate = cameras
+    assert index.segment_ids(dock) == frozenset()
+    made = [segment(dock, AT + timedelta(days=days)) for days in (-30, 0, 2)]
+    for each in made:
+        index.index(each)
+    index.index(segment(gate, AT))
+
+    assert index.segment_ids(dock) == {each.segment_id for each in made}
 
 
 # --- indexing again ---------------------------------------------------------------------------
@@ -271,41 +299,213 @@ def test_a_segment_indexed_again_with_other_facts_is_refused_and_the_first_kept(
         replace(made, verified=False),
         replace(made, path=PurePosixPath(f"{dock}/elsewhere.mp4")),
         replace(made, camera_id=gate),
+        replace(made, stepped_by=-1.5),
     ):
         with pytest.raises(SegmentConflictError, match=str(made.segment_id)):
             index.index(changed)
 
     assert rows(connection) == 1
-    assert index.latest(dock) == made
+    assert at(index, dock, AT) == made
 
 
-# --- what is refused --------------------------------------------------------------------------
+# --- overlaps ---------------------------------------------------------------------------------
 
 
-def test_a_segment_overlapping_another_of_its_camera_is_refused(
+def test_segments_overlapping_another_of_their_camera_are_indexed_and_each_overlap_recorded(
     index: SegmentIndex, connection: psycopg.Connection, cameras: tuple[int, int]
 ) -> None:
-    dock, gate = cameras
+    """A clock that stepped back, within a recorder's run or across a restart, gives a camera
+    two Segments claiming the same instants: both are Footage, so both are kept."""
+    dock, _ = cameras
     first = segment(dock, AT)
     index.index(first)
 
-    for overlapping in (
-        segment(dock, AT),  # the same start
-        segment(dock, AT + timedelta(minutes=4)),  # starting inside it
-        segment(dock, AT - timedelta(minutes=4)),  # ending inside it
-        segment(dock, AT + timedelta(minutes=1), timedelta(minutes=1)),  # inside it
-        segment(dock, AT - timedelta(minutes=1), timedelta(minutes=10)),  # around it
+    for overlapping, (begins, ends) in (
+        # the same start; starting inside it; ending inside it; inside it; around it
+        (segment(dock, AT), (AT, AT + FIVE_MINUTES)),
+        (segment(dock, AT + timedelta(minutes=4)), (AT + timedelta(minutes=4), first.time_to)),
+        (segment(dock, AT - timedelta(minutes=4)), (AT, AT + timedelta(minutes=1))),
+        (
+            segment(dock, AT + timedelta(minutes=1), timedelta(minutes=1)),
+            (AT + timedelta(minutes=1), AT + timedelta(minutes=2)),
+        ),
+        (segment(dock, AT - timedelta(minutes=1), timedelta(minutes=10)), (AT, first.time_to)),
     ):
-        with pytest.raises(SegmentOverlapError) as refused:
-            index.index(overlapping)
-        assert str(first.segment_id) in str(refused.value)
-        assert str(overlapping.segment_id) in str(refused.value)
+        assert index.index(overlapping) is True
+        with_first = [o for o in index.overlaps(dock, AT, first.time_to) if o.older == first]
+        assert Overlap(dock, begins, ends, older=first, newer=overlapping) in with_first
 
-    assert rows(connection) == 1
-    # Touching is not overlapping, and another camera's Footage is its own.
-    assert index.index(segment(dock, AT + FIVE_MINUTES)) is True
-    assert index.index(segment(dock, AT - FIVE_MINUTES)) is True
-    assert index.index(segment(gate, AT)) is True
+    assert rows(connection) == 6
+    # Each pair of the six that shares an instant is one Overlap: all fifteen but the three
+    # that do not (starting inside it against ending inside it, and each of those against the
+    # one inside it).
+    assert rows(connection, "segment_overlaps") == 12
+
+
+def test_touching_is_not_overlapping_and_another_cameras_footage_is_its_own(
+    index: SegmentIndex, connection: psycopg.Connection, cameras: tuple[int, int]
+) -> None:
+    dock, gate = cameras
+    index.index(segment(dock, AT))
+
+    index.index(segment(dock, AT + FIVE_MINUTES))
+    index.index(segment(dock, AT - FIVE_MINUTES))
+    index.index(segment(gate, AT))
+
+    assert rows(connection, "segment_overlaps") == 0
+    assert index.overlaps(dock, AT - FIVE_MINUTES, AT + 2 * FIVE_MINUTES) == []
+
+
+@pytest.mark.parametrize(
+    ("older_verified", "newer_verified", "resolves_to"),
+    [
+        pytest.param(True, False, "older", id="only-the-older-verified"),
+        pytest.param(False, True, "newer", id="only-the-newer-verified"),
+        pytest.param(True, True, "newer", id="both-verified"),
+        pytest.param(False, False, "newer", id="neither-verified"),
+    ],
+)
+def test_an_instant_in_an_overlap_resolves_to_the_only_verified_segment_else_the_newer(
+    index: SegmentIndex,
+    cameras: tuple[int, int],
+    older_verified: bool,
+    newer_verified: bool,
+    resolves_to: str,
+) -> None:
+    dock, _ = cameras
+    older = segment(dock, AT, verified=older_verified)
+    newer = segment(dock, AT + timedelta(minutes=3), verified=newer_verified, stepped_by=-120.0)
+    index.index(older)
+    index.index(newer)
+    inside = AT + timedelta(minutes=4)
+    chosen = {"older": older, "newer": newer}[resolves_to]
+
+    found = index.find(dock, inside)
+
+    overlap = Overlap(dock, newer.time_from, older.time_to, older=older, newer=newer)
+    assert found == Instant(chosen, inside - chosen.time_from, overlaps=(overlap,))
+    # Outside the overlap each Segment holds its instants alone, and says so.
+    assert index.find(dock, AT + timedelta(minutes=1)) == Instant(older, timedelta(minutes=1))
+    assert index.find(dock, older.time_to) == Instant(newer, timedelta(minutes=2))
+
+
+def test_the_newer_of_two_overlapping_segments_is_the_one_indexed_later_wherever_it_begins(
+    index: SegmentIndex, cameras: tuple[int, int]
+) -> None:
+    """After a step back further than a Segment, the Segment recorded later begins earlier on
+    the clock; it is still the newer, because the recorder indexes in the order it records."""
+    dock, _ = cameras
+    older = segment(dock, AT, timedelta(minutes=5))
+    newer = segment(dock, AT - timedelta(minutes=8), timedelta(minutes=10), stepped_by=-480.0)
+    index.index(older)
+    index.index(newer)
+
+    found = index.find(dock, AT + timedelta(minutes=1))
+
+    assert found is not None
+    assert found.segment == newer
+    assert found.overlaps == (
+        Overlap(dock, AT, AT + timedelta(minutes=2), older=older, newer=newer),
+    )
+
+
+def test_an_overlap_with_no_step_recorded_before_it_is_recorded_alike(
+    index: SegmentIndex, cameras: tuple[int, int]
+) -> None:
+    """A clock corrected while the recorder was down leaves no `stepped_by`: the Segment after
+    the restart overlaps the one before it all the same."""
+    dock, _ = cameras
+    before = segment(dock, AT, reason="stopped")
+    after = segment(dock, AT + timedelta(minutes=4), reason="rolled")
+    index.index(before)
+    index.index(after)
+
+    (overlap,) = index.overlaps(dock, AT, AT + timedelta(hours=1))
+
+    assert overlap == Overlap(dock, after.time_from, before.time_to, older=before, newer=after)
+    assert (overlap.older.stepped_by, overlap.newer.stepped_by) == (None, None)
+
+
+def test_an_instant_held_by_three_segments_resolves_to_the_newest_verified_one(
+    index: SegmentIndex, cameras: tuple[int, int]
+) -> None:
+    dock, _ = cameras
+    first = segment(dock, AT, verified=True)
+    second = segment(dock, AT + timedelta(minutes=1), verified=True)
+    third = segment(dock, AT + timedelta(minutes=2), verified=False)
+    for each in (first, second, third):
+        index.index(each)
+    inside = AT + timedelta(minutes=3)
+
+    found = index.find(dock, inside)
+
+    assert found is not None
+    assert found.segment == second
+    assert {(o.older, o.newer) for o in found.overlaps} == {
+        (first, second),
+        (first, third),
+        (second, third),
+    }
+
+
+def test_the_overlaps_of_a_window_are_every_one_meeting_it_and_only_those(
+    index: SegmentIndex, cameras: tuple[int, int]
+) -> None:
+    """What an Answer reads, like a Gap, for the camera and the stretch of time it is about."""
+    dock, gate = cameras
+    a = segment(dock, AT)
+    b = segment(dock, AT + timedelta(minutes=4))  # overlaps a by a minute
+    c = segment(dock, AT + timedelta(days=1))
+    d = segment(dock, AT + timedelta(days=1, minutes=2))  # overlaps c by three minutes
+    for each in (a, b, c, d, segment(gate, AT), segment(gate, AT + timedelta(minutes=1))):
+        index.index(each)
+    first = Overlap(dock, b.time_from, a.time_to, older=a, newer=b)
+    second = Overlap(dock, d.time_from, c.time_to, older=c, newer=d)
+
+    assert index.overlaps(dock, AT, AT + timedelta(days=2)) == [first, second]
+    assert index.overlaps(dock, a.time_to - timedelta(microseconds=1), a.time_to) == [first]
+    # It holds its start and not its end, as a Segment does.
+    assert index.overlaps(dock, a.time_to, c.time_from) == []
+    assert index.overlaps(dock, AT, b.time_from) == []
+    assert index.overlaps(dock, d.time_from, d.time_from + timedelta(seconds=1)) == [second]
+    assert len(index.overlaps(gate, AT, AT + timedelta(hours=1))) == 1
+    assert index.overlaps(9999, AT, AT + timedelta(days=2)) == []
+
+
+def test_indexing_an_overlapping_segment_again_records_its_overlap_once(
+    index: SegmentIndex, connection: psycopg.Connection, cameras: tuple[int, int]
+) -> None:
+    dock, _ = cameras
+    older, newer = segment(dock, AT), segment(dock, AT + timedelta(minutes=2))
+    index.index(older)
+    assert index.index(newer) is True
+
+    assert index.index(newer) is False
+    assert index.index(older) is False
+
+    assert rows(connection, "segment_overlaps") == 1
+    (overlap,) = index.overlaps(dock, AT, AT + FIVE_MINUTES)
+    assert (overlap.older, overlap.newer) == (older, newer)
+
+
+def test_an_overlap_with_a_segment_that_began_the_day_before_is_found(
+    index: SegmentIndex, cameras: tuple[int, int]
+) -> None:
+    dock, _ = cameras
+    midnight = datetime(2026, 10, 7, tzinfo=UTC)
+    long_ago = segment(dock, midnight - MAX_SPAN + timedelta(minutes=1), MAX_SPAN)
+    after_midnight = segment(dock, midnight - timedelta(minutes=5), FIVE_MINUTES * 2)
+    index.index(long_ago)
+    index.index(after_midnight)
+
+    found = index.find(dock, midnight)
+
+    assert found is not None
+    assert found.segment == after_midnight
+    assert [(o.older, o.newer) for o in found.overlaps] == [(long_ago, after_midnight)]
+
+
+# --- what is refused --------------------------------------------------------------------------
 
 
 def test_a_segment_of_a_camera_the_registry_never_had_is_refused(
@@ -337,6 +537,10 @@ def test_a_segment_of_a_camera_the_registry_never_had_is_refused(
         pytest.param({"fragments": 0}, "Fragment", id="no-fragment"),
         pytest.param({"fragments": 2**31}, "Fragment", id="more-fragments-than-a-column-holds"),
         pytest.param({"reason": "exploded"}, "reason", id="unknown-reason"),
+        pytest.param({"stepped_by": math.nan}, "stepped", id="stepped-by-nan"),
+        pytest.param({"stepped_by": math.inf}, "stepped", id="stepped-by-infinity"),
+        pytest.param({"stepped_by": 0.0}, "stepped", id="stepped-by-nothing"),
+        pytest.param({"stepped_by": True}, "stepped", id="stepped-by-a-bool"),
         pytest.param({"path": PurePosixPath("/srv/footage/1/a.mp4")}, "path", id="absolute-path"),
         pytest.param({"path": PurePosixPath("1/../../etc/a.mp4")}, "path", id="path-climbs-out"),
         pytest.param({"path": PurePosixPath("1/2026-10-06/a.frags")}, "path", id="not-mp4"),
@@ -383,7 +587,30 @@ def test_the_database_refuses_what_the_index_would_refuse(
     ):
         with pytest.raises(psycopg.errors.CheckViolation):
             connection.execute(insert, bad)
+    for stepped_by in ("NaN", "Infinity", "-Infinity", "0"):
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute(
+                "INSERT INTO segments (camera_id, segment_id, time_from, time_to, path, reason,"
+                " fragments, verified, stepped_by)"
+                " VALUES (%s, %s, %s, %s, %s, 'rolled', 1, true, %s::float8)",
+                (dock, uuid4(), AT, AT + FIVE_MINUTES, f"{dock}/a.mp4", stepped_by),
+            )
     connection.execute(insert, good)
+    overlap = (
+        "INSERT INTO segment_overlaps (camera_id, time_from, time_to, older_id, newer_id)"
+        " VALUES (%s, %s, %s, %s, %s)"
+    )
+    one, other = uuid4(), uuid4()
+    for bad in (
+        (dock, AT, AT, one, other),
+        (dock, AT, AT + MAX_SPAN + timedelta(microseconds=1), one, other),
+        (dock, AT, AT + FIVE_MINUTES, one, one),
+    ):
+        with pytest.raises(psycopg.errors.CheckViolation):
+            connection.execute(overlap, bad)
+    connection.execute(overlap, (dock, AT, AT + FIVE_MINUTES, one, other))
+    with pytest.raises(psycopg.errors.UniqueViolation):
+        connection.execute(overlap, (dock, AT, AT + FIVE_MINUTES, one, other))
 
 
 @pytest.mark.parametrize(
@@ -426,7 +653,9 @@ def test_a_database_that_fails_is_named_by_the_class_of_its_error_only(
         with pytest.raises(SegmentIndexError, match="UndefinedTable"):
             SegmentIndex(connection).index(segment(1))
         with pytest.raises(SegmentIndexError, match="UndefinedTable"):
-            SegmentIndex(connection).latest(1)
+            SegmentIndex(connection).segment_ids(1)
+        with pytest.raises(SegmentIndexError, match="UndefinedTable"):
+            SegmentIndex(connection).overlaps(1, AT, AT + FIVE_MINUTES)
     assert not isinstance(SegmentIndexError("x"), SegmentRefusedError)
 
 
@@ -439,7 +668,8 @@ def test_a_camera_id_no_camera_can_have_is_refused_and_has_no_footage(
     with pytest.raises(UnknownCameraError, match=f"no camera {camera_id}"):
         index.index(segment(camera_id))
     assert index.find(camera_id, AT) is None
-    assert index.latest(camera_id) is None
+    assert index.segment_ids(camera_id) == frozenset()
+    assert index.overlaps(camera_id, AT, AT + FIVE_MINUTES) == []
     assert rows(connection) == 0
 
 
@@ -458,10 +688,11 @@ def _blocked_on_an_advisory_lock(admin: psycopg.Connection, within: float) -> bo
     return False
 
 
-def test_two_indexers_at_once_cannot_both_add_overlapping_segments(
+def test_two_indexers_at_once_adding_overlapping_segments_record_their_overlap_once(
     migrated: str, connection: psycopg.Connection, cameras: tuple[int, int]
 ) -> None:
-    """The second waits for the first to commit, then sees its Segment and is refused."""
+    """The second waits for the first to commit, then sees its Segment and records the
+    Overlap; neither can miss the other's."""
     dock, _ = cameras
     first, second = segment(dock, AT), segment(dock, AT + timedelta(minutes=1))
     outcome: list[BaseException | bool] = []
@@ -487,9 +718,12 @@ def test_two_indexers_at_once_cannot_both_add_overlapping_segments(
                 thread.join(timeout=30)
         assert not thread.is_alive()
 
-    assert len(outcome) == 1
-    assert isinstance(outcome[0], SegmentOverlapError), outcome
-    assert rows(connection) == 1
+    assert outcome == [True]
+    assert rows(connection) == 2
+    index = SegmentIndex(connection)
+    assert index.overlaps(dock, AT, AT + FIVE_MINUTES) == [
+        Overlap(dock, second.time_from, first.time_to, older=first, newer=second)
+    ]
 
 
 def test_two_indexers_indexing_one_segment_at_once_keep_one_row(
@@ -539,16 +773,23 @@ def test_the_runtime_role_indexes_and_finds_segments_and_can_do_nothing_more(
         assert index.index(made) is True
         assert index.index(made) is False
         assert index.find(dock, AT) == Instant(made, timedelta(0))
-        assert index.latest(dock) == made
-        held = runtime.execute(
-            "SELECT p FROM unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE',"
-            "'REFERENCES','TRIGGER']) AS p"
-            " WHERE has_table_privilege(current_user, 'segments', p) ORDER BY p"
-        ).fetchall()
-        assert held == [("DELETE",), ("INSERT",), ("SELECT",), ("UPDATE",)]
+        assert index.segment_ids(dock) == {made.segment_id}
+        newer = segment(dock, AT + timedelta(minutes=1))
+        assert index.index(newer) is True
+        assert len(index.overlaps(dock, AT, AT + FIVE_MINUTES)) == 1
+        for table in ("segments", "segment_overlaps"):
+            held = runtime.execute(
+                "SELECT p FROM unnest(ARRAY['SELECT','INSERT','UPDATE','DELETE','TRUNCATE',"
+                "'REFERENCES','TRIGGER']) AS p"
+                " WHERE has_table_privilege(current_user, %s, p) ORDER BY p",
+                (table,),
+            ).fetchall()
+            assert held == [("DELETE",), ("INSERT",), ("SELECT",), ("UPDATE",)], table
         for statement in (
             b"TRUNCATE segments",
+            b"TRUNCATE segment_overlaps",
             b"DROP TABLE segments",
+            b"DROP TABLE segment_overlaps",
             b"ALTER TABLE segments ADD COLUMN x int",
             b"SELECT drop_chunks('segments', older_than => now())",
         ):

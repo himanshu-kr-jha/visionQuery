@@ -7,20 +7,28 @@ away, the recorder was down, or the Footage was never recorded.
 
 **A Segment is keyed on its span, never on its file name.** Its times are the recorder's, on its
 NTP-anchored clock, and it covers `[time_from, time_to)`: its start and not its end, where the
-next one on the same connection begins. One camera's Segments never overlap, so an instant is
-held by at most one. TimescaleDB holds no exclusion constraint, so `index` checks it under a
-per-camera advisory lock, and two indexers at once cannot both add Segments that overlap. A
-Segment is at most `MAX_SPAN` long, which bounds every lookup to two days' partitions.
+next one on the same connection begins. A Segment is at most `MAX_SPAN` long, which bounds
+every lookup to two days' partitions.
+
+**Two Segments of a camera may overlap, and that is a fact, never hidden.** A clock that steps
+back, within the recorder's run (the newer Segment then has `stepped_by`) or across a restart
+(it has none), gives a camera two Segments claiming the same instants. Both are Footage, so
+both are indexed, and each stretch two of them share is recorded as an `Overlap`, which
+`overlaps` returns for a camera and a window and an Answer states as it states a Gap. An
+instant inside one resolves to the verified Segment when exactly one of those holding it is
+verified, and otherwise to the newer: more generally, to the newest of the verified ones, else
+the newest. Newer is indexed later, which for one camera is recorded later, because the
+recorder indexes in the order it records. `index` records Overlaps under a per-camera advisory
+lock, so two indexers at once cannot miss each other's.
 
 **Indexing is idempotent.** Indexing a Segment already indexed, with the same facts, changes
 nothing; with other facts it is refused (`SegmentConflictError`), because a Segment is finished
 once and never changes, so two accounts of one cannot both be true and the index does not
-guess which is. A Segment that overlaps another of its camera's, or whose camera the registry
-never had, is refused too, and so is one that cannot be Footage at all (`InvalidSegmentError`),
-before the database sees it; whatever those checks miss and the table refuses (a constraint, a
-value out of range) is an `InvalidSegmentError` too. Every refusal is a `SegmentRefusedError`,
-which indexing again will not change; a `SegmentIndexError` is the database failing, which it
-may.
+guess which is. A Segment whose camera the registry never had is refused too, and so is one
+that cannot be Footage at all (`InvalidSegmentError`), before the database sees it; whatever
+those checks miss and the table refuses (a constraint, a value out of range) is an
+`InvalidSegmentError` too. Every refusal is a `SegmentRefusedError`, which indexing again will
+not change; a `SegmentIndexError` is the database failing, which it may.
 
 **The offset is on the Deployment's clock**: how long after the Segment began the instant is.
 Within the file it is the same but where the stream stalled, which only the Segment's Fragment
@@ -36,6 +44,7 @@ savepoint and is kept or rolled back with the caller's transaction.
 """
 
 import builtins
+import math
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import PurePosixPath
@@ -50,11 +59,11 @@ __all__ = [
     "IndexedSegment",
     "Instant",
     "InvalidSegmentError",
+    "Overlap",
     "Reason",
     "SegmentConflictError",
     "SegmentIndex",
     "SegmentIndexError",
-    "SegmentOverlapError",
     "SegmentRefusedError",
     "UnknownCameraError",
 ]
@@ -70,6 +79,9 @@ MAX_SPAN = timedelta(days=1)
 
 #: The ids a camera can have, and the most Fragments a Segment can hold: Postgres `integer`s.
 _INTEGER = range(-(2**31), 2**31)
+
+#: The smallest step of time the database keeps: an instant is the window one tick long.
+_TICK = timedelta(microseconds=1)
 
 #: The first key of the advisory locks `index` takes, one per camera (the second key).
 _LOCK_SPACE = int.from_bytes(b"vqsg", signed=True)
@@ -87,20 +99,6 @@ class InvalidSegmentError(SegmentRefusedError, ValueError):
     """A Segment that cannot be Footage: its span, path, Fragments or reason are wrong."""
 
 
-class SegmentOverlapError(SegmentRefusedError):
-    """A Segment that overlaps another of its camera's, which holds the instants it would."""
-
-    def __init__(self, segment: IndexedSegment, holder: IndexedSegment) -> None:
-        self.segment = segment
-        self.holder = holder
-        super().__init__(
-            f"Segment {segment.segment_id} of camera {segment.camera_id} "
-            f"({segment.time_from.isoformat()} to {segment.time_to.isoformat()}) overlaps "
-            f"Segment {holder.segment_id} ({holder.time_from.isoformat()} to "
-            f"{holder.time_to.isoformat()}), which is indexed"
-        )
-
-
 class SegmentConflictError(SegmentRefusedError):
     """A Segment already indexed with other facts: a Segment never changes once finished."""
 
@@ -111,6 +109,7 @@ class SegmentConflictError(SegmentRefusedError):
             name
             for name in (
                 "camera_id", "time_from", "time_to", "path", "reason", "fragments", "verified",
+                "stepped_by",
             )
             if getattr(segment, name) != getattr(indexed, name)
         ]  # fmt: skip
@@ -150,27 +149,69 @@ class IndexedSegment:
     fragments: int
     #: Whether its times stand on a synchronised NTP reading, rather than the bare wall clock.
     verified: bool
+    #: By how many seconds the clock stepped just before it began, when the recorder saw it
+    #: step (ADR 0017); None when it did not.
+    stepped_by: float | None = None
+
+
+@dataclass(frozen=True)
+class Overlap:
+    """A stretch of a camera's time that two of its Segments both hold, `[time_from, time_to)`:
+    the clock stepped back between them, within the recorder's run or across a restart."""
+
+    camera_id: int
+    time_from: datetime
+    time_to: datetime
+    #: The Segment indexed first, and the one indexed after it: the recorder indexes a camera's
+    #: Segments in the order it records them.
+    older: IndexedSegment
+    newer: IndexedSegment
 
 
 @dataclass(frozen=True)
 class Instant:
     """Where an instant of a camera's Footage is: the Segment holding it, and how long after
-    the Segment began it is."""
+    the Segment began it is; and when other Segments hold it too, the Overlaps it lies in."""
 
     segment: IndexedSegment
     offset: timedelta
+    overlaps: tuple[Overlap, ...] = ()
 
 
 _COLUMNS: LiteralString = (
-    "camera_id, segment_id, time_from, time_to, path, reason, fragments, verified"
+    "camera_id, segment_id, time_from, time_to, path, reason, fragments, verified, stepped_by"
 )
+#: `_COLUMNS` of the older and of the newer Segment of an Overlap, as `overlaps` joins them.
+_OLDER: LiteralString = (
+    "older.camera_id, older.segment_id, older.time_from, older.time_to, older.path,"
+    " older.reason, older.fragments, older.verified, older.stepped_by"
+)
+_NEWER: LiteralString = (
+    "newer.camera_id, newer.segment_id, newer.time_from, newer.time_to, newer.path,"
+    " newer.reason, newer.fragments, newer.verified, newer.stepped_by"
+)
+_WIDTH = 9
 
 
 def _segment(row: tuple[Any, ...]) -> IndexedSegment:
-    camera_id, segment_id, time_from, time_to, path, reason, fragments, verified = row
+    camera_id, segment_id, time_from, time_to, path, reason, fragments, verified, stepped_by = row
     return IndexedSegment(
-        camera_id, segment_id, time_from, time_to, PurePosixPath(path), reason, fragments, verified
+        camera_id,
+        segment_id,
+        time_from,
+        time_to,
+        PurePosixPath(path),
+        reason,
+        fragments,
+        verified,
+        stepped_by,
     )
+
+
+def _overlap(row: tuple[Any, ...]) -> Overlap:
+    camera_id, time_from, time_to = row[:3]
+    older, newer = row[3 : 3 + _WIDTH], row[3 + _WIDTH :]
+    return Overlap(camera_id, time_from, time_to, _segment(older), _segment(newer))
 
 
 def _aware(at: datetime, what: str) -> None:
@@ -212,6 +253,17 @@ def _check(segment: IndexedSegment) -> None:
         raise InvalidSegmentError(
             f"{segment.reason!r} is not in the closed set of reasons a Segment ends"
         )
+    stepped_by: object = segment.stepped_by
+    if stepped_by is not None and (
+        not isinstance(stepped_by, int | float)
+        or isinstance(stepped_by, bool)
+        or not math.isfinite(stepped_by)
+        or stepped_by == 0
+    ):
+        raise InvalidSegmentError(
+            f"Segment {segment.segment_id} says the clock stepped by {stepped_by!r} seconds "
+            "before it, which no step is"
+        )
     path = segment.path
     if (
         path.is_absolute()
@@ -229,7 +281,8 @@ def _check(segment: IndexedSegment) -> None:
 
 
 class SegmentIndex:
-    """Indexes finished Segments and finds the one holding an instant."""
+    """Indexes finished Segments, finds the one an instant resolves to, and says where two of a
+    camera's overlap."""
 
     def __init__(self, connection: psycopg.Connection) -> None:
         self._connection = connection
@@ -237,8 +290,9 @@ class SegmentIndex:
     def index(self, segment: IndexedSegment) -> bool:
         """Index a finished Segment: True when it is newly indexed, False when it already was.
 
-        Raises a `SegmentRefusedError` for a Segment the index will never hold, and
-        `SegmentIndexError` when the database failed.
+        Each stretch it shares with a Segment of its camera already indexed is recorded as an
+        `Overlap`, with it as the newer. Raises a `SegmentRefusedError` for a Segment the index
+        will never hold, and `SegmentIndexError` when the database failed.
         """
         _check(segment)
         failed: str | None = None
@@ -253,7 +307,7 @@ class SegmentIndex:
                     " WHERE segment_id = %(id)s"
                     " OR (camera_id = %(camera)s AND time_from < %(to)s AND time_to > %(from)s"
                     "     AND time_from > %(from)s - %(span)s)"
-                    " ORDER BY time_from",
+                    " ORDER BY indexed_order",
                     {
                         "id": segment.segment_id,
                         "camera": segment.camera_id,
@@ -267,23 +321,8 @@ class SegmentIndex:
                     if same[0] == segment:
                         return False
                     refused = SegmentConflictError(segment, same[0])
-                elif held:
-                    refused = SegmentOverlapError(segment, held[0])
                 else:
-                    self._connection.execute(
-                        f"INSERT INTO segments ({_COLUMNS})"
-                        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                        (
-                            segment.camera_id,
-                            segment.segment_id,
-                            segment.time_from,
-                            segment.time_to,
-                            str(segment.path),
-                            segment.reason,
-                            segment.fragments,
-                            segment.verified,
-                        ),
-                    )
+                    self._insert(segment, overlapping=held)
                     return True
         except psycopg.errors.ForeignKeyViolation:
             refused = UnknownCameraError(segment.camera_id)
@@ -299,9 +338,40 @@ class SegmentIndex:
             raise refused
         raise SegmentIndexError(f"the segment index's database failed: {failed}")
 
+    def _insert(self, segment: IndexedSegment, *, overlapping: list[IndexedSegment]) -> None:
+        self._connection.execute(
+            f"INSERT INTO segments ({_COLUMNS}) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                segment.camera_id,
+                segment.segment_id,
+                segment.time_from,
+                segment.time_to,
+                str(segment.path),
+                segment.reason,
+                segment.fragments,
+                segment.verified,
+                segment.stepped_by,
+            ),
+        )
+        for held in overlapping:
+            self._connection.execute(
+                "INSERT INTO segment_overlaps (camera_id, time_from, time_to, older_id, newer_id)"
+                " VALUES (%s, %s, %s, %s, %s)",
+                (
+                    segment.camera_id,
+                    max(held.time_from, segment.time_from),
+                    min(held.time_to, segment.time_to),
+                    held.segment_id,
+                    segment.segment_id,
+                ),
+            )
+
     def find(self, camera_id: int, at: datetime) -> Instant | None:
-        """The Segment of camera `camera_id` holding the instant `at`, and how long after it
-        began `at` is; None when no Segment holds it."""
+        """The Segment of camera `camera_id` that the instant `at` resolves to, how long after
+        it began `at` is, and the Overlaps `at` lies in; None when no Segment holds it.
+
+        Of several Segments holding `at`, the newest verified one, else the newest: of two, the
+        verified one if exactly one is, otherwise the newer."""
         if at.tzinfo is None or at.utcoffset() is None:
             raise ValueError("the instant has no time zone; Footage is timed in UTC")
         if camera_id not in _INTEGER:
@@ -310,24 +380,48 @@ class SegmentIndex:
             f"SELECT {_COLUMNS} FROM segments"
             " WHERE camera_id = %(camera)s AND time_from <= %(at)s AND time_to > %(at)s"
             " AND time_from > %(at)s - %(span)s"
-            " ORDER BY time_from DESC LIMIT 1",
+            " ORDER BY verified DESC, indexed_order DESC",
             {"camera": camera_id, "at": at, "span": MAX_SPAN},
         )
         if not rows:
             return None
         segment = _segment(rows[0])
-        return Instant(segment, at - segment.time_from)
+        overlaps = () if len(rows) == 1 else tuple(self.overlaps(camera_id, at, at + _TICK))
+        return Instant(segment, at - segment.time_from, overlaps)
 
-    def latest(self, camera_id: int) -> IndexedSegment | None:
-        """The last Segment of camera `camera_id` indexed, by when it begins; None if none is."""
+    def overlaps(self, camera_id: int, time_from: datetime, time_to: datetime) -> list[Overlap]:
+        """Every Overlap of camera `camera_id` that shares an instant with
+        `[time_from, time_to)`, by when it begins."""
+        if any(t.tzinfo is None or t.utcoffset() is None for t in (time_from, time_to)):
+            raise ValueError("the window has no time zone; Footage is timed in UTC")
         if camera_id not in _INTEGER:
-            return None
+            return []
+        # Each of an Overlap's Segments holds its start, so began at most `MAX_SPAN` before it.
         rows = self._run(
-            f"SELECT {_COLUMNS} FROM segments WHERE camera_id = %(camera)s"
-            " ORDER BY time_from DESC LIMIT 1",
+            f"SELECT o.camera_id, o.time_from, o.time_to, {_OLDER}, {_NEWER}"
+            " FROM segment_overlaps o"
+            " JOIN segments older ON older.segment_id = o.older_id"
+            "     AND older.camera_id = o.camera_id AND older.time_from <= o.time_from"
+            "     AND older.time_from > o.time_from - %(span)s"
+            " JOIN segments newer ON newer.segment_id = o.newer_id"
+            "     AND newer.camera_id = o.camera_id AND newer.time_from <= o.time_from"
+            "     AND newer.time_from > o.time_from - %(span)s"
+            " WHERE o.camera_id = %(camera)s AND o.time_from < %(to)s AND o.time_to > %(from)s"
+            " AND o.time_from > %(from)s - %(span)s"
+            " ORDER BY o.time_from, newer.indexed_order, older.indexed_order",
+            {"camera": camera_id, "from": time_from, "to": time_to, "span": MAX_SPAN},
+        )
+        return [_overlap(row) for row in rows]
+
+    def segment_ids(self, camera_id: int) -> frozenset[UUID]:
+        """The id of every Segment of camera `camera_id` indexed, whenever it begins."""
+        if camera_id not in _INTEGER:
+            return frozenset()
+        rows = self._run(
+            "SELECT segment_id FROM segments WHERE camera_id = %(camera)s",
             {"camera": camera_id},
         )
-        return _segment(rows[0]) if rows else None
+        return frozenset(row[0] for row in rows)
 
     def _run(
         self, query: LiteralString, parameters: dict[str, object]

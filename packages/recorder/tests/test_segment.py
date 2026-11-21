@@ -213,8 +213,10 @@ def test_segments_come_back_oldest_first_across_days(tmp_path: Path) -> None:
     assert found == [earlier.segment_id, later.segment_id]
 
 
-def test_segments_from_a_day_on_are_read_without_reading_the_days_before(tmp_path: Path) -> None:
-    by_day: list[UUID] = []
+def test_segments_already_known_are_passed_over_without_reading_their_record(
+    tmp_path: Path,
+) -> None:
+    by_day: list[Segment] = []
     for days in range(3):
         segment = SegmentFile.open(
             tmp_path,
@@ -224,14 +226,13 @@ def test_segments_from_a_day_on_are_read_without_reading_the_days_before(tmp_pat
             verified=True,
         )
         segment.append(fragments(1)[0], arrived_at=AT + timedelta(days=days, seconds=2))
-        by_day.append(finished(segment).segment_id)
-    # A day before `since` is not even listed: a broken Segment there would be read otherwise.
-    (tmp_path / AT.strftime("%Y-%m-%d") / "broken.mp4").write_bytes(b"")
-    (tmp_path / AT.strftime("%Y-%m-%d") / "broken.closed").write_text("{")
+        by_day.append(finished(segment))
+    # A known Segment's record is not even read: a broken one would raise otherwise.
+    by_day[0].path.with_suffix(".closed").write_text("{")
 
-    found = segments(tmp_path, since=(AT + timedelta(days=1)).date())
+    found = segments(tmp_path, known={by_day[0].segment_id, by_day[2].segment_id})
 
-    assert [segment.segment_id for segment in found] == by_day[1:]
+    assert [segment.segment_id for segment in found] == [by_day[1].segment_id]
 
 
 def test_a_finished_segment_whose_record_cannot_be_read_is_told_and_passed_over(
