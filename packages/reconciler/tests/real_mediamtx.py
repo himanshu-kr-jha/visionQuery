@@ -5,14 +5,16 @@ conftest.py makes the fixtures. `running_mediamtx()` runs one container of the M
 `docker/mediamtx/Dockerfile` builds on, with the Deployment's own `docker/mediamtx/mediamtx.yml`
 and a generated password for each of its two users (`visionquery-api`, which drives the control
 API, and `visionquery-reader`, which reads), on a Docker network of its own (as
-`mediamtx`). Its API is published on an ephemeral loopback port, so the tests reach it as the
-reconciler does: with credentials, and not from MediaMTX's own loopback. Cameras are played by
+`mediamtx`). Its API and its RTSP port are published on loopback ports of their own, so the tests
+reach the API as the reconciler does: with credentials, and not from MediaMTX's own loopback, and
+`wait_until_ready` can ask the RTSP port too. Cameras are played by
 ffmpeg containers (the image the fake cameras use) on the same network. The container and the
 network are removed afterwards; every container carries the label `packages/conftest.py` sweeps,
 should a session be killed.
 """
 
 import base64
+import http.client
 import json
 import re
 import secrets
@@ -43,6 +45,9 @@ LABEL = "visionquery-test=1"
 STARTED_LABEL = "visionquery-test-started"
 #: An RTSP URL's camera-facing side, as the publishers and readers on the network see it.
 RTSP = "mediamtx:8554"
+#: What a request to MediaMTX raises while the container is not serving yet: a connection
+#: refused or reset, a timeout, or an answer cut short.
+_TRANSIENT = (urllib.error.URLError, OSError, http.client.HTTPException)
 
 
 def _base_image(dockerfile: Path, stage: str) -> str:
@@ -103,6 +108,8 @@ class MediaMTX:
     api_password: str
     #: The `visionquery-reader` user's password.
     reader_password: str
+    #: The loopback port MediaMTX's RTSP is published on, for a reader on the host.
+    rtsp_port: int
 
     def restart(self) -> None:
         """Restart MediaMTX, which forgets everything set through its API."""
@@ -117,15 +124,42 @@ class MediaMTX:
         self.wait_until_ready()
 
     def wait_until_ready(self, timeout: float = 30) -> None:
+        """Wait until MediaMTX can serve a test: its control API answers (as the `visionquery-api`
+        user) and its RTSP port accepts a connection and answers an RTSP request. Each is asked
+        on every round, because under load they come up at different moments, and a connection
+        refused or reset before then is the container not being up yet. When `timeout` seconds
+        pass the failure says what each one did last."""
         deadline = time.monotonic() + timeout
         while True:
-            try:
-                self.api("GET", "/v3/config/global/get")
+            api = self._api_problem()
+            rtsp = self._rtsp_problem()
+            if api is None and rtsp is None:
                 return
-            except urllib.error.URLError, ConnectionError, OSError:
-                if time.monotonic() > deadline:
-                    raise
-                time.sleep(0.2)
+            assert time.monotonic() <= deadline, (
+                f"MediaMTX was not ready after {timeout} s: "
+                f"API {api or 'answers'}; RTSP {rtsp or 'answers'}"
+            )
+            time.sleep(0.2)
+
+    def _api_problem(self) -> str | None:
+        """Why the control API cannot answer now, or None if it does."""
+        try:
+            self.api("GET", "/v3/config/global/get")
+        except _TRANSIENT as error:
+            return f"did not answer ({error!r})"
+        return None
+
+    def _rtsp_problem(self) -> str | None:
+        """Why the RTSP port cannot serve now, or None if it accepts a connection and answers an
+        RTSP request with a status line (a proxy with no backend yet accepts, then says nothing)."""
+        try:
+            with socket.create_connection(("127.0.0.1", self.rtsp_port), timeout=2) as connection:
+                connection.settimeout(2)
+                connection.sendall(b"OPTIONS rtsp://127.0.0.1/ RTSP/1.0\r\nCSeq: 1\r\n\r\n")
+                answer = connection.recv(64)
+        except OSError as error:
+            return f"did not answer ({error!r})"
+        return None if answer.startswith(b"RTSP/1.0") else f"answered {answer[:20]!r}"
 
     def api(self, method: str, path: str, body: object = None) -> Any:
         """Ask the control API as the `visionquery-api` user; the JSON it answers."""
@@ -148,7 +182,8 @@ class MediaMTX:
         path: str = "/v3/config/global/get",
     ) -> int:
         """The HTTP status the control API gives `user` for a request (401 for bad credentials,
-        403 for a user without the `api` permission); 0 if the connection was refused."""
+        403 for a user without the `api` permission). A connection that fails is not an answer:
+        it raises, so that a test never takes MediaMTX not being there for a refusal."""
         request = urllib.request.Request(self.api_url + path, method=method)
         if user is not None:
             token = f"{user}:{password}".encode()
@@ -194,14 +229,20 @@ class MediaMTX:
             _docker("rm", "--force", name)
 
     def wait_until_published(self, path: str, timeout: float = 30) -> None:
+        """Wait until a publisher to `path` is ready. A connection refused or reset by the API
+        while it comes up is waited through; the failure says what the API did last."""
         deadline = time.monotonic() + timeout
+        seen = "nothing yet"
         while True:
             try:
                 if self.api("GET", f"/v3/paths/get/{path}").get("ready"):
                     return
-            except urllib.error.HTTPError:
-                pass
-            assert time.monotonic() < deadline, f"nothing was published to {path}"
+                seen = "the path exists but is not ready"
+            except urllib.error.HTTPError as error:
+                seen = f"API answered {error.code}"
+            except _TRANSIENT as error:
+                seen = f"API did not answer ({error!r})"
+            assert time.monotonic() < deadline, f"nothing was published to {path}: {seen}"
             time.sleep(0.2)
 
     def read(
@@ -268,7 +309,7 @@ def running_mediamtx() -> Generator[MediaMTX]:
     suffix = uuid.uuid4().hex[:12]
     network, container = f"vq-test-net-{suffix}", f"vq-test-mediamtx-{suffix}"
     api_password, reader_password = secrets.token_hex(24), secrets.token_hex(24)
-    port = _free_port()
+    port, rtsp_port = _free_port(), _free_port()
     assert _docker("network", "create", "--label", LABEL, network).returncode == 0
     try:
         started = _docker(
@@ -280,13 +321,19 @@ def running_mediamtx() -> Generator[MediaMTX]:
             "--volume", f"{MEDIAMTX_CONFIG}:/etc/mediamtx:ro",
             # A port of its own, not an ephemeral one, which a restart would change.
             "--publish", f"127.0.0.1:{port}:9997",
+            "--publish", f"127.0.0.1:{rtsp_port}:8554",
             MEDIAMTX_IMAGE, "/etc/mediamtx/mediamtx.yml",
             timeout=600,
         )  # fmt: skip
         assert started.returncode == 0, started.stderr
         try:
             server = MediaMTX(
-                container, network, f"http://127.0.0.1:{port}", api_password, reader_password
+                container,
+                network,
+                f"http://127.0.0.1:{port}",
+                api_password,
+                reader_password,
+                rtsp_port,
             )
             server.wait_until_ready()
             yield server
