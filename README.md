@@ -79,7 +79,9 @@ CI's `setup-guide` job runs exactly these commands on a clean runner (its checko
    It starts Postgres (TimescaleDB and pgvector), MediaMTX, the reconciler that keeps MediaMTX matching the camera registry, the recorder, and the VisionQuery api, and returns once every service is healthy.
    The recorder copies every registered camera's video, never decoded, into Footage in the `footage` volume: one directory per camera id, holding Segments of `VISIONQUERY_SEGMENT_SECONDS` (300 s) cut at the same instants for every camera.
    It indexes each finished Segment in the database by camera and the span of time it covers, so any instant on any camera resolves to a file and an offset in it.
-   Their times come from the host's clock as NTP disciplines it, so run an NTP client on the host (systemd-timesyncd or chrony); without one the recorder still records, and marks the times unverified (`visionquery_recorder_clock_verified` is 0).
+   Their times come from the host's clock as NTP disciplines it, so run an NTP client on the host (systemd-timesyncd or chrony); without one the recorder still records, and marks the times unverified: `visionquery_recorder_clock_verified` is 0 for a camera whose Segment being written stands on no NTP reading, or on one older than two hours, and `visionquery_recorder_clock_steps_total` counts the times the clock stepped when a Segment opened (a host that has just booted and set its clock).
+   After a crash it finishes the Segments it left unfinished when it starts; one it cannot is moved to `.quarantine/` in the `footage` volume, logged as an ERROR naming it and counted by `visionquery_recorder_segments_quarantined_total`, and never stops the other cameras from recording.
+   ffmpeg reads each camera from a file only the recorder can read, so the password is on no command line ([ADR 0019](docs/adr/0019-no-credentials-in-argv.md)).
    Postgres listens on `127.0.0.1:15432` (superuser and database `visionquery`), MediaMTX on `127.0.0.1:8554` (RTSP) and `127.0.0.1:9997` (API, user `visionquery-api`), and the api on `127.0.0.1:8080`, where <http://127.0.0.1:8080/health> says whether it can reach the database.
    MediaMTX lets a camera publish only to its own path with its own credentials, and lets only VisionQuery's own readers' user `visionquery-reader` (with `VISIONQUERY_MEDIAMTX_READ_PASSWORD`) read, which may do nothing else; only the reconciler holds the password of the API user `visionquery-api` (`VISIONQUERY_MEDIAMTX_API_PASSWORD`), so a reader cannot rewrite who may publish; a camera added, changed or removed reaches it within one reconcile (`VISIONQUERY_RECONCILE_INTERVAL`, 5 s), and so does a restarted MediaMTX.
    `docker compose exec reconciler visionquery-reconciler status` says whether each camera's video is arriving.
@@ -158,6 +160,7 @@ The details are in [`CLAUDE.md`](CLAUDE.md), which serves as the working guide f
 
 `make check` runs locally what CI runs on every PR, except the stack tests (`make test-stack`).
 CI (`.github/workflows/ci.yml`) runs lint (ruff, ruff format, actionlint), the type check, the import contracts, the Python tests against Postgres, the web app's lint, type check and tests with its API types check, the Compose stack tests, the setup above from a fresh clone, and a check that no commit, PR title or PR body carries agent attribution and that the PR title is a Conventional Commit.
+Editing a PR's title, body or base re-runs that last check alone (`.github/workflows/pr-edited.yml`).
 `develop` and `main` accept changes only through a PR on which every one of those checks passed.
 
 To have git run the fast checks for you, opt in to the pre-commit hooks:

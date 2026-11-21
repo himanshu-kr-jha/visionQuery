@@ -12,6 +12,18 @@ forward is still better than the wall, and with no good reading ever, the wall c
 said to be unverified. The Segment is kept either way, because discarding real Footage to avoid
 stating an uncertainty that can simply be stated is the worse error.
 
+**A reading carried forward stops counting as verified after `verified_for`** (two hours by
+default: a Segment lasts at most an hour, and is opened on a fresh reading whenever NTP is
+there, so a reading that old means NTP has been gone for a Segment or more). A host that lost
+NTP a month ago still has a monotonic clock, but a month of its drift is not something to vouch
+for.
+
+**Anchoring again can move the time, but only a step does** (whoever set the clock, or NTP
+finding it far off, as at boot). NTP slews the monotonic clock exactly as it slews the wall
+clock, so the difference between them, which is what anchoring measures, stays the same through
+any slew. `anchor()` says by how much the time moved, and a shift beyond `STEP_TOLERANCE` is a
+discontinuity that the Segmenter must not bridge (`visionquery.recorder.camera`).
+
 Why arrival on this clock, and not the cameras' own timestamps: ADR 0017. Adapted from phyOS's
 Photon recorder (`adapters.photon.timebase`).
 """
@@ -25,7 +37,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
 
-__all__ = ["ClockState", "Reading", "TimeBase", "read_kernel_clock"]
+__all__ = ["STEP_TOLERANCE", "ClockState", "Reading", "TimeBase", "read_kernel_clock"]
+
+#: A shift of the time by more than this when the timebase is anchored again is a step. Only
+#: steps move the shift, since a slew moves the monotonic and the wall clock alike; 250 ms sits
+#: below the 0.4 s at which systemd-timesyncd steps instead of slewing, and above the noise of
+#: reading two clocks one after the other.
+STEP_TOLERANCE = timedelta(milliseconds=250)
+#: How long after its last synchronised reading the timebase still counts as verified.
+VERIFIED_FOR = timedelta(hours=2)
 
 type Source = Literal["ntp", "wall"]
 
@@ -105,7 +125,9 @@ class TimeBase:
         wall: Callable[[], float] = time.time,
         mono: Callable[[], float] = time.monotonic,
         source: Callable[[], Reading] = read_kernel_clock,
+        verified_for: timedelta = VERIFIED_FOR,
     ) -> None:
+        self._verified_for = verified_for.total_seconds()
         self._wall = wall
         self._mono = mono
         self._source = source
@@ -139,8 +161,11 @@ class TimeBase:
 
     @property
     def verified(self) -> bool:
-        """Whether the anchor in use is a synchronised NTP reading."""
-        return self._anchored().verified
+        """Whether the anchor in use is a synchronised NTP reading, taken within `verified_for`."""
+        return self._verified(self._anchored())
+
+    def _verified(self, anchor: _Anchor) -> bool:
+        return anchor.verified and self._mono() - anchor.mono <= self._verified_for
 
     def state(self) -> ClockState:
         anchor = self._anchored()
@@ -148,7 +173,7 @@ class TimeBase:
         carried = anchor.wall + (mono - anchor.mono)
         return ClockState(
             source=anchor.reading.source,
-            verified=anchor.verified,
+            verified=self._verified(anchor),
             wall_offset_seconds=self._wall() - carried,
             anchored_seconds_ago=mono - anchor.mono,
             est_error_us=anchor.reading.est_error_us,

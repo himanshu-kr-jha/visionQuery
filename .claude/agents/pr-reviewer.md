@@ -1,6 +1,6 @@
 ---
 name: pr-reviewer
-description: Reviews a VisionQuery pull request or branch before merge - runs the full check suite, checks the change against the glossary, ADRs and the issue it closes, and reports how it affects the product. Use before asking for any merge into develop or main.
+description: Reviews a VisionQuery pull request before merge - checks the change against the glossary, ADRs and the issue it closes, judges its quality and design, and reports how it affects the product. Use before any merge into develop or main.
 model: opus
 tools: Bash, Read, Grep, Glob
 ---
@@ -13,7 +13,7 @@ You do not edit code; you report.
 Always review in a detached scratch worktree of the PR head, never in the checked-out tree.
 
 1. Record the starting state: `git worktree list` and `git status --porcelain` in the main checkout.
-2. `git fetch`, then `git worktree add --detach <tmpdir> origin/<headRefName>` with `<tmpdir>` outside the repository.
+2. `git fetch`, then `git worktree add --detach <tmpdir> origin/<headRefName>` with `<tmpdir>` outside the repository: it is the scratch path the tech lead gave you in your prompt (`<scratch>/pr-reviewer-pr<n>-<short head>`), used exactly as given and never a name of your own.
 3. Do all reading, checks and `file:line` citations inside `<tmpdir>`, and diff against `origin/<baseRefName>` (`git diff origin/<baseRefName>...origin/<headRefName>`).
 4. At the end, always run `git worktree remove --force <tmpdir> && git worktree prune`.
    Confirm `git status --porcelain` in the main checkout is empty and `git worktree list` matches how it started.
@@ -22,21 +22,20 @@ Always review in a detached scratch worktree of the PR head, never in the checke
 
 If the GitHub API is unreachable, the tech lead may supply the PR and issue text in the prompt; use that.
 
-1. `gh pr view <n> --json title,body,baseRefName,headRefName,files` (for a branch with no PR, use the branch as head and `develop` as base).
-2. The issue it closes: `gh issue view <n>`, including its acceptance criteria and its parent milestone.
+1. `gh api repos/{owner}/{repo}/pulls/<n>` for the title, body, base and head, and `gh api --paginate .../issues/<n>/comments` for the earlier verdicts and hand-backs (`gh pr view` can fail with a Projects (classic) deprecation error; for a branch with no PR, use the branch as head and `develop` as base).
+2. The issue it closes: `gh api repos/{owner}/{repo}/issues/<n>`, including its acceptance criteria, and its parent milestone with `gh api repos/{owner}/{repo}/issues/<n>/parent`.
 3. The full diff.
 4. `CONTEXT.md`, and every ADR in `docs/adr/` whose area the diff touches.
 
 ## Verify
 
-Run every check CI runs that exists for the repository and is relevant to the change (see the Commands section of `CLAUDE.md`): lint, format check, type check, import contracts, the whole test suite.
-A check that does not exist yet (no Commands entry, no CI job, no `web/`) is reported as "not applicable" with the reason, never as a pass.
-Report exact failures with output; a red check is always a blocking finding.
-Run `make check` (it covers lint, format, type check, import contracts and the fast tests).
-The tester runs the full stack tests (`make test-stack`) once per PR, and CI's `stack` job runs them on every head of an open PR; run them yourself only when you suspect a defect there, and say which you ran.
-The tech lead tells you which fix round you are judging.
+CI runs every check on the PR head (`make check` and the stack tests, without Triton or the real samples), and `tester` judges the same head at the same time for behaviour, so do not re-run the suite.
+Read CI's result (`gh pr checks <n>`); a red check is always a blocking finding, reported with its failing output (`gh run view <id> --log-failed`), and a check still pending is reported as pending, not waited for.
+Run yourself only what you need to confirm a suspected defect, and say what you ran.
+The tech lead tells you which fix round you are judging; in a later round, start from the diff since the last head you judged yourself, or review the whole diff if you have judged none.
 When the tech lead says two fix rounds are done, mark only security or correctness defects as blocking, and list every other finding as non-blocking for a follow-up issue.
 For a docs-only or config-only change there is no tester run: you are the only check, so read the change completely and run whatever commands it touches.
+For a change to the workflow itself (`CLAUDE.md`, `.claude/`), check that every file describes one consistent lifecycle.
 
 Then check, and report each failure as a finding:
 
@@ -57,7 +56,10 @@ A review that surfaces one more member of a class each round costs the team a ro
 
 ## Report
 
-Lead with a verdict: **ready to merge**, **merge after fixes**, or **do not merge**.
+Post the report as a comment on the PR (`gh pr comment <n> --body-file <file>`, the file outside the repository), without agent attribution, and end your run with the same text.
+Finish or stop anything you started in the background first, so that nothing of yours keeps running after the report.
+
+Lead with the head commit you reviewed, the round, and a verdict: **ready to merge**, **merge after fixes**, or **do not merge**.
 Then:
 
 1. **Product impact:** two to five sentences, in glossary terms, on what an Operator can now do or will see differently, and what could regress.

@@ -29,23 +29,87 @@ VARIANTS = [
     "GENERATED WITH [" + "CLAUDE CODE]",
 ]
 
-#: Other ways the markers appear: a bare session URL, the agent's no-reply address, the trailer
-#: and the session marker written with spaces, and emphasis around the tool name in the footer.
+#: Other ways the markers appear: a bare session URL, the agent's no-reply address, the
+#: trailers written with spaces, emphasis, a quote or list mark before them, the hyphenated
+#: session marker anywhere in a line, and emphasis around the tool name in the footer.
 OTHER_MARKERS = [
     "See https://claude" + ".ai/code/session_01ABC for details",
     "claude" + ".ai/code/session_01ABC",
     "Someone <noreply" + "@anthropic.com>",
     "by noreply" + "@ANTHROPIC.COM",
     "Co " + "authored by: Someone",
-    "co" + "authored" + " by Someone",
-    "Co-" + "Authored" + " By Someone",
+    "co" + "authored" + " by: Someone",
+    "Co-" + "Authored" + " By : Someone",
+    "  Co-" + "authored-by: Someone",
+    "> Co-" + "authored-by: Someone",
+    "- Co-" + "authored-by: Someone",
+    "**Co-" + "authored-by:** Someone",
+    "1. Co-" + "authored-by: Someone",
+    "(Co-" + "authored-by: Someone)",
+    "+ Claude " + "session: abc",
     "Claude " + "Session: abc",
-    "claude  " + "session",
+    "claude  " + "session : abc",
+    "See the Claude-" + "Session marker",
+    "claude--" + "session",
     "Generated with **" + "Claude Code**",
     "Generated with _" + "Claude Code_",
     "Generated with `" + "Claude Code`",
     "Generated with [**" + "Claude Code**](https://example.com)",
     "Generated with *" + "Claude* *Code*",
+    # The hyphenated key is a trailer's and never prose: refused wherever it stands.
+    "<p>Co-" + "Authored-By: Claude Opus 5.5</p>",
+    "<b>Co-" + "Authored-By:</b> Claude Opus 5.5",
+    "<details><summary>Co-" + "Authored-By: Claude Opus 5.5</summary>",
+    "[Co-" + "Authored-By]: Claude Opus 5.5",
+    "[Co-" + "Authored-By](x): Claude Opus 5.5",
+    "~~Co-" + "Authored-By~~: Claude Opus 5.5",
+    "| Co-" + "Authored-By | Claude Opus 5.5 |",
+    "Co-" + "Authored-By&#58; Claude Opus 5.5",
+    "Co-" + "Authored-By\uff1a Claude Opus 5.5",
+    "Note: Co-" + "Authored-By: Claude Opus 5.5",
+    "Thanks. Co-" + "Authored-By: Claude Opus 5.5",
+    "Co-" + "Authored-By Claude Opus 5.5",
+    "coauthored-" + "by Claude Opus 5.5",
+    # Written to look different from the text a reader sees, or from what a check reads.
+    "Co-Auth\u200bored-By: Claude Opus 5.5",
+    "claude\u200b" + ".ai/code/session_01ABC",
+    "Generated with Clau\u200bde Code",
+    "Co\u2011Authored\u2011By: Claude Opus 5.5",
+    "Co-Auth\u043ered-By: Claude Opus 5.5",
+    "C\u043e-Auth\u043ered-By: Claude Opus 5.5",
+    'Generated with <a href="https://example.com">Claude Code</a>',
+    "Generated with<br>Claude Code",
+    "Co&#45;Authored-By: Claude Opus 5.5",
+    "noreply&#64;anthropic.com",
+    "claude%2Eai/code/session_01ABC",
+    "https://claude" + ".com/claude-code",
+    "[Claude](https://claude.com/claude-code)",
+    "CLAUDE.COM/CLAUDE-CODE",
+    # Markdown escapes, emphasis and code spans inside the key, which GitHub renders away.
+    "Co\\-" + "Authored\\-By: Claude Opus 5.5",
+    "See claude\\" + ".ai/code/session_01ABC",
+    "Someone <noreply\\" + "@anthropic.com>",
+    "noreply\\" + "@anthropic\\.com",
+    "Co-**Authored**-" + "By: Claude Opus 5.5",
+    "Co-Auth*ored*-" + "By: Claude Opus 5.5",
+    "Co-Auth`ored`-" + "By: Claude Opus 5.5",
+    "Co-Auth_ored_-" + "By: Claude Opus 5.5",
+    "**Co-Authored-" + "By**: Claude Opus 5.5",
+    # Characters that show as nothing, or as a hyphen, or that sit on the letter before them.
+    "Co-Authored-By\u034f: Claude Opus 5.5",
+    "Co-Auth\ufe00ored-By: Claude Opus 5.5",
+    "Co\u3164-Authored-By: Claude Opus 5.5",
+    "Co\u115f-Authored-By: Claude Opus 5.5",
+    "Co\uffa0-Authored-By: Claude Opus 5.5",
+    "Co\u02d7Authored\u02d7By: Claude Opus 5.5",
+    "Co\u2043Authored\u2043By: Claude Opus 5.5",
+    "Co\u058aAuthored\u058aBy: Claude Opus 5.5",
+    "Co\u30fcAuthored\u30fcBy: Claude Opus 5.5",
+    "Co-Authored-By\u0301: Claude Opus 5.5",
+    "Co-Authored-B\u0301y: Claude Opus 5.5",
+    "Co-Authored-By:\u0301 Claude Opus 5.5",
+    "Claude\u034f Session: abc",
+    "Generated with Claude Co\u0301de",
 ]
 
 
@@ -253,9 +317,29 @@ def test_other_spellings_of_the_markers_fail_in_a_commit_message(
     assert _check(str(message)).returncode == 1, marker
 
 
+#: The spaced trailer words in a sentence: no colon after them, or not at the line's start.
+TRAILER_WORDS_IN_PROSE = [
+    "This paper was co-" + "authored by two people.",
+    "I resumed the Claude " + "session yesterday.",
+    "I resumed the Claude " + "Code session yesterday.",
+    "Co-" + "authored by two people: Alice and Bob.",
+    "Co-" + "authored -- by the way, it works.",
+    "It was co-" + "authored - by the reviewers.",
+    "Caf\u00e9 r\u00e9sum\u00e9, snake_case_names and *emphasis* in a `code span`.",
+]
+
+
+@pytest.mark.parametrize("prose", TRAILER_WORDS_IN_PROSE)
+def test_the_trailers_words_in_pr_text_prose_pass(prose: str) -> None:
+    environment = {"PATH": "/usr/bin:/bin", "PR_BODY": f"Closes #8\n\n{prose}\n"}
+    result = _check("--env", "PR_BODY", env=environment)
+    assert result.returncode == 0, result.stderr
+
+
 @pytest.mark.parametrize(
     "prose",
     [
+        *TRAILER_WORDS_IN_PROSE,
         "Use a claude " + "model for the Reasoner",
         "The session cookie is signed; Claude Code agents are described in CLAUDE.md",
         "Written by the senior-developer, authored in the worktree",

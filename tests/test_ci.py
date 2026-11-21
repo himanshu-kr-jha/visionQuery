@@ -5,6 +5,7 @@ apart: a target added to `make check` fails here until a job runs it. These test
 workflow; that it passes is shown by its runs on GitHub.
 """
 
+import json
 import re
 import subprocess
 from collections.abc import Iterator
@@ -14,7 +15,10 @@ from typing import Any
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+WORKFLOWS = ROOT / ".github" / "workflows"
+WORKFLOW = WORKFLOWS / "ci.yml"
+#: Re-runs the commits job alone when a PR's title, body or base is edited.
+EDITED = WORKFLOWS / "pr-edited.yml"
 SETUP = ROOT / ".github" / "actions" / "setup" / "action.yml"
 #: A full commit SHA, which unlike a tag cannot be moved to other code, and the version it is.
 PINNED = re.compile(r"^[\w.-]+/[\w./-]+@[0-9a-f]{40}$")
@@ -32,10 +36,25 @@ def _jobs() -> dict[str, dict[str, Any]]:
     return _workflow()["jobs"]
 
 
+def _all_workflows() -> dict[str, dict[Any, Any]]:
+    return {path.name: _yaml(path) for path in sorted(WORKFLOWS.glob("*.yml"))}
+
+
 def _steps() -> Iterator[dict[str, Any]]:
-    for job in _jobs().values():
-        yield from job["steps"]
+    for workflow in _all_workflows().values():
+        for job in workflow["jobs"].values():
+            yield from job["steps"]
     yield from _yaml(SETUP)["runs"]["steps"]
+
+
+def _jobs_run_on_pull_request(action: str) -> set[str]:
+    """The jobs, of every workflow, that a pull_request event with this action starts."""
+    started: set[str] = set()
+    for workflow in _all_workflows().values():
+        pull_request = workflow[True].get("pull_request")
+        if pull_request is not None and action in pull_request["types"]:
+            started.update(workflow["jobs"])
+    return started
 
 
 def _runs(job: dict[str, Any]) -> str:
@@ -54,9 +73,8 @@ def test_it_runs_on_prs_and_pushes_to_develop_and_main() -> None:
     # PyYAML reads the bare key `on` as True.
     triggers = _workflow()[True]
     assert triggers["pull_request"]["branches"] == ["develop", "main"]
-    # `edited` re-runs the commits job when a title or body is fixed (or the base changed);
-    # the default types would leave a red check red after the edit that fixes it.
-    assert triggers["pull_request"]["types"] == ["opened", "edited", "synchronize", "reopened"]
+    # An edit of the title, body or base is pr-edited.yml's, which runs the commits job alone.
+    assert triggers["pull_request"]["types"] == ["opened", "synchronize", "reopened"]
     assert triggers["push"]["branches"] == ["develop", "main"]
     # No manual trigger: a run started by hand would replace the result of a required check on
     # the same SHA. A run is repeated with `gh run rerun`, which keeps its event.
@@ -65,6 +83,10 @@ def test_it_runs_on_prs_and_pushes_to_develop_and_main() -> None:
 
 def test_the_token_can_only_read() -> None:
     assert _workflow()["permissions"] == {"contents": "read"}
+    # The commits job alone reads the PR (its live title, body and base), and only reads it.
+    assert _jobs()["commits"]["permissions"] == {"contents": "read", "pull-requests": "read"}
+    for name, job in _jobs().items():
+        assert name == "commits" or "permissions" not in job, name
 
 
 def test_every_action_is_pinned_to_a_commit_with_its_version_named() -> None:
@@ -163,22 +185,85 @@ def test_the_commits_job_checks_attribution_and_the_title_of_a_pr() -> None:
     assert "scripts/check_attribution.py --commits" in runs
     assert "--env PR_TITLE --env PR_BODY" in runs
     assert "scripts/check_commit_message.py --env PR_TITLE" in runs
-    environment = {k: v for step in job["steps"] for k, v in step.get("env", {}).items()}
-    assert environment["PR_TITLE"] == "${{ github.event.pull_request.title }}"
-    assert environment["PR_BODY"] == "${{ github.event.pull_request.body }}"
+
+
+#: What an event's payload holds of a PR, frozen when the event was sent.
+STALE_PAYLOAD = re.compile(r"github\.event\.pull_request\.(title|body|base\b|head)")
+
+
+def test_the_commits_job_reads_the_pr_as_it_is_now_not_as_its_event_was() -> None:
+    # `gh run rerun` and a late finisher reuse an old event's payload: a check computed from its
+    # title and body could be green for text that has since been changed to carry attribution,
+    # and be the latest `commits` result for the head. The job reads the PR when it runs.
+    for path in (WORKFLOW, EDITED):
+        job = _yaml(path)["jobs"]["commits"]
+        assert not STALE_PAYLOAD.search(json.dumps(job)), path.name
+        reads = [s for s in job["steps"] if "gh api" in s.get("run", "")]
+        assert len(reads) == 1, path.name
+        (read,) = reads
+        assert "pulls/$PR_NUMBER" in read["run"], path.name
+        assert read["env"]["GH_TOKEN"] == "${{ github.token }}", path.name
+        assert read["env"]["REPO"] == "${{ github.repository }}", path.name
+        assert read["env"]["PR_NUMBER"] == "${{ github.event.pull_request.number }}", path.name
+        for field in ("title", "body", "base.sha", "head.sha"):
+            assert f".{field}" in read["run"], (path.name, field)
+
+
+def test_the_commits_job_checks_the_body_as_github_renders_it_too() -> None:
+    # A body's Markdown, entities and invisible characters show as other text than they are
+    # written as: the rendered text (`body_text`, from the full media type) is checked as well.
+    for path in (WORKFLOW, EDITED):
+        job = _yaml(path)["jobs"]["commits"]
+        (read,) = (s for s in job["steps"] if "gh api" in s.get("run", ""))
+        assert "Accept: application/vnd.github.full+json" in read["run"], path.name
+        assert ".body_text" in read["run"], path.name
+        assert "--env PR_TITLE --env PR_BODY --env PR_BODY_TEXT" in read["run"], path.name
+
+
+def test_the_docs_of_a_changed_base_and_a_red_commits_say_what_clears_them() -> None:
+    # GitHub reads the latest `commits` of every suite for the head: a re-run reuses the old
+    # payload, so a changed base is cleared by a pushed commit; an edit's red or cancelled run
+    # is re-run. The three places that say so must agree and not tell of closing and reopening.
+    claude = (ROOT / "CLAUDE.md").read_text()
+    assert "close and reopen" not in claude
+    assert "push a commit" in claude
+    assert "every run's `commits`" in claude
+    assert "cancelled" in claude
+    for path in (WORKFLOW, EDITED):
+        text = path.read_text()
+        assert "close and reopen" not in text, path.name
+        assert "push a commit" in text, path.name
+        assert "every run's `commits`" in text, path.name
+
+
+def test_a_changed_base_fails_the_commits_job() -> None:
+    # Edits re-run only `commits`, so a PR moved to another base would keep its other results,
+    # merged against the old base. The step is in both copies of the job (they must stay equal)
+    # and does something only when the event says the base changed, which only an edit says.
+    for path in (WORKFLOW, EDITED):
+        steps = _yaml(path)["jobs"]["commits"]["steps"]
+        (step,) = (s for s in steps if s.get("if") == "github.event.changes.base")
+        assert "exit 1" in step["run"], path.name
+        # GitHub needs a `commits` result for the head that is green in every suite, and a
+        # re-run reuses the old payload (and base), so the recovery is a new head: a commit.
+        assert "push a commit" in step["run"], path.name
+        assert "merge origin/" in step["run"], path.name
+        assert "empty commit" in step["run"], path.name
+        assert "close and reopen" not in step["run"], path.name
 
 
 def test_the_commits_job_checks_something_on_every_event_that_triggers_it() -> None:
     # A step guarded by an event never runs on another, so an event none of the steps accepts
     # would pass the (required) job having checked nothing.
-    job = _jobs()["commits"]
-    checks = [step for step in job["steps"][2:] if "run" in step]
-    assert checks
-    for event in _workflow()[True]:
-        guards = [step.get("if") for step in checks]
-        assert any(
-            guard is None or f"github.event_name == '{event}'" in guard for guard in guards
-        ), event
+    for path in (WORKFLOW, EDITED):
+        workflow = _yaml(path)
+        checks = [step for step in workflow["jobs"]["commits"]["steps"][2:] if "run" in step]
+        assert checks
+        for event in workflow[True]:
+            guards = [step.get("if") for step in checks]
+            assert any(
+                guard is None or f"github.event_name == '{event}'" in guard for guard in guards
+            ), (path.name, event)
 
 
 def test_a_newer_push_to_a_pr_cancels_the_run_it_supersedes() -> None:
@@ -188,13 +273,16 @@ def test_a_newer_push_to_a_pr_cancels_the_run_it_supersedes() -> None:
 
 
 def test_editing_a_pr_neither_cancels_nor_is_cancelled_by_the_run_of_a_push() -> None:
-    # An `edited` run has a group of its own: editing the title mid-run must not cancel a
+    # The edited run's group is its own, per PR: editing the title mid-run must not cancel a
     # full run for the same head (which would leave its checks cancelled), and a push cancels
-    # the full run, not the edit's.
-    group = _workflow()["concurrency"]["group"]
-    assert "github.event.action == 'edited'" in group
-    edited = group.index("github.event.action == 'edited'")
-    assert "-edited" in group[edited:]
+    # the full run, not the edit's. A newer edit makes an older edit's run pointless.
+    full = _workflow()["concurrency"]["group"]
+    edited = _yaml(EDITED)["concurrency"]
+    assert full == "ci-${{ github.event.pull_request.number || github.ref }}"
+    assert edited["group"] == "pr-edited-${{ github.event.pull_request.number }}"
+    # A run cancelled by a second quick edit is a `commits` for the head that blocks the merge
+    # until it is re-run, so no edit's run is cancelled by a later one.
+    assert edited["cancel-in-progress"] is False
 
 
 def test_make_lint_lints_the_workflows_too() -> None:
@@ -208,3 +296,38 @@ def test_make_lint_lints_the_workflows_too() -> None:
         check=True,
     ).stdout.splitlines()
     assert "uv run actionlint" in dry
+
+
+def test_editing_a_pr_re_runs_only_the_commits_job() -> None:
+    # A title or body is all an edit can fix, and the commits job is all that reads them; the
+    # rest of the suite, the 7-minute stack included, keeps its result for the head.
+    assert _jobs_run_on_pull_request("edited") == {"commits"}
+    assert _jobs_run_on_pull_request("synchronize") == set(_jobs())
+
+
+def test_the_edited_run_is_the_ci_commits_job_itself_on_the_same_branches() -> None:
+    # Its job id is its check's name: the same `commits` the rulesets require, so its result
+    # replaces the full run's for that check, and it adds no check of its own.
+    edited = _yaml(EDITED)
+    assert edited[True] == {"pull_request": {"branches": ["develop", "main"], "types": ["edited"]}}
+    assert edited["permissions"] == _workflow()["permissions"]
+    assert edited["jobs"] == {"commits": _jobs()["commits"]}
+
+
+def test_no_ci_job_is_skipped_by_a_condition() -> None:
+    # A job skipped by its `if:` reports success to a required check: skipping the suite on an
+    # edit that way would let an edit turn a red check green. Edits get a workflow of their own.
+    for name, job in _jobs().items():
+        assert "if" not in job, name
+
+
+def test_no_workflow_reports_a_required_check_but_ci_and_the_edited_commits_job() -> None:
+    # A same-named job elsewhere (a `pull_request_target`, `workflow_run` or `push` workflow with
+    # a job `lint` or `stack`) would add another check run of that name for the head, and the
+    # rulesets cannot tell workflows apart. The edited run's `commits` is the one intended.
+    required = set(_jobs())
+    for name, workflow in _all_workflows().items():
+        if name == WORKFLOW.name:
+            continue
+        clashes = required & set(workflow["jobs"])
+        assert clashes <= ({"commits"} if name == EDITED.name else set()), (name, clashes)

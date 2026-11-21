@@ -25,13 +25,14 @@ from visionquery.recorder.segment import Segment, segments
 ADDED = datetime(2026, 10, 6, tzinfo=UTC)
 DOCK = Camera(1, "Dock", "dock", None, ADDED, None)
 GATE = Camera(2, "Gate 2", "gate", None, ADDED, None)
-TIMING = Timing(segment=timedelta(seconds=2), first_wait=0.2, last_wait=1.0, stall_after=5.0)
+TIMING = Timing(segment=timedelta(seconds=2), first_wait=0.2, last_wait=1.0)
+STALL_AFTER = 5.0
 
 
 def sources(server: MediaMTX, ffmpeg: Path) -> Callable[[Camera], Source]:
     def source(camera: Camera) -> Source:
         url = server.rtsp_url(camera.path, READER_USER, server.reader_password)
-        return Source(url=SecretStr(url), ffmpeg=str(ffmpeg), stall_after=TIMING.stall_after)
+        return Source(url=SecretStr(url), ffmpeg=str(ffmpeg), stall_after=STALL_AFTER)
 
     return source
 
@@ -93,6 +94,9 @@ def test_a_camera_that_goes_away_does_not_stop_the_others(
                 await until(lambda: any(s.reason == "stream_ended" for s in of(tmp_path, GATE)), 30)
                 dropped = time.monotonic()
                 await until(lambda: time.monotonic() - dropped > 5, 10)
+                # Stopped while the dock still publishes: leaving the `with` ends its stream,
+                # and a stop after that races "the stream ended" for the dock's last reason.
+                await fleet.stop()
         finally:
             await fleet.stop()
 

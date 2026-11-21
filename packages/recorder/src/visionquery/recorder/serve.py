@@ -32,6 +32,7 @@ Segments are indexed (unless the memory fails), and the process exits 0.
 import asyncio
 import contextlib
 import fcntl
+import functools
 import logging
 import os
 import signal
@@ -169,13 +170,20 @@ def _held(footage: Path) -> Generator[None]:
         os.close(fd)
 
 
+def _quarantined(footage: Path, path: Path, error: Exception) -> None:
+    """A Segment `recover` could not finish: counted by its camera, the directory it is in."""
+    relative = path.relative_to(footage)
+    metrics.QUARANTINED.labels(relative.parts[0] if len(relative.parts) > 1 else "unknown").inc()
+
+
 async def run(
     settings: RecorderSettings, stop: asyncio.Event, *, heartbeat: Path = HEARTBEAT
 ) -> None:
     """Record every camera in the registry until `stop` is set."""
     footage = settings.footage_dir
     with _held(footage):
-        for segment in await asyncio.to_thread(recover, footage):
+        quarantined = functools.partial(_quarantined, footage)
+        for segment in await asyncio.to_thread(recover, footage, on_quarantine=quarantined):
             camera_id = segment.path.parent.parent.name
             metrics.SEGMENTS.labels(camera_id, segment.reason).inc()
             _log.info(

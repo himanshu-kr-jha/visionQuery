@@ -19,6 +19,8 @@ from itertools import pairwise
 from pathlib import Path
 
 import pytest
+from boxes import fragments, parsed_init
+from prometheus_client import REGISTRY
 from publishers import PASSWORD, open_paths
 from pydantic import SecretStr
 from real_mediamtx import READER_USER, MediaMTX
@@ -27,7 +29,7 @@ from visionquery.memory.connection import connect
 from visionquery.memory.footage import SegmentIndex
 from visionquery.memory.migrate import migrate
 from visionquery.memory.settings import DatabaseSettings
-from visionquery.recorder.segment import segments
+from visionquery.recorder.segment import SegmentFile, segments
 from visionquery.recorder.serve import MediaMTXReader, RecorderSettings, health, run
 from visionquery.recorder.timebase import read_kernel_clock
 
@@ -142,19 +144,29 @@ def frame_hashes(ffmpeg: Path, video: Path, *, ended: bool = False) -> list[str]
     ]
 
 
+#: The known clip: a lead-in the recorder may join part-way through, then the part every frame of
+#: which is checked (no two frames alike), then a lead-out. The stream ends when the clip does,
+#: and MediaMTX ends a reader's session then with whatever it has already sent it, so the last
+#: second or so of what a camera sent may never reach a reader that is a little behind: the
+#: lead-out is what that can cost, never the known part.
+LEAD_IN, KNOWN, LEAD_OUT = 6, 8, 4
+FPS = 10
+
+
 @pytest.fixture(scope="module")
 def known_clip(ffmpeg: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """Four seconds of colour bars as a lead-in, then eight of a pattern no two frames of which
-    are alike: H.264 at 10 fps, a keyframe every second, as a camera sends it."""
+    """Colour bars as a lead-in, then a pattern no two frames of which are alike, then another
+    such pattern as a lead-out: H.264 at 10 fps, a keyframe every second, as a camera sends it."""
     path = tmp_path_factory.mktemp("clip") / "known.mp4"
     subprocess.run(
         [
             str(ffmpeg), "-nostdin", "-loglevel", "error",
-            "-f", "lavfi", "-i", "smptebars=size=320x240:rate=10:duration=4",
-            "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=10:duration=8",
-            "-filter_complex", "[0:v][1:v]concat=n=2:v=1[v]", "-map", "[v]",
+            "-f", "lavfi", "-i", f"smptebars=size=320x240:rate={FPS}:duration={LEAD_IN}",
+            "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate={FPS}:duration={KNOWN}",
+            "-f", "lavfi", "-i", f"testsrc=size=320x240:rate={FPS}:duration={LEAD_OUT}",
+            "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1[v]", "-map", "[v]",
             "-c:v", "libx264", "-preset", "ultrafast", "-bf", "0",
-            "-g", "10", "-keyint_min", "10", "-sc_threshold", "0", "-pix_fmt", "yuv420p",
+            "-g", str(FPS), "-keyint_min", str(FPS), "-sc_threshold", "0", "-pix_fmt", "yuv420p",
             str(path),
         ],
         check=True,
@@ -162,6 +174,61 @@ def known_clip(ffmpeg: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
         timeout=120,
     )  # fmt: skip
     return path
+
+
+def assert_gapless_copy(recorded: list[str], clip: list[str], known_from: int, known: int) -> None:
+    """`recorded` (every decoded frame's hash, in order) is a run of `clip`'s own frames with
+    nothing missing or repeated, and holds the whole of the known part, `known` frames from
+    `known_from`. It may begin anywhere before the known part (the recorder joined a stream
+    already running) and end anywhere after it (a stream ends with what it has sent), and its very
+    last frame is left out, since a stream may have ended inside it."""
+    part = clip[known_from : known_from + known]
+    assert len(set(part)) == known, "the known part's frames must differ for this to mean anything"
+    assert part[0] in recorded, "the recorder joined after the known part began"
+    start = recorded.index(part[0])
+    offset = known_from - start
+    assert offset >= 0, "more of the lead-in recorded than the clip has"
+    assert recorded[:-1] == clip[offset : offset + len(recorded) - 1], "not a gapless run"
+    assert start + known < len(recorded), "the known part is not all there"
+
+
+def test_a_recording_that_ends_a_little_before_the_clip_does_is_still_a_gapless_copy() -> None:
+    clip = [f"lead-in-{n % 3}" for n in range(60)] + [f"known-{n}" for n in range(80)]
+    clip += [f"lead-out-{n}" for n in range(40)]
+    joined_late = clip[15:150]  # the last 10 frames of the clip never arrived
+
+    assert_gapless_copy(joined_late, clip, 60, 80)
+
+
+def lost(frames: list[str]) -> list[str]:
+    return frames[:70] + frames[71:]  # a frame lost in the known part
+
+
+def repeated(frames: list[str]) -> list[str]:
+    return frames[:70] + frames[69:]
+
+
+def lost_in_lead_in(frames: list[str]) -> list[str]:
+    return frames[:20] + frames[21:]
+
+
+def cut_short(frames: list[str]) -> list[str]:
+    return frames[:100]  # the recording ends inside the known part
+
+
+def joined_late(frames: list[str]) -> list[str]:
+    return frames[70:]  # it joined after the known part began
+
+
+@pytest.mark.parametrize("damage", [lost, repeated, lost_in_lead_in, cut_short, joined_late])
+def test_a_recording_with_a_gap_or_without_the_known_part_is_not_a_gapless_copy(
+    damage: Callable[[list[str]], list[str]],
+) -> None:
+    clip = [f"lead-in-{n}" for n in range(60)] + [f"known-{n}" for n in range(80)]
+    clip += [f"lead-out-{n}" for n in range(40)]
+
+    with pytest.raises(AssertionError):
+        assert_gapless_copy(damage(clip[10:]), clip, 60, 80)
 
 
 # --- end to end -------------------------------------------------------------------------------
@@ -208,13 +275,9 @@ def test_a_published_clip_is_read_back_whole_from_the_segments_covering_it(
         for frame in frame_hashes(ffmpeg, segment.path, ended=segment is found[-1])
     ]
     clip = frame_hashes(ffmpeg, known_clip)
-    known = clip[40:]  # the eight seconds after the lead-in
-    assert len(set(known)) == 80
-    # Copy-only and gapless: a run of the clip's own frames, ending where the clip does (its
-    # very last frame, which the stream may have ended inside, is there but may be damaged).
-    assert len(recorded) >= 80
-    assert recorded[:-1] == clip[-len(recorded) : -1]
-    assert recorded[-80:-1] == known[:-1]
+    assert len(clip) == (LEAD_IN + KNOWN + LEAD_OUT) * FPS
+    # Copy-only and gapless: a run of the clip's own frames that holds the whole known part.
+    assert_gapless_copy(recorded, clip, LEAD_IN * FPS, KNOWN * FPS)
     # Cut on 3-second boundaries of the epoch, one Segment running on from the next.
     assert {segment.reason for segment in found[:-1]} == {"rolled"}
     assert found[-1].reason == "stream_ended"
@@ -222,7 +285,7 @@ def test_a_published_clip_is_read_back_whole_from_the_segments_covering_it(
     assert all(int(s.time_from.timestamp()) % 3 == 0 for s in found[1:])
     # The span is the time the clip arrived, on the recorder's NTP-anchored timebase.
     assert abs(found[-1].time_to - ended) < timedelta(seconds=2)
-    assert found[-1].time_to - found[0].time_from >= timedelta(seconds=8)
+    assert found[-1].time_to - found[0].time_from >= timedelta(seconds=KNOWN)
     assert all(segment.verified for segment in found) or not _ntp_synchronised()
     # Every Segment is indexed, so any instant it holds resolves to its file and an offset.
     with connect(migrated, 5) as connection:
@@ -315,8 +378,10 @@ def test_a_recorder_killed_mid_segment_recovers_it_playable_when_started_again(
         finally:
             first.send_signal(signal.SIGKILL)
             first.communicate(timeout=30)
-        assert segments(camera) == [], "nothing was finished: the process was killed"
-        unfinished = list(camera.rglob("*.mp4"))
+        # Whatever window boundary fell in its few seconds, only one Segment is unfinished, and
+        # whatever was finished was rolled: the process was killed, nothing was stopped.
+        assert {s.reason for s in segments(camera)} <= {"rolled"}
+        unfinished = [p for p in camera.rglob("*.mp4") if not p.with_suffix(".closed").exists()]
         assert len(unfinished) == 1
 
         second = _recorder(environment)
@@ -328,12 +393,21 @@ def test_a_recorder_killed_mid_segment_recovers_it_playable_when_started_again(
             out, _ = second.communicate(timeout=60)
     assert second.returncode == 0, out
 
-    recovered, stopped = segments(camera)
+    # Structure, not count: the windows are the epoch's, so a boundary may fall in either run.
+    # The one unfinished Segment is recovered, the last is stopped, any other was rolled.
+    found = segments(camera)
+    (recovered,) = [s for s in found if s.reason == "recovered"]
+    stopped = found[-1]
     assert (recovered.path, recovered.reason) == (unfinished[0], "recovered")
     assert frame_hashes(ffmpeg, recovered.path)
     assert stopped.reason == "stopped"
     assert frame_hashes(ffmpeg, stopped.path)
-    assert recovered.time_to <= stopped.time_from
+    assert {s.reason for s in found} <= {"rolled", "recovered", "stopped"}
+    for before, after in pairwise(found):
+        # A rolled Segment runs on into the next; after a recovery a gap is allowed.
+        assert after.time_from >= before.time_to
+        if before.reason == "rolled":
+            assert after.time_from == before.time_to
     # The Segment the crash left unfinished is indexed once recovered, and the next one too.
     with connect(migrated, 5) as connection:
         index = SegmentIndex(connection)
@@ -373,6 +447,52 @@ def test_a_second_recorder_on_the_same_footage_is_refused(
 
     assert "already recording" in str(second.failure)
     assert health(first.heartbeat) == 0
+
+
+@pytest.mark.usefixtures("on_path")
+def test_a_malformed_segment_on_disk_stops_no_camera_from_recording(
+    mediamtx: MediaMTX,
+    migrated: str,
+    registry: CameraRegistry,
+    tmp_path: Path,
+    start: Callable[[RecorderSettings], Running],
+) -> None:
+    """A Segment the last run left damaged is quarantined, with its camera's id counted and its
+    path named, while a good unfinished one beside it is recovered and every camera records. It
+    used to raise at the start, so the process exited, Compose started it again, and nothing was
+    ever recorded until an Operator deleted the file by hand."""
+    footage = tmp_path / "footage"
+    bad = footage / "900" / "2026-10-06" / "100000-0123456789abcdef0123456789abcdef.mp4"
+    bad.parent.mkdir(parents=True)
+    bad.write_bytes(b"\0" * 64)
+    bad.with_suffix(".frags").write_text('{"end":50,"arr\0\0\n')
+    (bad.parent.parent / ".open").mkdir()
+    (bad.parent.parent / ".open" / f"2026-10-06_{bad.stem}").touch()
+    good = SegmentFile.open(
+        footage / "901",
+        parsed_init(),
+        window_start=datetime(2026, 10, 6, 10, tzinfo=UTC),
+        not_before=None,
+        verified=True,
+    )
+    good.append(fragments(1)[0], arrived_at=datetime(2026, 10, 6, 10, 0, 2, tzinfo=UTC))
+    dock = registry.add_pushed("Dock", "dock")
+    open_paths(mediamtx, dock.path)
+    before = REGISTRY.get_sample_value(
+        "visionquery_recorder_segments_quarantined_total", {"camera": "900"}
+    )
+
+    with mediamtx.publishing(dock.path, dock.path, PASSWORD):
+        running = start(settings(migrated, mediamtx, footage, segment_seconds=2))
+        within(SLACK * 2, lambda: bool(segments(footage / str(dock.id))))
+
+    assert running.failure is None
+    assert [segment.reason for segment in segments(footage / "901")] == ["recovered"]
+    assert (footage / ".quarantine" / "900" / "2026-10-06" / bad.name).exists()
+    after = REGISTRY.get_sample_value(
+        "visionquery_recorder_segments_quarantined_total", {"camera": "900"}
+    )
+    assert after == (before or 0) + 1
 
 
 # --- health -----------------------------------------------------------------------------------
