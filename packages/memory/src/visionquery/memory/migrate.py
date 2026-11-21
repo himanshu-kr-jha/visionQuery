@@ -362,6 +362,7 @@ COUNTED_CATALOGS = (
     "pg_collation",
     "pg_constraint",
     "pg_conversion",
+    "pg_default_acl",
     "pg_event_trigger",
     "pg_foreign_data_wrapper",
     "pg_foreign_server",
@@ -393,9 +394,6 @@ COUNTED_CATALOGS = (
 UNCOUNTED_CATALOGS = {
     "pg_extension": "a database with nothing but extensions is empty",
     "pg_enum": "an enum's labels belong to its type, which is counted",
-    # Like a grant on `public`, it makes nothing: it is how an Operator may prepare an empty
-    # database for the roles that will use it before the first run.
-    "pg_default_acl": "a default privilege is a setting for objects not yet made",
 }
 
 #: Postgres gives every object made after `initdb` an oid of at least this
@@ -427,38 +425,96 @@ def _made(catalog: str) -> sql.Composable:
 #: What someone made in the database, by kind and name (`table public.invoices`), leaving out
 #: what `initdb` made, the members of an extension (they depend on it with type `e`), what is part
 #: of another object and goes with it (a table's row type, index, constraints, sequence, trigger,
-#: rule, policy or statistics; an array or multirange type; a hypertable's chunks and other
-#: tables' children, which inherit from it), the record when it is ours, and every session's
-#: temporary schemas and what is in them.
+#: rule, policy or statistics; an array or multirange type), the record when it is ours, and
+#: every session's temporary schemas and what is in them.
+#: A table that inherits from another, or is a partition of one, is left out only when its parent
+#: is among the objects counted (a hypertable's chunks, a partitioned table's partitions): a
+#: child of an extension's table or of the record is someone's own table, and is counted.
 #: What is part of an extension's own object is left out with it, so a trigger someone hangs on
-#: an extension's table is not counted; dropping the extension drops it.
+#: an extension's table is not counted; dropping the extension drops it. Of our own record only
+#: the table itself is left out, with what VisionQuery's creating it makes (its key, constraints,
+#: row type); a rule, trigger or policy on it is counted, since each can change what a write to
+#: it does.
 #: Objects are named by `pg_identify_object`, which never shows an option, such as a foreign
-#: server's or a user mapping's, or a subscription's connection string.
-_OBJECTS = sql.SQL(
-    """
-WITH made AS MATERIALIZED (
+#: server's or a user mapping's, or a subscription's connection string. One it cannot name is
+#: named by its catalog and oid instead (`identified` is false), and left out only when it no
+#: longer exists, which `_foreign` asks again.
+_RECORD_TABLE = "to_regclass('public.schema_migrations')"
+
+
+def objects_query(identify: sql.Identifier) -> sql.Composed:
+    return sql.SQL(
+        """
+WITH RECURSIVE made AS MATERIALIZED (
     SELECT o.classid, o.objid FROM ({}) AS o (classid, objid)
     WHERE NOT EXISTS (
           SELECT FROM pg_catalog.pg_depend d
-          WHERE d.classid = o.classid AND d.objid = o.objid
-            AND d.deptype IN ('e', 'a', 'i', 'P', 'S')
+          WHERE d.classid = o.classid AND d.objid = o.objid AND d.deptype = 'e'
       )
-      AND NOT (o.classid = 'pg_catalog.pg_class'::regclass AND (
-          EXISTS (SELECT FROM pg_catalog.pg_inherits h WHERE h.inhrelid = o.objid)
-          OR (%(ours)s AND o.objid = to_regclass('public.schema_migrations'))
-      ))
+      AND NOT EXISTS (
+          SELECT FROM pg_catalog.pg_depend d
+          WHERE d.classid = o.classid AND d.objid = o.objid
+            AND d.deptype IN ('a', 'i', 'P', 'S')
+            -- an object's tie to its own column (a partitioned table's key) is not a parent
+            AND NOT (d.refclassid = o.classid AND d.refobjid = o.objid)
+            -- a default privilege in a schema goes with the schema, but is no part of it
+            AND o.classid <> 'pg_catalog.pg_default_acl'::regclass
+            -- a table's tie to its parent is judged by `kids`, not here
+            AND NOT (d.refclassid = 'pg_catalog.pg_class'::regclass AND EXISTS (
+                SELECT FROM pg_catalog.pg_inherits h
+                WHERE h.inhrelid = o.objid AND h.inhparent = d.refobjid))
+            -- what is on our own record that can change what writing to it does
+            AND NOT (%(ours)s AND d.refclassid = 'pg_catalog.pg_class'::regclass
+                AND d.refobjid = {record}
+                AND o.classid IN ('pg_catalog.pg_rewrite'::regclass,
+                                  'pg_catalog.pg_trigger'::regclass,
+                                  'pg_catalog.pg_policy'::regclass))
+      )
+      AND NOT (o.classid = 'pg_catalog.pg_class'::regclass
+               AND %(ours)s AND o.objid = {record})
       AND NOT (o.classid = 'pg_catalog.pg_namespace'::regclass AND EXISTS (
           SELECT FROM pg_catalog.pg_namespace n
           WHERE n.oid = o.objid AND n.nspname ~ '^pg_(toast_)?temp_'
       ))
+),
+kids AS (
+    SELECT h.inhrelid AS oid FROM pg_catalog.pg_inherits h
+    WHERE h.inhparent IN (
+        SELECT objid FROM made WHERE classid = 'pg_catalog.pg_class'::regclass)
+    UNION
+    SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN kids k ON h.inhparent = k.oid
 )
-SELECT i.type || ' ' || i.identity AS name
-FROM made CROSS JOIN LATERAL pg_catalog.pg_identify_object(made.classid, made.objid, 0) AS i
-WHERE i.identity IS NOT NULL AND coalesce(i.schema, '') !~ '^pg_(toast_)?temp_'
+SELECT coalesce(i.type || ' ' || i.identity,
+                made.classid::regclass::text || ' ' || made.objid) AS name,
+       i.identity IS NOT NULL AS identified,
+       made.classid::regclass::text AS catalog, made.objid
+FROM made CROSS JOIN LATERAL {identify}(made.classid, made.objid, 0) AS i
+WHERE NOT (made.classid = 'pg_catalog.pg_class'::regclass
+           AND made.objid IN (SELECT oid FROM kids))
+  AND coalesce(i.schema, '') !~ '^pg_(toast_)?temp_'
 ORDER BY 1
-LIMIT 4
+LIMIT 100
 """
-).format(sql.SQL(" UNION ALL ").join(_made(catalog) for catalog in COUNTED_CATALOGS))
+    ).format(
+        sql.SQL(" UNION ALL ").join(_made(catalog) for catalog in COUNTED_CATALOGS),
+        record=sql.SQL(_RECORD_TABLE),
+        identify=identify,
+    )
+
+
+_OBJECTS = objects_query(sql.Identifier("pg_catalog", "pg_identify_object"))
+
+#: The catalog a `regclass` name from `_OBJECTS` is stored in, for the few that differ.
+_ROW_CATALOG = {"pg_largeobject": "pg_largeobject_metadata"}
+
+
+def _still_exists(connection: psycopg.Connection, catalog: str, objid: int) -> bool:
+    """Whether the object is still there, asked in a statement of its own (a new snapshot)."""
+    query = sql.SQL("SELECT EXISTS (SELECT FROM {} WHERE oid = %s)").format(
+        sql.Identifier("pg_catalog", _ROW_CATALOG.get(catalog, catalog))
+    )
+    row = connection.execute(query, (objid,)).fetchone()
+    return bool(row and row[0])
 
 
 def _foreign(connection: psycopg.Connection) -> str | None:
@@ -471,7 +527,12 @@ def _foreign(connection: psycopg.Connection) -> str | None:
         row = connection.execute("SELECT EXISTS (SELECT FROM public.schema_migrations)").fetchone()
         if row and row[0]:
             return None
-    objects = [str(name) for (name,) in connection.execute(_OBJECTS, {"ours": ours})]
+    objects = [
+        str(name)
+        for name, identified, catalog, objid in connection.execute(_OBJECTS, {"ours": ours})
+        # Postgres could not name it: it was dropped since the scan, or it is one to count.
+        if identified or _still_exists(connection, str(catalog), int(objid))
+    ]
     if not objects:
         return None
     named = ", ".join(objects[:3]) + (" and more" if len(objects) > 3 else "")

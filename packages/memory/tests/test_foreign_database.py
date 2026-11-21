@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 
 import psycopg
 import pytest
+import visionquery.memory.migrate as migrate_module
 from psycopg import sql
 from visionquery.memory.migrate import (
     COUNTED_CATALOGS,
@@ -296,17 +297,134 @@ def test_every_other_kind_of_object_makes_a_database_foreign_too(
     assert _named(message) == named
 
 
-def test_privileges_granted_ahead_of_the_first_run_do_not_make_a_database_foreign(
+@pytest.mark.parametrize(
+    ("statement", "named"),
+    [
+        (
+            "ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO PUBLIC",
+            r"default acl for role \w+ on tables",
+        ),
+        (
+            "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO PUBLIC",
+            r"default acl for role \w+ in schema public on tables",
+        ),
+        (
+            "ALTER DEFAULT PRIVILEGES GRANT USAGE ON SEQUENCES TO PUBLIC",
+            r"default acl for role \w+ on sequences",
+        ),
+        (
+            "ALTER DEFAULT PRIVILEGES REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC",
+            r"default acl for role \w+ on functions",
+        ),
+        (
+            "ALTER DEFAULT PRIVILEGES REVOKE USAGE ON TYPES FROM PUBLIC",
+            r"default acl for role \w+ on types",
+        ),
+        (
+            "ALTER DEFAULT PRIVILEGES GRANT USAGE ON SCHEMAS TO PUBLIC",
+            r"default acl for role \w+ on schemas",
+        ),
+        (
+            "ALTER DEFAULT PRIVILEGES GRANT SELECT ON LARGE OBJECTS TO PUBLIC",
+            r"default acl for role \w+ on large objects",
+        ),
+    ],
+    ids=["tables", "tables-in-schema", "sequences", "functions", "types", "schemas", "blobs"],
+)
+def test_a_default_privilege_made_ahead_of_the_first_run_makes_a_database_foreign(
+    database: str, migrations: Path, statement: str, named: str
+) -> None:
+    # A default privilege is not inert: it would be applied to every table the run makes, the
+    # memory's included, so that every role of the server could read and truncate them.
+    _execute(database, statement)
+    message = _refused(database, migrations)
+    assert re.fullmatch(named, _named(message)), message
+    assert not _exists(database, "public.schema_migrations")
+
+
+def test_a_default_privilege_for_another_role_makes_a_database_foreign_too(
     database: str, migrations: Path
 ) -> None:
-    # Preparing an empty database for the roles that will use it makes nothing in it.
+    role = f"owner_{uuid.uuid4().hex[:8]}"
+    _execute(database, f'CREATE ROLE "{role}"')
+    try:
+        _execute(
+            database, f'ALTER DEFAULT PRIVILEGES FOR ROLE "{role}" GRANT ALL ON TABLES TO PUBLIC'
+        )
+        message = _refused(database, migrations)
+        assert _named(message) == f"default acl for role {role} on tables"
+    finally:
+        _execute(database, f'DROP OWNED BY "{role}"', f'DROP ROLE "{role}"')
+
+
+def test_a_default_privilege_taken_back_makes_nothing_of_the_database(
+    database: str, migrations: Path
+) -> None:
     _execute(
         database,
-        "ALTER DEFAULT PRIVILEGES GRANT SELECT ON TABLES TO PUBLIC",
-        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE ON SEQUENCES TO PUBLIC",
-        "GRANT CREATE ON SCHEMA public TO PUBLIC",
+        "ALTER DEFAULT PRIVILEGES GRANT ALL ON TABLES TO PUBLIC",
+        "ALTER DEFAULT PRIVILEGES REVOKE ALL ON TABLES FROM PUBLIC",
     )
     assert migrate(database, migrations) == ("0001_people.sql",)
+
+
+def test_a_grant_on_the_public_schema_ahead_of_the_first_run_is_taken_back_by_it(
+    database: str, migrations: Path
+) -> None:
+    # `0003_roles.sql` revokes what PUBLIC holds on the database and the schema, so it is
+    # state the run accounts for.
+    _execute(
+        database,
+        "GRANT CREATE ON SCHEMA public TO PUBLIC",
+        f'GRANT ALL ON DATABASE "{urlsplit(database).path.lstrip("/")}" TO PUBLIC',
+    )
+    assert migrate(database, migrations) == ("0001_people.sql",)
+
+
+def test_settings_and_grants_to_other_roles_ahead_of_the_first_run_give_the_memory_no_more_access(
+    database: str, migrations: Path
+) -> None:
+    # What is left of this class (state that is no object) cannot change who may read or write
+    # the memory's tables: only an owner, a membership or an ACL can, and an ACL is made by a
+    # grant on the table, a default privilege (counted above) or a role of ours (which `0003`
+    # refuses to adopt). A named role's grant on the schema or database, and a setting, are
+    # what an Operator may prepare.
+    other = f"other_{uuid.uuid4().hex[:8]}"
+    name = urlsplit(database).path.lstrip("/")
+    _execute(
+        database,
+        f"CREATE ROLE \"{other}\" LOGIN PASSWORD '{other}'",
+        f'GRANT ALL ON SCHEMA public TO "{other}"',
+        f'GRANT ALL ON DATABASE "{name}" TO "{other}"',
+        f'ALTER DATABASE "{name}" SET search_path = public',
+        f'ALTER DATABASE "{name}" SET row_security = on',
+        f'ALTER ROLE "{other}" SET default_transaction_read_only = off',
+        f'ALTER ROLE ALL IN DATABASE "{name}" SET session_replication_role = origin',
+    )
+    try:
+        assert migrate(database, migrations) == ("0001_people.sql",)
+        parts = urlsplit(database)
+        as_other = parts._replace(netloc=f"{other}:{other}@{parts.hostname}:{parts.port}").geturl()
+        with psycopg.connect(as_other, autocommit=True) as connection:
+            for statement in (
+                "SELECT count(*) FROM people",
+                "INSERT INTO people VALUES (1)",
+                "TRUNCATE people",
+            ):
+                with pytest.raises(psycopg.errors.InsufficientPrivilege):
+                    connection.execute(statement.encode())
+    finally:
+        _execute(database, f'DROP OWNED BY "{other}"', f'DROP ROLE "{other}"')
+
+
+def test_a_security_label_needs_a_provider_that_a_database_has_none_of(
+    database: str,
+) -> None:
+    # A label attaches to an object, which is counted, and Postgres refuses one without a loaded
+    # provider (sepgsql), so no database arrives with a label that is no object's.
+    _execute(database, "CREATE TABLE labelled (id int)")
+    with pytest.raises(psycopg.errors.InvalidParameterValue):
+        _execute(database, "SECURITY LABEL ON TABLE labelled IS 'x'")
 
 
 def test_a_subscription_makes_its_own_database_foreign_and_its_password_is_not_named(
@@ -490,3 +608,144 @@ def test_a_memory_with_tables_of_its_own_keeps_being_migrated(
     assert migrate(database, migrations) == ("0001_people.sql",)
     (migrations / "0002_places.sql").write_text("CREATE TABLE places (id int);")
     assert migrate(database, migrations) == ("0002_places.sql",)
+
+
+_RECORD_LIKE = (
+    "CREATE TABLE schema_migrations (number integer PRIMARY KEY, name text NOT NULL UNIQUE,"
+    " sha256 bytea NOT NULL, applied_at timestamptz NOT NULL DEFAULT now())"
+)
+
+
+def test_a_child_of_an_extensions_table_is_someones_table(database: str, migrations: Path) -> None:
+    # Extensions make no inheritance children, so a table that inherits from one is not theirs.
+    _execute(
+        database,
+        "CREATE EXTENSION timescaledb",
+        "CREATE TABLE invoices (customer text, amount numeric)"
+        " INHERITS (_timescaledb_catalog.metadata)",
+        "INSERT INTO invoices (key, value, include_in_telemetry, customer, amount)"
+        " VALUES ('k', 'v', false, 'acme', 10)",
+    )
+    assert _named(_refused(database, migrations)) == "table public.invoices"
+
+
+def test_a_partition_of_an_extensions_table_is_someones_table(
+    database: str, migrations: Path
+) -> None:
+    _execute(
+        database,
+        "CREATE EXTENSION hstore",
+        "CREATE TABLE ledger (at date NOT NULL, amount numeric) PARTITION BY RANGE (at)",
+        "ALTER EXTENSION hstore ADD TABLE ledger",
+        "CREATE TABLE ledger_2024 PARTITION OF ledger"
+        " FOR VALUES FROM ('2024-01-01') TO ('2025-01-01')",
+    )
+    assert _named(_refused(database, migrations)) == "table public.ledger_2024"
+
+
+def test_a_child_of_a_record_that_is_not_ours_to_trust_is_someones_table(
+    database: str, migrations: Path
+) -> None:
+    # An empty record of our shape proves nothing about what hangs off it.
+    _execute(
+        database,
+        _RECORD_LIKE,
+        "CREATE TABLE invoices (customer text, amount numeric) INHERITS (public.schema_migrations)",
+    )
+    assert _named(_refused(database, migrations)) == "table public.invoices"
+
+
+@pytest.mark.parametrize(
+    ("statement", "named"),
+    [
+        (
+            "CREATE RULE swallow AS ON INSERT TO schema_migrations DO INSTEAD NOTHING",
+            "rule swallow on public.schema_migrations",
+        ),
+        (
+            "CREATE TRIGGER same BEFORE UPDATE ON schema_migrations"
+            " FOR EACH ROW EXECUTE FUNCTION suppress_redundant_updates_trigger()",
+            "trigger same on public.schema_migrations",
+        ),
+        (
+            "CREATE POLICY block ON schema_migrations USING (false)",
+            "policy block on public.schema_migrations",
+        ),
+    ],
+    ids=["rule", "trigger", "policy"],
+)
+def test_what_changes_what_a_write_to_an_empty_record_does_is_counted(
+    database: str, migrations: Path, statement: str, named: str
+) -> None:
+    _execute(database, _RECORD_LIKE, statement)
+    assert _named(_refused(database, migrations)) == named
+
+
+def test_an_empty_record_with_what_creating_it_makes_does_not_make_a_database_foreign(
+    database: str, migrations: Path
+) -> None:
+    # Its key, constraints, default, row type and toast table are made with it.
+    _execute(database, _RECORD_LIKE)
+    assert migrate(database, migrations) == ("0001_people.sql",)
+
+
+def test_children_are_named_through_their_counted_parent_at_every_depth(
+    database: str, migrations: Path
+) -> None:
+    _execute(
+        database,
+        "CREATE TABLE ledger (at date NOT NULL, amount numeric) PARTITION BY RANGE (at)",
+        "CREATE TABLE ledger_2024 PARTITION OF ledger FOR VALUES FROM ('2024-01-01')"
+        " TO ('2025-01-01') PARTITION BY RANGE (at)",
+        "CREATE TABLE ledger_2024_h1 PARTITION OF ledger_2024 FOR VALUES FROM ('2024-01-01')"
+        " TO ('2024-07-01')",
+        "CREATE TABLE parent (id int)",
+        "CREATE TABLE child (extra int) INHERITS (parent)",
+        "CREATE TABLE grandchild (more int) INHERITS (child)",
+    )
+    assert _named(_refused(database, migrations)) == "table public.ledger, table public.parent"
+
+
+def test_an_object_postgres_cannot_name_is_named_by_its_catalog_and_oid(
+    database: str, migrations: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # If `pg_identify_object` ever answers with no identity for an object that exists, the guard
+    # must still count it.
+    _execute(
+        database,
+        "CREATE FUNCTION public.unnamed(classid oid, objid oid, subid int)"
+        " RETURNS TABLE (type text, schema text, name text, identity text)"
+        " LANGUAGE sql AS $$ SELECT 'thing'::text, NULL::text, NULL::text, NULL::text $$",
+        "CREATE TABLE invoices (id int)",
+    )
+    monkeypatch.setattr(
+        migrate_module,
+        "_OBJECTS",
+        migrate_module.objects_query(sql.Identifier("public", "unnamed")),
+    )
+    message = _refused(database, migrations)
+    assert re.search(r"pg_class \d+", message), message
+    assert re.search(r"pg_proc \d+", message), message
+
+
+def _gone(connection: psycopg.Connection, catalog: str, objid: int) -> bool:
+    return False
+
+
+def test_an_object_dropped_since_the_scan_is_left_out(
+    database: str, migrations: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _execute(
+        database,
+        "CREATE FUNCTION public.unnamed(classid oid, objid oid, subid int)"
+        " RETURNS TABLE (type text, schema text, name text, identity text)"
+        " LANGUAGE sql AS $$ SELECT 'thing'::text, NULL::text, NULL::text, NULL::text $$",
+    )
+    monkeypatch.setattr(
+        migrate_module,
+        "_OBJECTS",
+        migrate_module.objects_query(sql.Identifier("public", "unnamed")),
+    )
+    # Every object looks unnamed, and none is there any more when asked again.
+    monkeypatch.setattr(migrate_module, "_still_exists", _gone)
+    assert migrate(database, migrations) == ("0001_people.sql",)
