@@ -40,6 +40,25 @@ An ffmpeg whose frame count has not moved for 15 s is hung (it goes on reporting
 while its write blocks): it is killed and restarted.
 
 `health` exits 0 when every camera's ffmpeg has sent a new frame in the last few seconds.
+
+Every setting it reads from the environment, with its default; compose.yaml sets FAKE_CAMERAS,
+_RTSP, _DURATION and _PASSWORD, and the directories default to where the dev profile mounts them:
+
+    FAKE_CAMERAS                   the cameras, `name=source`, comma-separated (required)
+    FAKE_CAMERAS_RTSP              MediaMTX's RTSP address (rtsp://mediamtx:8554)
+    FAKE_CAMERAS_PASSWORD          what every camera publishes with, as the user named for it
+                                   (none: publish without credentials)
+    FAKE_CAMERAS_DURATION          seconds every video is cut to, a whole number (300)
+    FAKE_CAMERAS_PREPARE_ATTEMPTS  how many times preparing a video is tried (3)
+    FAKE_CAMERAS_SAMPLES           the samples directory (/samples)
+    FAKE_CAMERAS_CACHE             where prepared videos are kept (/cache)
+    FAKE_CAMERAS_STATUS            the file the publisher keeps each camera's progress in, which
+                                   `health` reads (/tmp/fake-cameras.json)
+    FAKE_CAMERAS_FFMPEG            the ffmpeg to run (ffmpeg, from the PATH)
+    FAKE_CAMERAS_PREPARE_RETRY     for tests only: seconds between those attempts (30)
+    FAKE_CAMERAS_STALE_AFTER       for tests only: seconds without a new frame after which
+                                   `health` says a camera is not publishing (5); a hung ffmpeg
+                                   is still killed after HUNG_AFTER (15 s), whatever this is
 """
 
 import asyncio
