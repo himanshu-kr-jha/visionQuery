@@ -15,6 +15,13 @@ made by `logging.makeLogRecord` or built directly with `logging.LogRecord`, or f
 adds after the record is made; the JSON formatter still scrubs all of them on the runtime's
 own handler (ADR 0012).
 
+The factory scrubs a record's exception into `exc_text`, which the standard `Formatter`
+writes instead of rendering `exc_info` again; `exc_info` itself still holds the live
+exception and its traceback, unscrubbed. Code that reads `record.exc_info` directly (a
+handler or formatter that renders the exception itself, or sends the exception object
+elsewhere, as an error tracker's handler does) bypasses that scrubbing, and must scrub what
+it renders itself; the runtime's own JSON formatter scrubs whatever exception text it writes.
+
 Output that does not go through logging is not covered: subprocess stderr, stderr written by
 C libraries, and `print`. Subprocess stderr must be piped and logged line by line (ADR 0012).
 """
