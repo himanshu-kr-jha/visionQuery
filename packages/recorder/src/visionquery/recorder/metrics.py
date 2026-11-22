@@ -13,9 +13,13 @@ __all__ = [
     "CLOCK_VERIFIED",
     "CONNECTIONS",
     "FRAGMENTS",
+    "INDEX_PENDING",
+    "INDEX_UP",
     "QUARANTINED",
     "RECEIVING",
     "SEGMENTS",
+    "SEGMENTS_INDEXED",
+    "SEGMENTS_REFUSED",
     "WALL_OFFSET",
 ]
 
@@ -61,4 +65,25 @@ QUARANTINED = Counter(
     "visionquery_recorder_segments_quarantined",
     "Segments a start could not recover and moved to the quarantine, by camera id.",
     ["camera"],
+)
+SEGMENTS_INDEXED = Counter(
+    "visionquery_recorder_segments_indexed",
+    "Segments newly indexed in the memory, by camera id.",
+    ["camera"],
+)
+SEGMENTS_REFUSED = Counter(
+    "visionquery_recorder_segments_refused",
+    "Segments the memory's index refused, or that could not be indexed, and never will be, by "
+    "camera id.",
+    ["camera"],
+)
+INDEX_PENDING = Gauge(
+    "visionquery_recorder_index_pending",
+    "Segments finished while recording and waiting to be indexed in the memory (those found on "
+    "disk when the recorder starts are caught up on first, and not counted).",
+)
+INDEX_UP = Gauge(
+    "visionquery_recorder_index_up",
+    "1 when the last attempt to reach the memory's segment index succeeded, 0 when it failed or "
+    "none has been made.",
 )

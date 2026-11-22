@@ -168,3 +168,34 @@ def test_cameras_added_and_removed_are_started_and_stopped(
     asyncio.run(run())
 
     assert of(tmp_path, GATE)[-1].reason == "stopped"
+
+
+def test_every_segment_finished_is_told_with_its_cameras_id(
+    both: MediaMTX, ffmpeg: Path, tmp_path: Path
+) -> None:
+    """Rolled, ended and stopped alike, so that each is indexed (`visionquery.recorder.index`)."""
+    told: list[tuple[int, Segment]] = []
+
+    async def run() -> None:
+        fleet = Fleet(
+            tmp_path,
+            sources(both, ffmpeg),
+            TIMING,
+            finished=lambda camera_id, segment: told.append((camera_id, segment)),
+        )
+        fleet.reconcile([DOCK, GATE])
+        try:
+            with both.publishing(DOCK.path, DOCK.path, PASSWORD):
+                await until(lambda: len(of(tmp_path, DOCK)) >= 2, 30)
+                await asyncio.to_thread(both.publish, GATE.path, GATE.path, PASSWORD, 3)
+                await until(lambda: any(s.reason == "stream_ended" for s in of(tmp_path, GATE)), 30)
+        finally:
+            await fleet.stop()
+
+    asyncio.run(run())
+
+    on_disk = [(camera.id, s) for camera in (DOCK, GATE) for s in of(tmp_path, camera)]
+    assert sorted(told, key=lambda t: t[1].segment_id) == sorted(
+        on_disk, key=lambda t: t[1].segment_id
+    )
+    assert {s.reason for _, s in told} >= {"rolled", "stream_ended", "stopped"}

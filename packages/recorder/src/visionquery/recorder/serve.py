@@ -16,11 +16,17 @@ seconds (5), it reads the cameras not removed and starts and stops recording to 
 registry that cannot be read is logged once, as a WARNING, for as long as it cannot (an INFO
 says when it can again), and the cameras already being recorded go on being recorded.
 
+Every Segment a camera finishes is indexed in the memory's segment index, by camera and the
+span it covers, so that any instant resolves to a file and an offset in it; the indexer
+(`visionquery.recorder.index`) first catches up on what is on disk and not indexed, recovered
+Segments included, and while the memory cannot be reached it keeps what is finished until it
+can, without holding up recording.
+
 After each successful read it writes a heartbeat file holding the time until which it counts as
 healthy, three reads on, which `health` (Compose's healthcheck) reads.
 
-On SIGTERM or SIGINT every camera finishes the Segment it is writing (`stopped`), and the
-process exits 0.
+On SIGTERM or SIGINT every camera finishes the Segment it is writing (`stopped`), those
+Segments are indexed (unless the memory fails), and the process exits 0.
 """
 
 import asyncio
@@ -47,6 +53,7 @@ from visionquery.recorder import metrics
 from visionquery.recorder.camera import Timing
 from visionquery.recorder.ffmpeg import Source
 from visionquery.recorder.fleet import Fleet
+from visionquery.recorder.index import Indexer
 from visionquery.recorder.segment import recover
 from visionquery.runtime import Settings, start
 
@@ -192,7 +199,9 @@ async def run(
                 },
             )
         timing = Timing(segment=timedelta(seconds=settings.segment_seconds))
-        fleet = Fleet(footage, source_for(settings.mediamtx), timing)
+        indexer = Indexer(footage, settings.database)
+        indexing = asyncio.create_task(indexer.run(), name="indexer")
+        fleet = Fleet(footage, source_for(settings.mediamtx), timing, finished=indexer.finished)
         registry = _Registry(settings.database)
         try:
             while not stop.is_set():
@@ -208,6 +217,10 @@ async def run(
                     await asyncio.wait_for(stop.wait(), timeout=wait)
         finally:
             await fleet.stop()
+            # The Segments the cameras just finished are indexed before the recorder exits,
+            # unless the memory fails; the next start catches up on what is left.
+            indexer.stop()
+            await indexing
             registry.close()
 
 
